@@ -9,7 +9,11 @@ use maud::{Markup, html};
 use sea_orm::{EntityTrait, QueryOrder};
 use serde::{Deserialize, Serialize};
 
-use crate::{entity::hyperlink, model::hyperlink::HyperlinkInput, server::context::Context};
+use crate::{
+    entity::hyperlink::{self, HyperlinkProcessingState},
+    model::hyperlink::HyperlinkInput,
+    server::context::Context,
+};
 
 use super::html_layout;
 
@@ -37,6 +41,7 @@ struct HyperlinkResponse {
     url: String,
     clicks_count: i32,
     last_clicked_at: Option<String>,
+    processing_state: String,
     created_at: String,
     updated_at: String,
 }
@@ -156,7 +161,9 @@ async fn create_with_kind(state: &Context, input: HyperlinkInput, kind: Response
         Err(msg) => return response_error(kind, StatusCode::BAD_REQUEST, msg),
     };
 
-    match crate::model::hyperlink::insert(&state.connection, input).await {
+    match crate::model::hyperlink::insert(&state.connection, input, state.processing_queue.as_ref())
+        .await
+    {
         Ok(link) => match kind {
             ResponseKind::Text => Redirect::to(&show_path(link.id)).into_response(),
             ResponseKind::Json => (StatusCode::CREATED, Json(to_response(&link))).into_response(),
@@ -253,7 +260,14 @@ async fn update_with_kind(
         Err(msg) => return response_error(kind, StatusCode::BAD_REQUEST, msg),
     };
 
-    match crate::model::hyperlink::update_by_id(&state.connection, id, input).await {
+    match crate::model::hyperlink::update_by_id(
+        &state.connection,
+        id,
+        input,
+        state.processing_queue.as_ref(),
+    )
+    .await
+    {
         Ok(Some(link)) => match kind {
             ResponseKind::Text => Redirect::to(&show_path(link.id)).into_response(),
             ResponseKind::Json => (StatusCode::OK, Json(to_response(&link))).into_response(),
@@ -352,8 +366,18 @@ fn to_response(model: &hyperlink::Model) -> HyperlinkResponse {
         url: model.url.clone(),
         clicks_count: model.clicks_count,
         last_clicked_at: model.last_clicked_at.as_ref().map(ToString::to_string),
+        processing_state: processing_state_name(model.processing_state.clone()).to_string(),
         created_at: model.created_at.to_string(),
         updated_at: model.updated_at.to_string(),
+    }
+}
+
+fn processing_state_name(state: HyperlinkProcessingState) -> &'static str {
+    match state {
+        HyperlinkProcessingState::Waiting => "waiting",
+        HyperlinkProcessingState::Processing => "processing",
+        HyperlinkProcessingState::Processed => "processed",
+        HyperlinkProcessingState::Error => "error",
     }
 }
 
@@ -373,7 +397,7 @@ fn render_index(links: &[hyperlink::Model]) -> Markup {
             } @else {
                 ul class="vstack gap-4" {
                     @for link in links {
-                        li {
+                        li class="hyperlink" {
                             @let created_at_iso = link.created_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
                             @let created_at_human = link
                                 .created_at
@@ -392,6 +416,9 @@ fn render_index(links: &[hyperlink::Model]) -> Markup {
                                         (maud::PreEscaped(format!(
                                             r#"<relative-time datetime="{created_at_iso}">{created_at_human}</relative-time>"#
                                         )))
+                                    }
+                                    span class="link-soft" {
+                                        (processing_state_name(link.processing_state.clone()))
                                     }
                                     span class="link-soft" { (link.clicks_count) " clicks" }
                                     a class="link-soft" href=(format!("/hyperlinks/{}/edit", link.id)) { "Edit" }
@@ -521,9 +548,10 @@ mod tests {
             .expect("in-memory database should initialize");
         initialize_schema(&connection).await;
 
-        let app = Router::<Context>::new()
-            .merge(links())
-            .with_state(Context { connection });
+        let app = Router::<Context>::new().merge(links()).with_state(Context {
+            connection,
+            processing_queue: None,
+        });
         TestServer::new(app).expect("test server should initialize")
     }
 
@@ -538,6 +566,9 @@ mod tests {
                         url varchar NOT NULL,
                         clicks_count integer NOT NULL DEFAULT 0,
                         last_clicked_at datetime_text NULL,
+                        processing_state varchar NOT NULL DEFAULT 'waiting',
+                        processing_started_at datetime_text NULL,
+                        processed_at datetime_text NULL,
                         created_at datetime_text NOT NULL,
                         updated_at datetime_text NOT NULL
                     );

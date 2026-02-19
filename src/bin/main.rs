@@ -33,9 +33,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("info,sea_orm::driver::sqlx_sqlite=debug,sqlx::query=off")
-    });
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,sea_orm::driver::sqlx_sqlite=debug"))
+        .add_directive("sqlx::query=off".parse().expect("directive should parse"));
 
     _ = tracing_subscriber::registry()
         .with(env_filter)

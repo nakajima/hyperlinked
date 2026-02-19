@@ -98,7 +98,7 @@ pub async fn import_file(
             }
         };
 
-        match hyperlink::upsert_by_url(connection, normalized, parsed.created_at).await {
+        match hyperlink::upsert_by_url(connection, normalized, parsed.created_at, None).await {
             Ok(UpsertResult::Inserted) => report.summary.inserted += 1,
             Ok(UpsertResult::Updated) => report.summary.updated += 1,
             Err(err) => {
@@ -291,6 +291,9 @@ mod tests {
                         url varchar NOT NULL,
                         clicks_count integer NOT NULL DEFAULT 0,
                         last_clicked_at datetime_text NULL,
+                        processing_state varchar NOT NULL DEFAULT 'waiting',
+                        processing_started_at datetime_text NULL,
+                        processed_at datetime_text NULL,
                         created_at datetime_text NOT NULL,
                         updated_at datetime_text NOT NULL
                     );
@@ -471,6 +474,7 @@ mod tests {
                 title: "Old".to_string(),
                 url: "https://example.com".to_string(),
             },
+            None,
         )
         .await
         .expect("seed row should insert");

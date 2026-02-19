@@ -1,29 +1,28 @@
 use reqwest::{Url, header::CONTENT_TYPE};
+use sea_orm::ActiveValue::Set;
+use sea_orm::DatabaseConnection;
 use std::net::IpAddr;
 use std::time::Duration;
 use tokio::net::lookup_host;
 
-pub async fn normalize_title_and_url(
-    raw_title: &str,
-    raw_url: &str,
-) -> Result<(String, String), String> {
-    let mut title = raw_title.trim().to_string();
-    let url = raw_url.trim().to_string();
-    if url.is_empty() {
-        return Err("url must not be empty".to_string());
-    }
+use crate::entity::hyperlink;
+use crate::processors::processor::{ProcessingError, Processor};
 
-    if title.is_empty() {
-        title = fetch_title_with_fallback(&url).await;
-    }
+pub struct TitleFetcher {}
 
-    Ok((title, url))
-}
-
-async fn fetch_title_with_fallback(url: &str) -> String {
-    match fetch_title_from_url(url).await {
-        Ok(Some(title)) if !title.is_empty() => title,
-        _ => url.to_string(),
+impl Processor for TitleFetcher {
+    async fn process<'a>(
+        &'a mut self,
+        hyperlink: &'a mut hyperlink::ActiveModel,
+        _connection: &'a DatabaseConnection,
+    ) -> Result<(), super::processor::ProcessingError> {
+        if let Some(title) = fetch_title_from_url(hyperlink.url.as_ref())
+            .await
+            .map_err(ProcessingError::FetchError)?
+        {
+            hyperlink.title = Set(title);
+        }
+        Ok(())
     }
 }
 

@@ -11,7 +11,11 @@ pub mod hyperlinks;
 #[instrument(level = tracing::Level::TRACE)]
 pub async fn start(host: &str, port: &str) {
     let connection = crate::db::connection::init().await.unwrap();
-    let state = context::Context { connection };
+    let processing_queue = crate::processors::worker::spawn(connection.clone());
+    let state = context::Context {
+        connection,
+        processing_queue: Some(processing_queue),
+    };
     let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/server/assets");
     let app = Router::<context::Context>::new()
         .route("/", get(|| async { "Hello, World!" }))

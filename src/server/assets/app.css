@@ -78,6 +78,119 @@ h1 {
   font-size: var(--text-3xl);
 }
 
+label {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+label > input {
+  margin-top: var(--form-label-gap);
+}
+
+input,
+textarea,
+select {
+  background-color: var(--form-control-bg);
+  border: 1px solid var(--form-control-border);
+  border-radius: var(--form-control-radius);
+  color: var(--form-control-text);
+  padding: 0.2rem 0.4rem;
+  min-width: 80%;
+}
+
+input,
+textarea,
+select,
+button:not(.btn-link) {
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+}
+
+input {
+  height: 2rem;
+  line-height: 1;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--form-control-placeholder);
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: none;
+  border-color: var(--form-control-border-focus);
+  box-shadow: var(--form-focus-ring);
+}
+
+input:user-invalid,
+textarea:user-invalid,
+select:user-invalid {
+  border-color: var(--form-control-border-invalid);
+}
+
+input:disabled,
+textarea:disabled,
+select:disabled,
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+button {
+  border-radius: var(--form-control-radius);
+}
+
+button:not(.btn-link) {
+  background-color: oklch(27% 0.018 264);
+  border: 1px solid oklch(40% 0.018 264);
+}
+
+button:not(.btn-link):hover {
+  background-color: oklch(31% 0.02 264);
+}
+
+button:not(.btn-link):active {
+  background-color: oklch(24% 0.016 264);
+}
+
+button[type="submit"]:not(.btn-link) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 2rem;
+  line-height: 1;
+  font-weight: 600;
+  color: oklch(18% 0.01 264);
+  background-color: oklch(74% 0.076 308);
+  border-color: oklch(68% 0.078 308);
+  margin-top: 1rem;
+  padding: 0 0.5rem;
+  font-size: var(--text-sm);
+}
+
+button[type="submit"]:not(.btn-link):hover {
+  background-color: oklch(78% 0.072 308);
+  border-color: oklch(72% 0.075 308);
+}
+
+button[type="submit"]:not(.btn-link):active {
+  background-color: oklch(68% 0.078 308);
+  border-color: oklch(62% 0.08 308);
+}
+
+.hyperlink + .hyperlink {
+  margin-top: 1rem;
+}
+
 .logo {
   height: 48px;
   width: 48px;
@@ -163,112 +276,4 @@ h1 {
   vertical-align: baseline;
   border-radius: 0.25rem;
   color: black;
-}
-
-label {
-  display: block;
-  font-size: var(--text-sm);
-  font-weight: 500;
-}
-
-label > input {
-  margin-top: var(--form-label-gap);
-}
-
-input,
-textarea,
-select {
-  background-color: var(--form-control-bg);
-  border: 1px solid var(--form-control-border);
-  border-radius: var(--form-control-radius);
-  color: var(--form-control-text);
-  padding: 0.2rem 0.4rem;
-  min-width: 80%;
-}
-
-input,
-textarea,
-select,
-button:not(.btn-link) {
-  font-family:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    "Helvetica Neue",
-    Arial,
-    sans-serif;
-}
-
-input,
-button {
-  height: 2rem;
-  line-height: 2rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-input::placeholder,
-textarea::placeholder {
-  color: var(--form-control-placeholder);
-}
-
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible,
-button:focus-visible {
-  outline: none;
-  border-color: var(--form-control-border-focus);
-  box-shadow: var(--form-focus-ring);
-}
-
-input:user-invalid,
-textarea:user-invalid,
-select:user-invalid {
-  border-color: var(--form-control-border-invalid);
-}
-
-input:disabled,
-textarea:disabled,
-select:disabled,
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.65;
-}
-
-button {
-  border-radius: var(--form-control-radius);
-}
-
-button:not(.btn-link) {
-  background-color: oklch(27% 0.018 264);
-  border: 1px solid oklch(40% 0.018 264);
-}
-
-button:not(.btn-link):hover {
-  background-color: oklch(31% 0.02 264);
-}
-
-button:not(.btn-link):active {
-  background-color: oklch(24% 0.016 264);
-}
-
-button[type="submit"]:not(.btn-link) {
-  font-weight: 600;
-  color: oklch(18% 0.01 264);
-  background-color: oklch(74% 0.076 308);
-  border-color: oklch(68% 0.078 308);
-  margin-top: 1rem;
-  padding: 0 0.5rem;
-  font-size: var(--text-sm);
-}
-
-button[type="submit"]:not(.btn-link):hover {
-  background-color: oklch(78% 0.072 308);
-  border-color: oklch(72% 0.075 308);
-}
-
-button[type="submit"]:not(.btn-link):active {
-  background-color: oklch(68% 0.078 308);
-  border-color: oklch(62% 0.08 308);
 }

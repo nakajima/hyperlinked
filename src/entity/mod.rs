@@ -3,3 +3,4 @@
 pub mod prelude;
 
 pub mod hyperlink;
+pub mod hyperlink_processing_error;
