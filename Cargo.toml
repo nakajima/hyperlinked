@@ -1,0 +1,35 @@
+[package]
+name = "hyperlinked"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = { version = "0.8.8", features = ["macros", "multipart", "ws"] }
+clap = { version = "4.5.49", features = ["derive", "env"] }
+maud = "0.27.0"
+notify = "8.2.0"
+reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+serde_urlencoded = "0.7.1"
+sea-orm = { version = "1.1.19", features = [
+  "sqlx-sqlite",
+  "runtime-tokio",
+  "debug-print",
+  "seaography",
+  "with-chrono",
+  "with-json",
+
+] }
+tokio = { version = "1.49.0", features = ["full"] }
+tower-http = { version = "0.6.6", features = ["fs"] }
+tracing = { version = "0.1.44" }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing-tree = "0.4.0"
+
+[dev-dependencies]
+axum-test = "18.7.0"
+
+[profile.dev-hot]
+inherits = "dev"
+debug = 0
