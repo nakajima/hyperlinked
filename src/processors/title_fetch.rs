@@ -11,11 +11,13 @@ use crate::processors::processor::{ProcessingError, Processor};
 pub struct TitleFetcher {}
 
 impl Processor for TitleFetcher {
+    type Output = ();
+
     async fn process<'a>(
         &'a mut self,
         hyperlink: &'a mut hyperlink::ActiveModel,
         _connection: &'a DatabaseConnection,
-    ) -> Result<(), super::processor::ProcessingError> {
+    ) -> Result<Self::Output, super::processor::ProcessingError> {
         if let Some(title) = fetch_title_from_url(hyperlink.url.as_ref())
             .await
             .map_err(ProcessingError::FetchError)?

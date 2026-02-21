@@ -1,0 +1,41 @@
+<% if present_kinds.is_empty() { %>
+  <p class="text-sm">No artifacts available yet.</p>
+<% } else { %>
+  <div>
+    <table class="mono text-sm">
+      <thead>
+        <tr>
+          <th scope="col">Artifact</th>
+          <th scope="col">Content type</th>
+          <th scope="col">Size</th>
+          <th scope="col">Created</th>
+          <th scope="col">Download</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% for kind in &present_kinds { %>
+          <% let slug = artifact_kind_slug(kind); %>
+          <% let label = artifact_kind_label(kind); %>
+          <% if let Some(artifact) = self.artifact_for(kind) { %>
+            <tr>
+              <td><%= label %></td>
+              <td class="artifacts-content-type-cell"><%= artifact.content_type.as_str() %></td>
+              <td><%= format_size_bytes(artifact.size_bytes) %></td>
+              <td><%- render_relative_time(&artifact.created_at) %></td>
+              <td><a class="link-soft" href="<%= self.artifact_download_path(kind) %>">Download <%= slug %></a></td>
+            </tr>
+          <% } %>
+        <% } %>
+      </tbody>
+    </table>
+  </div>
+<% } %>
+
+<% if !present_kinds.is_empty() && !missing_labels.is_empty() { %>
+  <p class="text-sm">
+    Missing:
+    <% for (idx, label) in missing_labels.iter().enumerate() { %>
+      <% if idx > 0 { %>, <% } %><%= label %>
+    <% } %>
+  </p>
+<% } %>

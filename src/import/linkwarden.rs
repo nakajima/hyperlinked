@@ -75,12 +75,7 @@ pub async fn import_file(
         let parsed = match parse_row(row) {
             Ok(parsed) => parsed,
             Err(message) => {
-                report.summary.failed += 1;
-                report.failures.push(ImportFailure {
-                    row: row_num,
-                    message,
-                    entry_json: row_json(row),
-                });
+                push_failure(&mut report, row_num, message, row);
                 continue;
             }
         };
@@ -88,12 +83,7 @@ pub async fn import_file(
         let normalized = match hyperlink::validate_and_normalize(parsed.input).await {
             Ok(input) => input,
             Err(message) => {
-                report.summary.failed += 1;
-                report.failures.push(ImportFailure {
-                    row: row_num,
-                    message,
-                    entry_json: row_json(row),
-                });
+                push_failure(&mut report, row_num, message, row);
                 continue;
             }
         };
@@ -101,21 +91,23 @@ pub async fn import_file(
         match hyperlink::upsert_by_url(connection, normalized, parsed.created_at, None).await {
             Ok(UpsertResult::Inserted) => report.summary.inserted += 1,
             Ok(UpsertResult::Updated) => report.summary.updated += 1,
-            Err(err) => {
-                report.summary.failed += 1;
-                report.failures.push(ImportFailure {
-                    row: row_num,
-                    message: format!("database error: {err}"),
-                    entry_json: row_json(row),
-                });
-            }
+            Err(err) => push_failure(&mut report, row_num, format!("database error: {err}"), row),
         }
     }
 
     Ok(report)
 }
 
-fn detect_rows_auto<'a>(root: &'a Value) -> Option<Vec<&'a Value>> {
+fn push_failure(report: &mut ImportReport, row_num: usize, message: String, row: &Value) {
+    report.summary.failed += 1;
+    report.failures.push(ImportFailure {
+        row: row_num,
+        message,
+        entry_json: row_json(row),
+    });
+}
+
+fn detect_rows_auto(root: &Value) -> Option<Vec<&Value>> {
     if let Some(rows) = detect_collection_links(root) {
         return Some(rows);
     }
@@ -146,7 +138,7 @@ fn detect_rows_auto<'a>(root: &'a Value) -> Option<Vec<&'a Value>> {
     find_link_array(root).map(|rows| rows.iter().collect())
 }
 
-fn detect_collection_links<'a>(root: &'a Value) -> Option<Vec<&'a Value>> {
+fn detect_collection_links(root: &Value) -> Option<Vec<&Value>> {
     let object = root.as_object()?;
     let collections = object.get("collections")?.as_array()?;
     let mut rows = Vec::new();
@@ -289,6 +281,8 @@ mod tests {
                         id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
                         title varchar NOT NULL,
                         url varchar NOT NULL,
+                        raw_url varchar NOT NULL DEFAULT '',
+                        discovery_depth integer NOT NULL DEFAULT 0,
                         clicks_count integer NOT NULL DEFAULT 0,
                         last_clicked_at datetime_text NULL,
                         processing_state varchar NOT NULL DEFAULT 'waiting',
@@ -324,10 +318,26 @@ mod tests {
         path
     }
 
+    async fn import_from_json(
+        connection: &DatabaseConnection,
+        content: &str,
+        suffix: &str,
+    ) -> ImportReport {
+        let path = write_temp_file(content, suffix).await;
+        let report = import_file(connection, &path, ImportFormat::Auto)
+            .await
+            .expect("import should complete");
+        tokio::fs::remove_file(path)
+            .await
+            .expect("temp file should be removed");
+        report
+    }
+
     #[tokio::test]
     async fn imports_top_level_array() {
         let connection = new_connection().await;
-        let path = write_temp_file(
+        let report = import_from_json(
+            &connection,
             r#"[
                 {"title":"Example","url":"https://example.com"},
                 {"name":"Rust","uri":"https://www.rust-lang.org"}
@@ -335,10 +345,6 @@ mod tests {
             "array",
         )
         .await;
-
-        let report = import_file(&connection, &path, ImportFormat::Auto)
-            .await
-            .expect("import should succeed");
 
         assert_eq!(report.summary.total, 2);
         assert_eq!(report.summary.inserted, 2);
@@ -350,16 +356,13 @@ mod tests {
             .await
             .expect("links should load");
         assert_eq!(links.len(), 2);
-
-        tokio::fs::remove_file(path)
-            .await
-            .expect("temp file should be removed");
     }
 
     #[tokio::test]
     async fn imports_created_at_when_present() {
         let connection = new_connection().await;
-        let path = write_temp_file(
+        let report = import_from_json(
+            &connection,
             r#"[
                 {
                     "title": "Example",
@@ -370,10 +373,6 @@ mod tests {
             "created-at",
         )
         .await;
-
-        let report = import_file(&connection, &path, ImportFormat::Auto)
-            .await
-            .expect("import should succeed");
 
         assert_eq!(report.summary.total, 1);
         assert_eq!(report.summary.inserted, 1);
@@ -388,16 +387,13 @@ mod tests {
         let expected = DateTime::parse_from_str("2025-07-25T22:41:56.384", "%Y-%m-%dT%H:%M:%S%.f")
             .expect("timestamp should parse");
         assert_eq!(imported.created_at, expected);
-
-        tokio::fs::remove_file(path)
-            .await
-            .expect("temp file should be removed");
     }
 
     #[tokio::test]
     async fn imports_object_with_nested_data_links_array() {
         let connection = new_connection().await;
-        let path = write_temp_file(
+        let report = import_from_json(
+            &connection,
             r#"{
                 "data": {
                     "links": [
@@ -409,24 +405,17 @@ mod tests {
         )
         .await;
 
-        let report = import_file(&connection, &path, ImportFormat::Auto)
-            .await
-            .expect("import should succeed");
-
         assert_eq!(report.summary.total, 1);
         assert_eq!(report.summary.inserted, 1);
         assert_eq!(report.summary.updated, 0);
         assert_eq!(report.summary.failed, 0);
-
-        tokio::fs::remove_file(path)
-            .await
-            .expect("temp file should be removed");
     }
 
     #[tokio::test]
     async fn imports_collection_links_across_multiple_collections() {
         let connection = new_connection().await;
-        let path = write_temp_file(
+        let report = import_from_json(
+            &connection,
             r#"{
                 "aiPredefinedTags": ["Compiler", "Rust"],
                 "collections": [
@@ -449,37 +438,30 @@ mod tests {
         )
         .await;
 
-        let report = import_file(&connection, &path, ImportFormat::Auto)
-            .await
-            .expect("import should complete");
-
         assert_eq!(report.summary.total, 3);
         assert_eq!(report.summary.inserted, 2);
         assert_eq!(report.summary.updated, 0);
         assert_eq!(report.summary.failed, 1);
         assert_eq!(report.failures.len(), 1);
-
-        tokio::fs::remove_file(path)
-            .await
-            .expect("temp file should be removed");
     }
 
     #[tokio::test]
     async fn updates_existing_row_by_url() {
         let connection = new_connection().await;
 
-        let inserted = crate::model::hyperlink::insert(
-            &connection,
-            HyperlinkInput {
-                title: "Old".to_string(),
-                url: "https://example.com".to_string(),
-            },
-            None,
-        )
+        let normalized = crate::model::hyperlink::validate_and_normalize(HyperlinkInput {
+            title: "Old".to_string(),
+            url: "https://example.com".to_string(),
+        })
         .await
-        .expect("seed row should insert");
+        .expect("seed hyperlink should normalize");
 
-        let path = write_temp_file(
+        let inserted = crate::model::hyperlink::insert(&connection, normalized, None)
+            .await
+            .expect("seed row should insert");
+
+        let report = import_from_json(
+            &connection,
             r#"[
                 {
                     "title":"New Title",
@@ -490,10 +472,6 @@ mod tests {
             "upsert",
         )
         .await;
-
-        let report = import_file(&connection, &path, ImportFormat::Auto)
-            .await
-            .expect("import should succeed");
 
         assert_eq!(report.summary.total, 1);
         assert_eq!(report.summary.inserted, 0);
@@ -509,16 +487,13 @@ mod tests {
         let expected = DateTime::parse_from_str("2021-06-01T12:30:45.000", "%Y-%m-%dT%H:%M:%S%.f")
             .expect("timestamp should parse");
         assert_eq!(updated.created_at, expected);
-
-        tokio::fs::remove_file(path)
-            .await
-            .expect("temp file should be removed");
     }
 
     #[tokio::test]
     async fn continues_after_row_errors() {
         let connection = new_connection().await;
-        let path = write_temp_file(
+        let report = import_from_json(
+            &connection,
             r#"[
                 {"title":"Valid","url":"https://example.com"},
                 {"title":"Missing URL"},
@@ -529,18 +504,10 @@ mod tests {
         )
         .await;
 
-        let report = import_file(&connection, &path, ImportFormat::Auto)
-            .await
-            .expect("import should complete");
-
         assert_eq!(report.summary.total, 4);
         assert_eq!(report.summary.inserted, 2);
         assert_eq!(report.summary.updated, 0);
         assert_eq!(report.summary.failed, 2);
         assert_eq!(report.failures.len(), 2);
-
-        tokio::fs::remove_file(path)
-            .await
-            .expect("temp file should be removed");
     }
 }

@@ -1,0 +1,5 @@
+<section>
+  <h2><%= status_code %> <%= status_text %></h2>
+  <p><%= message %></p>
+  <p><a href="<%= back_href %>"><%= back_label %></a></p>
+</section>

@@ -37,7 +37,7 @@ async fn main() {
         .unwrap_or_else(|_| EnvFilter::new("info,sea_orm::driver::sqlx_sqlite=debug"))
         .add_directive("sqlx::query=off".parse().expect("directive should parse"));
 
-    _ = tracing_subscriber::registry()
+    tracing_subscriber::registry()
         .with(env_filter)
         .with(
             HierarchicalLayer::new(2)
@@ -64,7 +64,7 @@ async fn main() {
 async fn run() -> Result<i32, String> {
     match Cli::parse().command {
         Commands::Serve { host, port } => {
-            hyperlinked::server::start(&host, &port).await;
+            hyperlinked::server::start(&host, &port).await?;
             Ok(0)
         }
         Commands::Dev { host, port } => {

@@ -4,4 +4,5 @@ pub mod entity;
 pub mod import;
 pub mod model;
 pub mod processors;
+pub mod queue;
 pub mod server;

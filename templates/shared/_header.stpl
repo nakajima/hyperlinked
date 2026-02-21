@@ -1,0 +1,16 @@
+<header class="stack hstack align-center">
+  <h1 class="hstack align-center">
+    <a href="/hyperlinks">
+      <span>Hyperlinks</span>
+    </a>
+  </h1>
+
+  <span class="logo" aria-hidden="true"><%- self.pointer_logo_svg %></span>
+  <span class="spacer" aria-hidden="true"></span>
+
+  <nav class="hstack gap-4">
+    <a href="/hyperlinks/new">Add</a>
+    <a href="/jobs">Queue</a>
+    <a href="/admin">Admin</a>
+  </nav>
+</header>

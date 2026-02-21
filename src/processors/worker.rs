@@ -1,114 +1,230 @@
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect,
+    DatabaseConnection, EntityTrait,
     entity::prelude::{DateTime, DateTimeUtc},
 };
 
 use crate::{
-    entity::hyperlink::{self, HyperlinkProcessingState},
-    model::{hyperlink::ProcessingQueueSender, hyperlink_processing_error},
+    entity::{
+        hyperlink,
+        hyperlink_processing_job::{self, HyperlinkProcessingJobKind, HyperlinkProcessingJobState},
+    },
+    model::{
+        hyperlink::ROOT_DISCOVERY_DEPTH,
+        hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
+    },
     processors::pipeline::Pipeline,
 };
 
-pub fn spawn(connection: DatabaseConnection) -> ProcessingQueueSender {
-    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<i32>();
-
-    let worker_connection = connection.clone();
-    tokio::spawn(async move {
-        while let Some(hyperlink_id) = receiver.recv().await {
-            if let Err(error) = process_one(&worker_connection, hyperlink_id).await {
-                tracing::error!(
-                    hyperlink_id,
-                    error = %error,
-                    "failed to process hyperlink in background worker"
-                );
-            }
-        }
-    });
-
-    let bootstrap_connection = connection;
-    let bootstrap_sender = sender.clone();
-    tokio::spawn(async move {
-        if let Err(error) = enqueue_waiting(&bootstrap_connection, &bootstrap_sender).await {
-            tracing::error!(error = %error, "failed to enqueue waiting hyperlinks");
-        }
-    });
-
-    sender
-}
-
-async fn enqueue_waiting(
+pub async fn process_job(
     connection: &DatabaseConnection,
     sender: &ProcessingQueueSender,
+    job_id: i32,
 ) -> Result<(), sea_orm::DbErr> {
-    let waiting_ids = hyperlink::Entity::find()
-        .select_only()
-        .column(hyperlink::Column::Id)
-        .filter(hyperlink::Column::ProcessingState.eq(HyperlinkProcessingState::Waiting))
-        .into_tuple::<i32>()
-        .all(connection)
-        .await?;
-
-    for hyperlink_id in waiting_ids {
-        if sender.send(hyperlink_id).is_err() {
-            tracing::warn!(
-                hyperlink_id,
-                "processing queue dropped while enqueueing waiting hyperlinks"
-            );
-            break;
-        }
-    }
-
-    Ok(())
-}
-
-async fn process_one(
-    connection: &DatabaseConnection,
-    hyperlink_id: i32,
-) -> Result<(), sea_orm::DbErr> {
-    let Some(model) = hyperlink::Entity::find()
-        .filter(hyperlink::Column::Id.eq(hyperlink_id))
-        .filter(hyperlink::Column::ProcessingState.eq(HyperlinkProcessingState::Waiting))
+    let Some(model) = hyperlink_processing_job::Entity::find_by_id(job_id)
         .one(connection)
         .await?
     else {
         return Ok(());
     };
 
-    let mut processing_model: hyperlink::ActiveModel = model.into();
-    processing_model.processing_state = Set(HyperlinkProcessingState::Processing);
-    processing_model.processing_started_at = Set(Some(now_utc()));
-    processing_model.processed_at = Set(None);
-    processing_model.updated_at = Set(now_utc());
-    let processing_model = processing_model.update(connection).await?;
+    if matches!(
+        model.state,
+        HyperlinkProcessingJobState::Succeeded | HyperlinkProcessingJobState::Failed
+    ) {
+        return Ok(());
+    }
 
-    let mut processing_active_model: hyperlink::ActiveModel = processing_model.into();
-    let mut pipeline = Pipeline::new(&mut processing_active_model);
-    match pipeline.process(connection).await {
-        Ok(()) => {
-            processing_active_model.processing_state = Set(HyperlinkProcessingState::Processed);
-            processing_active_model.processing_started_at = Set(None);
-            processing_active_model.processed_at = Set(Some(now_utc()));
-            processing_active_model.updated_at = Set(now_utc());
-            processing_active_model.update(connection).await?;
+    let now = now_utc();
+    let started_at = model.started_at.or(Some(now));
+    let mut job_active_model: hyperlink_processing_job::ActiveModel = model.into();
+    job_active_model.state = Set(HyperlinkProcessingJobState::Running);
+    job_active_model.started_at = Set(started_at);
+    job_active_model.finished_at = Set(None);
+    job_active_model.error_message = Set(None);
+    job_active_model.updated_at = Set(now);
+    let running_job = job_active_model.update(connection).await?;
+
+    let Some(hyperlink_model) = hyperlink::Entity::find_by_id(running_job.hyperlink_id)
+        .one(connection)
+        .await?
+    else {
+        mark_job_failed(
+            connection,
+            running_job.id,
+            "hyperlink does not exist for queued processing job",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let hyperlink_discovery_depth = hyperlink_model.discovery_depth;
+    let mut hyperlink_active_model: hyperlink::ActiveModel = hyperlink_model.into();
+    let mut pipeline = Pipeline::new(
+        &mut hyperlink_active_model,
+        running_job.id,
+        Some(sender.clone()),
+    );
+
+    match running_job.kind {
+        HyperlinkProcessingJobKind::Snapshot => match pipeline.process_snapshot(connection).await {
+            Ok(_) => {
+                hyperlink_active_model.updated_at = Set(now_utc());
+                hyperlink_active_model.update(connection).await?;
+                mark_job_succeeded(connection, running_job.id).await?;
+                enqueue_readability_job(connection, sender, running_job.hyperlink_id).await?;
+            }
+            Err(error) => {
+                mark_job_failed(connection, running_job.id, &error.to_string()).await?;
+                tracing::warn!(
+                    hyperlink_id = running_job.hyperlink_id,
+                    job_id = running_job.id,
+                    kind = "snapshot",
+                    error = %error,
+                    "hyperlink processing job failed"
+                );
+            }
+        },
+        HyperlinkProcessingJobKind::Readability => {
+            match pipeline.process_readability(connection).await {
+                Ok(_) => {
+                    mark_job_succeeded(connection, running_job.id).await?;
+                    if should_enqueue_sublink_discovery(hyperlink_discovery_depth) {
+                        enqueue_sublink_discovery_job(connection, sender, running_job.hyperlink_id)
+                            .await?;
+                    }
+                }
+                Err(error) => {
+                    mark_job_failed(connection, running_job.id, &error.to_string()).await?;
+                    tracing::warn!(
+                        hyperlink_id = running_job.hyperlink_id,
+                        job_id = running_job.id,
+                        kind = "readability",
+                        error = %error,
+                        "hyperlink processing job failed"
+                    );
+                }
+            }
         }
-        Err(error) => {
-            let message = error.to_string();
-            processing_active_model.processing_state = Set(HyperlinkProcessingState::Error);
-            processing_active_model.processing_started_at = Set(None);
-            processing_active_model.processed_at = Set(None);
-            processing_active_model.updated_at = Set(now_utc());
-            processing_active_model.update(connection).await?;
-            hyperlink_processing_error::insert_new_attempt(connection, hyperlink_id, &message)
-                .await?;
-            tracing::warn!(hyperlink_id, error = %message, "hyperlink processing failed");
+        HyperlinkProcessingJobKind::SublinkDiscovery => {
+            match pipeline.process_sublink_discovery(connection).await {
+                Ok(_) => {
+                    mark_job_succeeded(connection, running_job.id).await?;
+                }
+                Err(error) => {
+                    mark_job_failed(connection, running_job.id, &error.to_string()).await?;
+                    tracing::warn!(
+                        hyperlink_id = running_job.hyperlink_id,
+                        job_id = running_job.id,
+                        kind = "sublink_discovery",
+                        error = %error,
+                        "hyperlink processing job failed"
+                    );
+                }
+            }
         }
     }
 
     Ok(())
 }
 
+async fn enqueue_readability_job(
+    connection: &DatabaseConnection,
+    sender: &ProcessingQueueSender,
+    hyperlink_id: i32,
+) -> Result<(), sea_orm::DbErr> {
+    hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
+        connection,
+        hyperlink_id,
+        HyperlinkProcessingJobKind::Readability,
+        Some(sender),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn enqueue_sublink_discovery_job(
+    connection: &DatabaseConnection,
+    sender: &ProcessingQueueSender,
+    hyperlink_id: i32,
+) -> Result<(), sea_orm::DbErr> {
+    hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
+        connection,
+        hyperlink_id,
+        HyperlinkProcessingJobKind::SublinkDiscovery,
+        Some(sender),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn mark_job_succeeded(
+    connection: &DatabaseConnection,
+    job_id: i32,
+) -> Result<(), sea_orm::DbErr> {
+    update_job_state(
+        connection,
+        job_id,
+        HyperlinkProcessingJobState::Succeeded,
+        None,
+    )
+    .await
+}
+
+async fn mark_job_failed(
+    connection: &DatabaseConnection,
+    job_id: i32,
+    error_message: &str,
+) -> Result<(), sea_orm::DbErr> {
+    update_job_state(
+        connection,
+        job_id,
+        HyperlinkProcessingJobState::Failed,
+        Some(error_message.to_string()),
+    )
+    .await
+}
+
+async fn update_job_state(
+    connection: &DatabaseConnection,
+    job_id: i32,
+    state: HyperlinkProcessingJobState,
+    error_message: Option<String>,
+) -> Result<(), sea_orm::DbErr> {
+    let Some(model) = hyperlink_processing_job::Entity::find_by_id(job_id)
+        .one(connection)
+        .await?
+    else {
+        return Ok(());
+    };
+
+    let mut active_model: hyperlink_processing_job::ActiveModel = model.into();
+    active_model.state = Set(state);
+    active_model.finished_at = Set(Some(now_utc()));
+    active_model.error_message = Set(error_message);
+    active_model.updated_at = Set(now_utc());
+    active_model.update(connection).await?;
+    Ok(())
+}
+
 fn now_utc() -> DateTime {
     DateTimeUtc::from(std::time::SystemTime::now()).naive_utc()
+}
+
+fn should_enqueue_sublink_discovery(discovery_depth: i32) -> bool {
+    discovery_depth == ROOT_DISCOVERY_DEPTH
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_root_hyperlinks_enqueue_sublink_discovery() {
+        assert!(should_enqueue_sublink_discovery(ROOT_DISCOVERY_DEPTH));
+        assert!(!should_enqueue_sublink_discovery(
+            crate::model::hyperlink::DISCOVERED_DISCOVERY_DEPTH
+        ));
+    }
 }

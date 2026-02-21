@@ -2,21 +2,6 @@
 
 use sea_orm::entity::prelude::*;
 
-#[derive(
-    Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, serde::Serialize, serde::Deserialize,
-)]
-#[sea_orm(rs_type = "String", db_type = "String(StringLen::None)")]
-pub enum HyperlinkProcessingState {
-    #[sea_orm(string_value = "waiting")]
-    Waiting,
-    #[sea_orm(string_value = "processing")]
-    Processing,
-    #[sea_orm(string_value = "processed")]
-    Processed,
-    #[sea_orm(string_value = "error")]
-    Error,
-}
-
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "hyperlink")]
 pub struct Model {
@@ -24,25 +9,40 @@ pub struct Model {
     pub id: i32,
     pub title: String,
     pub url: String,
+    pub raw_url: String,
+    pub discovery_depth: i32,
     pub clicks_count: i32,
     pub last_clicked_at: Option<DateTime>,
-    pub processing_state: HyperlinkProcessingState,
-    pub processing_started_at: Option<DateTime>,
-    pub processed_at: Option<DateTime>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::hyperlink_processing_error::Entity")]
-    HyperlinkProcessingError,
+    #[sea_orm(has_many = "super::hyperlink_processing_job::Entity")]
+    HyperlinkProcessingJob,
+    #[sea_orm(has_many = "super::hyperlink_artifact::Entity")]
+    HyperlinkArtifact,
 }
 
-impl Related<super::hyperlink_processing_error::Entity> for Entity {
+impl Related<super::hyperlink_processing_job::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::HyperlinkProcessingError.def()
+        Relation::HyperlinkProcessingJob.def()
     }
+}
+
+impl Related<super::hyperlink_artifact::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::HyperlinkArtifact.def()
+    }
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelatedEntity)]
+pub enum RelatedEntity {
+    #[sea_orm(entity = "super::hyperlink_processing_job::Entity")]
+    HyperlinkProcessingJob,
+    #[sea_orm(entity = "super::hyperlink_artifact::Entity")]
+    HyperlinkArtifact,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

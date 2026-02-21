@@ -1,0 +1,53 @@
+<section class="show-page vstack gap-4" aria-labelledby="admin-heading">
+  <article class="show-overview vstack gap-2">
+    <p class="show-kicker text-sm leading-tight link-soft">Site admin</p>
+    <h2 id="admin-heading" class="show-title">Admin tasks</h2>
+    <p class="text-sm leading-tight link-soft">Maintenance operations for the processing pipeline.</p>
+  </article>
+
+  <section class="show-diagnostics vstack gap-3">
+    <h3 class="card-title">Process all missing artifacts</h3>
+    <div class="vstack gap-2">
+      <% if let Some(last_run) = self.last_run { %>
+        <p class="text-sm leading-tight">
+          Last run queued <%= last_run.snapshot_queued %> snapshot job(s) and <%= last_run.readability_queued %> readability job(s).
+        </p>
+      <% } %>
+
+      <div class="artifacts-table-wrap" aria-label="Missing artifacts summary">
+        <table class="artifacts-table">
+          <thead>
+            <tr>
+              <th>Total links</th>
+              <th>Missing source</th>
+              <th>Missing readability</th>
+              <th>Snapshot active</th>
+              <th>Readability active</th>
+              <th>Snapshot to queue</th>
+              <th>Readability to queue</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><%= self.summary.total_hyperlinks %></td>
+              <td><%= self.summary.missing_source %></td>
+              <td><%= self.summary.missing_readability %></td>
+              <td><%= self.summary.snapshot_already_processing %></td>
+              <td><%= self.summary.readability_already_processing %></td>
+              <td><%= self.summary.snapshot_will_queue %></td>
+              <td><%= self.summary.readability_will_queue %></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <form
+        action="/admin/process-missing-artifacts"
+        method="post"
+        data-confirm="Queue snapshot/readability jobs for all hyperlinks missing required artifacts?"
+      >
+        <input type="submit" value="Process all missing artifacts"<% if !self.has_missing_artifacts_to_process { %> disabled<% } %> />
+      </form>
+    </div>
+  </section>
+</section>

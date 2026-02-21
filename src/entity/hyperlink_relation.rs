@@ -3,13 +3,12 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "hyperlink_processing_error")]
+#[sea_orm(table_name = "hyperlink_relation")]
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub hyperlink_id: i32,
-    pub attempt: i32,
-    pub error_message: String,
+    pub parent_hyperlink_id: i32,
+    pub child_hyperlink_id: i32,
     pub created_at: DateTime,
 }
 
@@ -17,18 +16,20 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(
         belongs_to = "super::hyperlink::Entity",
-        from = "Column::HyperlinkId",
+        from = "Column::ParentHyperlinkId",
         to = "super::hyperlink::Column::Id",
         on_update = "NoAction",
         on_delete = "Cascade"
     )]
-    Hyperlink,
-}
-
-impl Related<super::hyperlink::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Hyperlink.def()
-    }
+    ParentHyperlink,
+    #[sea_orm(
+        belongs_to = "super::hyperlink::Entity",
+        from = "Column::ChildHyperlinkId",
+        to = "super::hyperlink::Column::Id",
+        on_update = "NoAction",
+        on_delete = "Cascade"
+    )]
+    ChildHyperlink,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

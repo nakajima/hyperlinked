@@ -3,4 +3,6 @@
 pub mod prelude;
 
 pub mod hyperlink;
-pub mod hyperlink_processing_error;
+pub mod hyperlink_artifact;
+pub mod hyperlink_processing_job;
+pub mod hyperlink_relation;

@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title><%= self.title %></title>
+    <link rel="stylesheet" href="https://use.typekit.net/bpw6fxi.css" />
+    <link rel="stylesheet" href="/assets/reset.css" />
+    <link rel="stylesheet" href="/assets/app.css" />
+    <script type="module" src="https://cdn.jsdelivr.net/npm/@github/relative-time-element/+esm"></script>
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <% include!("../shared/_header.stpl"); %>
+    <main><%- self.body_html %></main>
+  </body>
+</html>

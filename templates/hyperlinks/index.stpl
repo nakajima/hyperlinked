@@ -1,0 +1,12 @@
+<section aria-labelledby="links-heading">
+  <% if self.links.is_empty() { %>
+    <p>No hyperlinks yet.</p>
+  <% } else { %>
+    <ul class="vstack gap-4">
+      <% for link in self.links { %>
+        <% let latest_job = self.latest_jobs.get(&link.id); %>
+        <% include!("_index_card.stpl"); %>
+      <% } %>
+    </ul>
+  <% } %>
+</section>

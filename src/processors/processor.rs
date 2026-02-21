@@ -20,9 +20,11 @@ impl std::fmt::Display for ProcessingError {
 impl std::error::Error for ProcessingError {}
 
 pub trait Processor {
+    type Output;
+
     fn process<'a>(
         &'a mut self,
         hyperlink: &'a mut hyperlink::ActiveModel,
         connection: &'a DatabaseConnection,
-    ) -> impl std::future::Future<Output = Result<(), ProcessingError>> + Send + 'a;
+    ) -> impl std::future::Future<Output = Result<Self::Output, ProcessingError>> + Send + 'a;
 }

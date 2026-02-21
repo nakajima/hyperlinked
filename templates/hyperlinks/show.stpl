@@ -1,0 +1,79 @@
+<section class="show-page hyperlink-show-page vstack gap-4" aria-labelledby="show-link-heading">
+  <article class="show-overview vstack gap-3">
+    <h2><%= self.link.title %></h2>
+    <p>
+      <a href="<%= self.link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= self.link.id %>" class="text-sm"><%= self.link.url %></a>
+    </p>
+
+
+    <% if self.link.raw_url != self.link.url { %>
+      <p class="text-sm leading-tight link-soft">Submitted URL: <%= self.link.raw_url %></p>
+    <% } %>
+    <% if let Some(error_message) = self.latest_error_message() { %>
+      <p class="text-sm leading-tight">Latest error: <%= error_message %></p>
+    <% } %>
+    <dl class="text-sm hstack gap-1">
+      <dt>Saved</dt>
+      <dd><%- render_relative_time(&self.link.created_at) %></dd>
+      <% if self.link.updated_at.format("%b %d, %Y %H:%M UTC").to_string() != self.link.created_at.format("%b %d, %Y %H:%M UTC").to_string() { %>
+      <dt>Updated</dt>
+      <dd><%- render_relative_time(&self.link.updated_at) %></dd>
+      <% } %>
+      <dt>Last clicked</dt>
+      <dd>
+        <% if let Some(last_clicked_at) = self.link.last_clicked_at.as_ref() { %>
+          <%- render_relative_time(&last_clicked_at) %>
+        <% } else { %>
+          Never
+        <% } %>
+      </dd>
+      <dt>Processing state</dt>
+      <dd class="capitalize"><%= self.processing_state() %></dd>
+      <dt>Total clicks</dt>
+      <dd><%= self.link.clicks_count %></dd>
+    </dl>
+  </article>
+  
+  <section class="vstack gap-4">
+  <hr>
+    <section class="vstack gap-2 lg-col-2 lg-row-1">
+        <h4 class="bold subdue">Actions</h4>
+        <nav class="hstack gap-4 flex-wrap overflow-x-visible whitespace-normal" aria-label="Link actions">
+          <a href="/hyperlinks/<%= self.link.id %>/edit">Edit</a>
+          <form action="/hyperlinks/<%= self.link.id %>/reprocess" method="post" class="inline">
+            <button class="btn-link show-action-link" type="submit">Reprocess</button>
+          </form>
+          <form action="/hyperlinks/<%= self.link.id %>/delete" method="post" data-confirm="Delete this link?" class="inline">
+            <button class="btn-link show-action-link" type="submit">Delete</button>
+          </form>
+        </nav>
+    </section>
+    <hr>
+    <div class="grid align-start gap-5">
+      <section class="vstack gap-2 lg-col-1">
+        <h4 class="bold">Artifacts</h4>
+        <% let present_kinds = self.present_artifact_kinds(); %>
+        <% let missing_labels = self.missing_artifact_labels(); %>
+        <% include!("_artifacts_table.stpl"); %>
+      </section>
+      <section class="vstack gap-2 lg-col-1">
+        <h4 class="bold">Recent jobs</h4>
+        <% include!("_timeline_table.stpl"); %>
+      </section>
+      <section class="vstack gap-4 lg-col-1">
+        <h4 class="bold">Discovered links</h4>
+        <% if self.discovered_links.is_empty() { %>
+          <p class="text-sm leading-tight link-soft">No discovered links yet.</p>
+        <% } else { %>
+          <ul class="vstack gap-4">
+            <% for discovered in self.discovered_links { %>
+              <% let link = discovered; %>
+              <% let latest_job = self.discovered_latest_jobs.get(&link.id); %>
+              <% include!("_index_card.stpl"); %>
+          <% } %>
+        </ul>
+      <% } %>
+      </section>
+    </div>
+  </section>
+</section>

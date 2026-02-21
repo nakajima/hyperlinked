@@ -190,6 +190,13 @@ fn configure_watches(watcher: &mut RecommendedWatcher) -> Result<(), String> {
             .map_err(|err| format!("failed to watch {}: {err}", src.display()))?;
     }
 
+    let templates = root.join("templates");
+    if templates.exists() {
+        watcher
+            .watch(&templates, RecursiveMode::Recursive)
+            .map_err(|err| format!("failed to watch {}: {err}", templates.display()))?;
+    }
+
     let cargo_toml = root.join("Cargo.toml");
     if cargo_toml.exists() {
         watcher
@@ -210,10 +217,10 @@ fn configure_watches(watcher: &mut RecommendedWatcher) -> Result<(), String> {
 fn ensure_server_binary_exists() -> Result<(), String> {
     let executable = server_executable_path();
     if executable.exists() {
-        return Ok(());
+        println!("building server binary");
+    } else {
+        println!("server binary is missing, building");
     }
-
-    println!("server binary is missing, building");
     build_server_binary()
 }
 
@@ -302,6 +309,10 @@ fn action_for_path(path: &Path) -> PathAction {
 
     if relative.starts_with(Path::new("src/server/assets")) {
         return PathAction::RestartOnly;
+    }
+
+    if relative.starts_with(Path::new("templates")) {
+        return PathAction::RebuildAndRestart;
     }
 
     if relative.starts_with(Path::new("src")) {
@@ -408,6 +419,10 @@ mod tests {
         );
         assert_eq!(
             action_for_path(Path::new("src/data/runtime.txt")),
+            PathAction::RebuildAndRestart
+        );
+        assert_eq!(
+            action_for_path(Path::new("templates/admin/index.stpl")),
             PathAction::RebuildAndRestart
         );
     }
