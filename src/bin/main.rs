@@ -84,11 +84,15 @@ async fn run_linkwarden_import(input: PathBuf) -> Result<i32, String> {
     let connection = hyperlinked::db::connection::init()
         .await
         .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    let processing_queue = hyperlinked::queue::ProcessingQueue::connect(connection.clone())
+        .await
+        .map_err(|err| format!("failed to initialize processing queue: {err}"))?;
 
     let report = hyperlinked::import::linkwarden::import_file(
         &connection,
         &input,
         hyperlinked::import::linkwarden::ImportFormat::Auto,
+        &processing_queue,
     )
     .await
     .map_err(|message| format!("linkwarden import failed: {message}"))?;

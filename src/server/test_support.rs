@@ -62,6 +62,34 @@ const HYPERLINK_RELATION_TABLE_SQL: &str = r#"
 "#;
 
 #[cfg(test)]
+const QUEUE_JOBS_TABLE_SQL: &str = r#"
+    CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL,
+        available_at INTEGER NOT NULL,
+        locked_at INTEGER NULL,
+        lock_token TEXT NULL,
+        last_error TEXT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        completed_at INTEGER NULL,
+        first_enqueued_at INTEGER NULL,
+        last_enqueued_at INTEGER NULL,
+        first_started_at INTEGER NULL,
+        last_started_at INTEGER NULL,
+        last_finished_at INTEGER NULL,
+        queued_ms_total INTEGER NOT NULL DEFAULT 0,
+        queued_ms_last INTEGER NULL,
+        processing_ms_total INTEGER NOT NULL DEFAULT 0,
+        processing_ms_last INTEGER NULL
+    );
+"#;
+
+#[cfg(test)]
 const HYPERLINK_SEARCH_DOC_TABLE_SQL: &str = r#"
     CREATE TABLE hyperlink_search_doc (
         hyperlink_id integer NOT NULL PRIMARY KEY,
@@ -210,6 +238,11 @@ pub(crate) async fn initialize_hyperlinks_search_schema(connection: &DatabaseCon
 pub(crate) async fn initialize_hyperlinks_schema_with_search(connection: &DatabaseConnection) {
     initialize_hyperlinks_schema(connection).await;
     initialize_hyperlinks_search_schema(connection).await;
+}
+
+#[cfg(test)]
+pub(crate) async fn initialize_queue_jobs_schema(connection: &DatabaseConnection) {
+    execute_sql(connection, QUEUE_JOBS_TABLE_SQL).await;
 }
 
 #[cfg(test)]

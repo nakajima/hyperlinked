@@ -12,6 +12,7 @@ mod m20260220_000009_add_hyperlink_discovery_relations;
 mod m20260221_000010_add_hyperlink_raw_url_and_canonicalize;
 mod m20260222_000011_add_hyperlink_search_fts;
 mod m20260222_000012_add_artifact_file_storage_and_screenshots;
+mod m20260222_000013_add_hyperlink_processing_job_active_unique_guard;
 
 pub struct Migrator;
 
@@ -31,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260221_000010_add_hyperlink_raw_url_and_canonicalize::Migration),
             Box::new(m20260222_000011_add_hyperlink_search_fts::Migration),
             Box::new(m20260222_000012_add_artifact_file_storage_and_screenshots::Migration),
+            Box::new(m20260222_000013_add_hyperlink_processing_job_active_unique_guard::Migration),
         ]
     }
 }

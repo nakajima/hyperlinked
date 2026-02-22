@@ -1097,11 +1097,13 @@ fn render_edit(link: &hyperlink::Model) -> Result<String, sailfish::RenderError>
     HyperlinksEditTemplate { link }.render()
 }
 
-fn show_artifact_kinds() -> [HyperlinkArtifactKind; 11] {
+fn show_artifact_kinds() -> [HyperlinkArtifactKind; 13] {
     [
         HyperlinkArtifactKind::SnapshotWarc,
         HyperlinkArtifactKind::PdfSource,
         HyperlinkArtifactKind::SnapshotError,
+        HyperlinkArtifactKind::OembedMeta,
+        HyperlinkArtifactKind::OembedError,
         HyperlinkArtifactKind::ScreenshotPng,
         HyperlinkArtifactKind::ScreenshotThumbPng,
         HyperlinkArtifactKind::ScreenshotDarkPng,
@@ -1123,6 +1125,7 @@ fn required_show_artifact_kinds(
         HyperlinkArtifactKind::ScreenshotDarkPng,
         HyperlinkArtifactKind::ScreenshotThumbPng,
         HyperlinkArtifactKind::ScreenshotThumbDarkPng,
+        HyperlinkArtifactKind::OembedMeta,
         HyperlinkArtifactKind::ReadableText,
         HyperlinkArtifactKind::ReadableMeta,
     ]
@@ -1160,6 +1163,8 @@ fn artifact_kind_info(
         HyperlinkArtifactKind::SnapshotWarc => ("snapshot_warc", "Snapshot WARC", "warc", false),
         HyperlinkArtifactKind::PdfSource => ("pdf_source", "PDF Source", "pdf", false),
         HyperlinkArtifactKind::SnapshotError => ("snapshot_error", "Snapshot Error", "json", true),
+        HyperlinkArtifactKind::OembedMeta => ("oembed_meta", "oEmbed Metadata", "json", false),
+        HyperlinkArtifactKind::OembedError => ("oembed_error", "oEmbed Error", "json", true),
         HyperlinkArtifactKind::ReadableText => ("readable_text", "Readable Markdown", "md", false),
         HyperlinkArtifactKind::ReadableMeta => {
             ("readable_meta", "Readable Metadata", "json", false)

@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod admin_jobs;
 pub mod context;
 mod flash;
 pub mod graphql;
@@ -33,6 +34,7 @@ pub async fn start(host: &str, port: &str) -> Result<(), String> {
     let app = Router::<context::Context>::new()
         .route("/", get(|| async { Redirect::temporary("/hyperlinks") }))
         .merge(admin::routes())
+        .merge(admin_jobs::routes())
         .merge(graphql::routes())
         .merge(hyperlinks::links())
         .nest_service("/jobs", jobs_dashboard.into_service())

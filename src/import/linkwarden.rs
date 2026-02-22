@@ -4,7 +4,10 @@ use std::path::Path;
 
 use sea_orm::entity::prelude::DateTime;
 
-use crate::model::hyperlink::{self, HyperlinkInput, UpsertResult};
+use crate::model::{
+    hyperlink::{self, HyperlinkInput, UpsertResult},
+    hyperlink_processing_job::ProcessingQueueSender,
+};
 
 const ROOT_KEYS: [&str; 4] = ["links", "bookmarks", "items", "data"];
 const URL_KEYS: [&str; 3] = ["url", "uri", "link"];
@@ -47,6 +50,7 @@ pub async fn import_file(
     connection: &DatabaseConnection,
     path: &Path,
     format: ImportFormat,
+    processing_queue: &ProcessingQueueSender,
 ) -> Result<ImportReport, String> {
     let content = tokio::fs::read_to_string(path)
         .await
@@ -88,7 +92,14 @@ pub async fn import_file(
             }
         };
 
-        match hyperlink::upsert_by_url(connection, normalized, parsed.created_at, None).await {
+        match hyperlink::upsert_by_url(
+            connection,
+            normalized,
+            parsed.created_at,
+            Some(processing_queue),
+        )
+        .await
+        {
             Ok(UpsertResult::Inserted) => report.summary.inserted += 1,
             Ok(UpsertResult::Updated) => report.summary.updated += 1,
             Err(err) => push_failure(&mut report, row_num, format!("database error: {err}"), row),
@@ -270,7 +281,7 @@ mod tests {
     use super::*;
     use sea_orm::{ConnectionTrait, Database, DatabaseConnection, EntityTrait, Statement};
 
-    use crate::entity::hyperlink;
+    use crate::entity::{hyperlink, hyperlink_processing_job};
 
     async fn initialize_schema(connection: &DatabaseConnection) {
         connection
@@ -292,6 +303,18 @@ mod tests {
                         updated_at datetime_text NOT NULL
                     );
                     CREATE UNIQUE INDEX idx_hyperlink_url_unique ON hyperlink(url);
+                    CREATE TABLE hyperlink_processing_job (
+                        id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+                        hyperlink_id integer NOT NULL,
+                        kind varchar NOT NULL DEFAULT 'snapshot',
+                        state varchar NOT NULL,
+                        error_message text NULL,
+                        queued_at datetime_text NOT NULL,
+                        started_at datetime_text NULL,
+                        finished_at datetime_text NULL,
+                        created_at datetime_text NOT NULL,
+                        updated_at datetime_text NOT NULL
+                    );
                 "#
                 .to_string(),
             ))
@@ -323,8 +346,11 @@ mod tests {
         content: &str,
         suffix: &str,
     ) -> ImportReport {
+        let processing_queue = crate::queue::ProcessingQueue::connect(connection.clone())
+            .await
+            .expect("processing queue should initialize");
         let path = write_temp_file(content, suffix).await;
-        let report = import_file(connection, &path, ImportFormat::Auto)
+        let report = import_file(connection, &path, ImportFormat::Auto, &processing_queue)
             .await
             .expect("import should complete");
         tokio::fs::remove_file(path)
@@ -356,6 +382,12 @@ mod tests {
             .await
             .expect("links should load");
         assert_eq!(links.len(), 2);
+
+        let jobs = hyperlink_processing_job::Entity::find()
+            .all(&connection)
+            .await
+            .expect("jobs should load");
+        assert_eq!(jobs.len(), 2);
     }
 
     #[tokio::test]
@@ -487,6 +519,12 @@ mod tests {
         let expected = DateTime::parse_from_str("2021-06-01T12:30:45.000", "%Y-%m-%dT%H:%M:%S%.f")
             .expect("timestamp should parse");
         assert_eq!(updated.created_at, expected);
+
+        let jobs = hyperlink_processing_job::Entity::find()
+            .all(&connection)
+            .await
+            .expect("jobs should load");
+        assert_eq!(jobs.len(), 0);
     }
 
     #[tokio::test]

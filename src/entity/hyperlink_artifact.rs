@@ -21,6 +21,10 @@ pub enum HyperlinkArtifactKind {
     PdfSource,
     #[sea_orm(string_value = "snapshot_error")]
     SnapshotError,
+    #[sea_orm(string_value = "oembed_meta")]
+    OembedMeta,
+    #[sea_orm(string_value = "oembed_error")]
+    OembedError,
     #[sea_orm(string_value = "readable_text")]
     ReadableText,
     #[sea_orm(string_value = "readable_meta")]

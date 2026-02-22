@@ -1,3 +1,4 @@
+mod oembed_fetch;
 pub mod pipeline;
 mod processor;
 mod readability_fetch;

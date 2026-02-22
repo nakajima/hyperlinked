@@ -42,19 +42,23 @@
       <dd><%= self.link.clicks_count %></dd>
       </div>
     </dl>
-
-    <% if let Some(screenshot_path) = self.screenshot_inline_path() { %>
-      <figure class="flex flex-col gap-1">
-        <picture>
-          <% if let Some(screenshot_dark_path) = self.screenshot_dark_inline_path() { %>
-            <source srcset="<%= screenshot_dark_path %>" media="(prefers-color-scheme: dark)">
-          <% } %>
-          <img class="block h-auto w-full" src="<%= screenshot_path %>" alt="Screenshot for <%= self.link.title %>" loading="lazy">
-        </picture>
-        <figcaption class="text-sm">Latest screenshot</figcaption>
-      </figure>
-    <% } %>
   </article>
+
+   <section class="flex flex-col gap-4">
+      <h4 class="font-bold">Discovered links</h4>
+      <% if self.discovered_links.is_empty() { %>
+        <p class="text-sm">No discovered links yet.</p>
+      <% } else { %>
+        <ul class="flex flex-col gap-4">
+          <% for discovered in self.discovered_links { %>
+            <% let link = discovered; %>
+            <% let latest_job = self.discovered_latest_jobs.get(&link.id); %>
+            <% let match_snippet: Option<&str> = None; %>
+            <% include!("_index_card.stpl"); %>
+        <% } %>
+      </ul>
+    <% } %>
+    </section>
   
   <section class="flex flex-col gap-4">
   <hr>
@@ -81,21 +85,6 @@
       <section class="flex flex-col gap-compact">
         <h4 class="font-bold">Recent jobs</h4>
         <% include!("_timeline_table.stpl"); %>
-      </section>
-      <section class="flex flex-col gap-4">
-        <h4 class="font-bold">Discovered links</h4>
-        <% if self.discovered_links.is_empty() { %>
-          <p class="text-sm">No discovered links yet.</p>
-        <% } else { %>
-          <ul class="flex flex-col gap-4">
-            <% for discovered in self.discovered_links { %>
-              <% let link = discovered; %>
-              <% let latest_job = self.discovered_latest_jobs.get(&link.id); %>
-              <% let match_snippet: Option<&str> = None; %>
-              <% include!("_index_card.stpl"); %>
-          <% } %>
-        </ul>
-      <% } %>
       </section>
     </div>
   </section>

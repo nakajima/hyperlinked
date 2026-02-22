@@ -77,9 +77,6 @@
 .h-16 {
   height: calc(var(--spacing) * 16);
 }
-.h-auto {
-  height: auto;
-}
 .h-full {
   height: 100%;
 }
@@ -165,6 +162,9 @@
 }
 .border-dev-alert-border {
   border-color: var(--color-dev-alert-border);
+}
+.border-form-control {
+  border-color: var(--color-form-control);
 }
 .border-invalid {
   border-color: var(--color-invalid);

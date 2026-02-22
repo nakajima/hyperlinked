@@ -73,4 +73,14 @@ mod tests {
         assert!(html.contains("text-dev-alert"));
         assert!(html.contains("Hot reload restart failed: test failure"));
     }
+
+    #[test]
+    fn queue_nav_points_to_admin_jobs_with_pending_badge_placeholder() {
+        let mut flash = Flash::default();
+        let html = page_with_dev_restart_alert("Title", "<p>Body</p>", &mut flash, None)
+            .expect("layout should render")
+            .0;
+        assert!(html.contains("href=\"/admin/jobs\""));
+        assert!(html.contains("data-queue-pending-badge"));
+    }
 }

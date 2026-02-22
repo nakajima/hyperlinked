@@ -31,6 +31,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(30);
 const RETRY_BASE_BACKOFF_MS: u64 = 200;
 const RETRY_JITTER_MAX_MS: u64 = 125;
+const DEFAULT_SNAPSHOT_CONTENT_TIMEOUT_SECS: u64 = 20;
+const DEFAULT_SNAPSHOT_CONTENT_RENDER_WAIT_MS: u64 = 5000;
 const DEFAULT_SCREENSHOT_TIMEOUT_SECS: u64 = 20;
 const DEFAULT_SCREENSHOT_DESKTOP_VIEWPORT: Viewport = Viewport {
     width: 1366,
@@ -331,6 +333,9 @@ enum ScreenshotVariant {
 struct SnapshotManifest {
     source_url: String,
     captured_at: String,
+    capture_method: String,
+    fallback_used: bool,
+    chromium_error: Option<String>,
     html: SnapshotAsset,
     css: Vec<SnapshotAsset>,
     css_errors: Vec<SnapshotError>,
@@ -377,6 +382,23 @@ enum SnapshotSourceKind {
     Unsupported,
 }
 
+#[derive(Clone, Copy)]
+enum HtmlCaptureMethod {
+    Chromium,
+    Reqwest,
+    ReqwestFallback,
+}
+
+impl HtmlCaptureMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Chromium => "chromium",
+            Self::Reqwest => "reqwest",
+            Self::ReqwestFallback => "reqwest_fallback",
+        }
+    }
+}
+
 async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureError> {
     let parsed = Url::parse(url).map_err(|err| {
         snapshot_capture_error(
@@ -406,8 +428,84 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
 
     let deadline = Instant::now() + SNAPSHOT_DEADLINE;
 
+    if snapshot_content_use_chromium() && !path_has_pdf_extension(parsed.path()) {
+        match capture_html_with_chromium_response(parsed.clone(), deadline).await {
+            Ok(source_response) => {
+                if looks_like_pdf_viewer_dom(&source_response.body)
+                    && let Ok(capture) = capture_snapshot_via_reqwest(
+                        &client,
+                        parsed.clone(),
+                        deadline,
+                        HtmlCaptureMethod::ReqwestFallback,
+                        true,
+                        Some(
+                            "chromium dump-dom looked like a PDF viewer; attempted reqwest source capture"
+                                .to_string(),
+                        ),
+                    )
+                    .await
+                {
+                    return Ok(capture);
+                }
+
+                return capture_snapshot_from_html_response(
+                    &client,
+                    source_response,
+                    deadline,
+                    HtmlCaptureMethod::Chromium,
+                    false,
+                    None,
+                )
+                .await;
+            }
+            Err(chromium_error) => {
+                match capture_snapshot_via_reqwest(
+                    &client,
+                    parsed.clone(),
+                    deadline,
+                    HtmlCaptureMethod::ReqwestFallback,
+                    true,
+                    Some(chromium_error.clone()),
+                )
+                .await
+                {
+                    Ok(capture) => return Ok(capture),
+                    Err(mut fallback_error) => {
+                        let message = format!(
+                            "chromium content capture failed: {chromium_error}; reqwest fallback failed: {}",
+                            fallback_error.message
+                        );
+                        fallback_error.message = message.clone();
+                        fallback_error.artifact.stage = "chromium_fallback".to_string();
+                        fallback_error.artifact.final_error = message;
+                        return Err(fallback_error);
+                    }
+                }
+            }
+        }
+    }
+
+    capture_snapshot_via_reqwest(
+        &client,
+        parsed,
+        deadline,
+        HtmlCaptureMethod::Reqwest,
+        false,
+        None,
+    )
+    .await
+}
+
+async fn capture_snapshot_via_reqwest(
+    client: &reqwest::Client,
+    parsed: Url,
+    deadline: Instant,
+    capture_method: HtmlCaptureMethod,
+    fallback_used: bool,
+    chromium_error: Option<String>,
+) -> Result<SnapshotCapture, SnapshotCaptureError> {
     let source_response =
-        fetch_response_with_retry(&client, parsed.clone(), MAX_HTML_BYTES, deadline)
+        fetch_response_with_retry(client, parsed.clone(), MAX_HTML_BYTES, deadline)
             .await
             .map_err(|failure| {
                 snapshot_capture_error(
@@ -439,6 +537,26 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
         ));
     }
 
+    capture_snapshot_from_html_response(
+        client,
+        source_response,
+        deadline,
+        capture_method,
+        fallback_used,
+        chromium_error,
+    )
+    .await
+}
+
+async fn capture_snapshot_from_html_response(
+    client: &reqwest::Client,
+    source_response: FetchedResponse,
+    deadline: Instant,
+    capture_method: HtmlCaptureMethod,
+    fallback_used: bool,
+    chromium_error: Option<String>,
+) -> Result<SnapshotCapture, SnapshotCaptureError> {
+    let source_url = source_response.url.clone();
     let html_text = String::from_utf8_lossy(&source_response.body);
     let stylesheets = extract_stylesheet_hrefs(&html_text);
 
@@ -472,7 +590,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
             continue;
         }
 
-        let resolved = match parsed.join(href.trim()) {
+        let resolved = match source_url.join(href.trim()) {
             Ok(url) => url,
             Err(err) => {
                 css_errors.push(SnapshotError {
@@ -490,7 +608,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
 
         let remaining = MAX_TOTAL_CSS_BYTES - total_css_bytes;
         let file_limit = remaining.min(MAX_CSS_BYTES_PER_FILE);
-        match fetch_response_with_retry(&client, resolved, file_limit, deadline).await {
+        match fetch_response_with_retry(client, resolved, file_limit, deadline).await {
             Ok(css_response) => {
                 total_css_bytes += css_response.body.len();
                 css_assets.push(css_response);
@@ -505,8 +623,11 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
     }
 
     let manifest = SnapshotManifest {
-        source_url: parsed.to_string(),
+        source_url: source_url.to_string(),
         captured_at: now_utc().to_string(),
+        capture_method: capture_method.as_str().to_string(),
+        fallback_used,
+        chromium_error,
         html: SnapshotAsset {
             url: source_response.url.to_string(),
             status: source_response.status,
@@ -568,7 +689,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
 
     let manifest_payload = serde_json::to_vec_pretty(&manifest).map_err(|err| {
         snapshot_capture_error(
-            parsed.as_str(),
+            source_url.as_str(),
             "manifest_encode",
             format!("manifest encode failed: {err}"),
             Vec::new(),
@@ -577,13 +698,78 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
     append_record(
         &mut archive,
         "metadata",
-        parsed.as_str(),
+        source_url.as_str(),
         "application/json",
         &manifest_payload,
         &[],
     );
 
     Ok(SnapshotCapture::Html { archive })
+}
+
+async fn capture_html_with_chromium_response(
+    url: Url,
+    deadline: Instant,
+) -> Result<FetchedResponse, String> {
+    if Instant::now() >= deadline {
+        return Err("snapshot deadline reached before chromium content capture".to_string());
+    }
+
+    let mut command = Command::new(snapshot_content_chromium_path());
+    command
+        .arg("--headless=new")
+        .arg("--disable-gpu")
+        .arg("--dump-dom")
+        .arg("--run-all-compositor-stages-before-draw")
+        .arg(format!(
+            "--virtual-time-budget={}",
+            snapshot_content_render_wait_ms()
+        ))
+        .arg(url.as_str());
+
+    let timeout =
+        snapshot_content_timeout().min(deadline.saturating_duration_since(Instant::now()));
+    if timeout.is_zero() {
+        return Err("snapshot deadline reached before chromium content capture".to_string());
+    }
+
+    let output = tokio::time::timeout(timeout, command.output())
+        .await
+        .map_err(|_| {
+            format!(
+                "chromium content capture timed out after {}s",
+                timeout.as_secs()
+            )
+        })?
+        .map_err(|err| format!("failed to launch chromium for content capture: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = truncate_for_error_message(&String::from_utf8_lossy(&output.stderr), 400);
+        let stdout = truncate_for_error_message(&String::from_utf8_lossy(&output.stdout), 200);
+        return Err(format!(
+            "chromium content capture failed with status {}: stderr={stderr}, stdout={stdout}",
+            output.status
+        ));
+    }
+
+    let mut body = output.stdout;
+    if body.is_empty() {
+        return Err("chromium content capture produced an empty DOM".to_string());
+    }
+
+    let mut truncated = false;
+    if body.len() > MAX_HTML_BYTES {
+        body.truncate(MAX_HTML_BYTES);
+        truncated = true;
+    }
+
+    Ok(FetchedResponse {
+        url,
+        status: 200,
+        content_type: Some("text/html; charset=utf-8".to_string()),
+        body,
+        truncated,
+    })
 }
 
 async fn capture_screenshots(url: &str) -> Result<ScreenshotCapture, String> {
@@ -695,6 +881,35 @@ fn screenshot_temp_path() -> PathBuf {
 
 fn screenshot_chromium_path() -> String {
     std::env::var("SCREENSHOT_CHROMIUM_PATH").unwrap_or_else(|_| "chromium".to_string())
+}
+
+fn snapshot_content_chromium_path() -> String {
+    std::env::var("SNAPSHOT_CONTENT_CHROMIUM_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(screenshot_chromium_path)
+}
+
+fn snapshot_content_timeout() -> Duration {
+    Duration::from_secs(env_u64(
+        "SNAPSHOT_CONTENT_TIMEOUT_SECS",
+        DEFAULT_SNAPSHOT_CONTENT_TIMEOUT_SECS,
+        1,
+        120,
+    ))
+}
+
+fn snapshot_content_render_wait_ms() -> u64 {
+    env_u64(
+        "SNAPSHOT_CONTENT_RENDER_WAIT_MS",
+        DEFAULT_SNAPSHOT_CONTENT_RENDER_WAIT_MS,
+        0,
+        60_000,
+    )
+}
+
+fn snapshot_content_use_chromium() -> bool {
+    env_bool("SNAPSHOT_CONTENT_USE_CHROMIUM", true)
 }
 
 fn screenshot_timeout() -> Duration {
@@ -974,6 +1189,21 @@ fn format_retry_failure(error: &RetryFailure) -> String {
     )
 }
 
+fn truncate_for_error_message(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut out = String::new();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return out;
+        };
+        out.push(ch);
+    }
+    if chars.next().is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
 fn snapshot_capture_error(
     source_url: &str,
     stage: &str,
@@ -1032,7 +1262,16 @@ fn path_has_pdf_extension(path: &str) -> bool {
     path.to_ascii_lowercase().ends_with(".pdf")
 }
 
-async fn ensure_fetchable_url(url: &Url) -> Result<(), String> {
+fn looks_like_pdf_viewer_dom(payload: &[u8]) -> bool {
+    let lowercase = String::from_utf8_lossy(payload).to_ascii_lowercase();
+    lowercase.contains("application/pdf")
+        && (lowercase.contains("<embed")
+            || lowercase.contains("<object")
+            || lowercase.contains("pdf-viewer")
+            || lowercase.contains("mhjfbmdgcfjbbpaeojofohoefgiehjai"))
+}
+
+pub(crate) async fn ensure_fetchable_url(url: &Url) -> Result<(), String> {
     match url.scheme() {
         "http" | "https" => {}
         _ => return Err("only http/https URLs are supported".to_string()),
@@ -1287,5 +1526,23 @@ mod tests {
             classify_source_kind(Some("application/json"), "/api/data"),
             SnapshotSourceKind::Unsupported
         );
+    }
+
+    #[test]
+    fn detects_pdf_viewer_dom_payloads() {
+        let html = r#"
+        <html><body>
+          <embed src="blob:abc" type="application/pdf">
+        </body></html>
+        "#;
+        assert!(looks_like_pdf_viewer_dom(html.as_bytes()));
+    }
+
+    #[test]
+    fn does_not_flag_regular_html_as_pdf_viewer() {
+        let html = r#"
+        <html><body><article>hello world</article></body></html>
+        "#;
+        assert!(!looks_like_pdf_viewer_dom(html.as_bytes()));
     }
 }

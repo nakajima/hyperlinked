@@ -138,3 +138,52 @@ document.addEventListener(
   },
   true,
 );
+
+function updateQueuePendingBadge(pending) {
+  const badge = document.querySelector("[data-queue-pending-badge]");
+  if (!(badge instanceof HTMLElement)) {
+    return;
+  }
+
+  if (!Number.isFinite(pending) || pending <= 0) {
+    badge.classList.add("hidden");
+    badge.textContent = "0";
+    return;
+  }
+
+  badge.classList.remove("hidden");
+  badge.textContent = String(pending);
+}
+
+async function refreshQueuePendingBadge() {
+  try {
+    const response = await fetch("/admin/jobs/pending-count", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      return;
+    }
+
+    const data = await response.json();
+    const pending = Number(data?.pending);
+    updateQueuePendingBadge(pending);
+  } catch (_) {}
+}
+
+if (document.querySelector("[data-queue-pending-badge]")) {
+  refreshQueuePendingBadge();
+  setInterval(() => {
+    if (document.visibilityState !== "visible") {
+      return;
+    }
+    refreshQueuePendingBadge();
+  }, 5000);
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      refreshQueuePendingBadge();
+    }
+  });
+}

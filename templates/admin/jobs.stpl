@@ -1,0 +1,138 @@
+<section class="flex flex-col gap-4" aria-labelledby="admin-jobs-heading">
+  <article class="flex flex-col gap-compact">
+    <p class="text-sm">Queue</p>
+    <h2 id="admin-jobs-heading">Jobs dashboard</h2>
+    <p class="text-sm">ProcessingTask queue rows joined with hyperlink processing context.</p>
+    <p class="text-sm"><a href="/jobs">Open raw lilqueue dashboard</a></p>
+  </article>
+
+  <section class="flex flex-row flex-wrap gap-compact text-sm">
+    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+      <span class="text-tertiary">Pending:</span>
+      <span><%= self.stats.queued + self.stats.processing %></span>
+    </div>
+    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+      <span class="text-tertiary">Queued:</span>
+      <span><%= self.stats.queued %></span>
+    </div>
+    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+      <span class="text-tertiary">Processing:</span>
+      <span><%= self.stats.processing %></span>
+    </div>
+    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+      <span class="text-tertiary">Completed:</span>
+      <span><%= self.stats.completed %></span>
+    </div>
+    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+      <span class="text-tertiary">Failed:</span>
+      <span><%= self.stats.failed %></span>
+    </div>
+    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+      <span class="text-tertiary">Total:</span>
+      <span><%= self.stats.total %></span>
+    </div>
+  </section>
+
+  <form method="get" action="/admin/jobs" class="flex flex-row flex-wrap items-center gap-compact">
+    <label for="jobs-status-filter" class="text-sm text-tertiary">Status</label>
+    <select id="jobs-status-filter" name="status">
+      <option value="all" <% if self.status_filter == "all" { %>selected<% } %>>All</option>
+      <option value="queued" <% if self.status_filter == "queued" { %>selected<% } %>>Queued</option>
+      <option value="processing" <% if self.status_filter == "processing" { %>selected<% } %>>Processing</option>
+      <option value="completed" <% if self.status_filter == "completed" { %>selected<% } %>>Completed</option>
+      <option value="failed" <% if self.status_filter == "failed" { %>selected<% } %>>Failed</option>
+    </select>
+    <input type="hidden" name="limit" value="<%= self.limit %>" />
+    <input type="hidden" name="page" value="1" />
+    <button type="submit">Apply</button>
+    <span class="text-sm text-tertiary">Showing up to <%= self.limit %> rows.</span>
+  </form>
+  <p class="text-sm text-tertiary">
+    <% if self.total_rows == 0 { %>
+      No matching rows.
+    <% } else { %>
+      Showing <%= self.range_start %>-<%= self.range_end %> of <%= self.total_rows %> matching rows.
+    <% } %>
+  </p>
+
+  <% if self.rows.is_empty() { %>
+    <p class="text-sm">No matching ProcessingTask queue rows.</p>
+  <% } else { %>
+    <div>
+      <table class="font-mono text-sm">
+        <thead>
+          <tr>
+            <th scope="col">Queue row</th>
+            <th scope="col">Queue status</th>
+            <th scope="col">Processing job</th>
+            <th scope="col">Hyperlink</th>
+            <th scope="col">Attempts</th>
+            <th scope="col">Queued time</th>
+            <th scope="col">Processing time</th>
+            <th scope="col">Error</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% for row in self.rows { %>
+            <tr>
+              <td>queue#<%= row.queue_id %></td>
+              <td><%= row.queue_status %></td>
+              <td>
+                <% if let Some(processing_job_id) = row.processing_job_id { %>
+                  <div>job#<%= processing_job_id %></div>
+                <% } %>
+                <% if let (Some(kind), Some(state)) = (row.processing_kind.as_ref(), row.processing_state.as_ref()) { %>
+                  <div class="text-tertiary"><%= kind %> / <%= state %></div>
+                <% } %>
+                <% if row.payload_unmapped { %>
+                  <div class="text-alert">Unmapped payload</div>
+                <% } %>
+                <code class="whitespace-normal break-all text-tertiary"><%= row.payload_excerpt %></code>
+              </td>
+              <td>
+                <% if let Some(hyperlink_id) = row.hyperlink_id { %>
+                  <a href="/hyperlinks/<%= hyperlink_id %>">
+                    <% if let Some(title) = row.hyperlink_title.as_ref() { %>
+                      <%= title %>
+                    <% } else { %>
+                      hyperlink#<%= hyperlink_id %>
+                    <% } %>
+                  </a>
+                  <% if let Some(url) = row.hyperlink_url.as_ref() { %>
+                    <div class="text-tertiary whitespace-normal break-all"><%= url %></div>
+                  <% } %>
+                <% } else { %>
+                  <span class="text-tertiary">N/A</span>
+                <% } %>
+              </td>
+              <td><%= row.attempts_display %></td>
+              <td><%= row.queued_timing_display %></td>
+              <td><%= row.processing_timing_display %></td>
+              <td>
+                <% if let Some(error) = row.error_display.as_ref() { %>
+                  <span class="text-alert"><%= error %></span>
+                <% } else { %>
+                  <span class="text-tertiary">-</span>
+                <% } %>
+              </td>
+            </tr>
+          <% } %>
+        </tbody>
+      </table>
+    </div>
+  <% } %>
+
+  <nav class="flex flex-row items-center gap-compact text-sm" aria-label="Jobs pagination">
+    <% if let Some(prev_href) = self.prev_page_href.as_ref() { %>
+      <a href="<%= prev_href %>">Previous</a>
+    <% } else { %>
+      <span class="text-tertiary">Previous</span>
+    <% } %>
+    <span class="text-tertiary">Page <%= self.page %> of <%= self.total_pages %></span>
+    <% if let Some(next_href) = self.next_page_href.as_ref() { %>
+      <a href="<%= next_href %>">Next</a>
+    <% } else { %>
+      <span class="text-tertiary">Next</span>
+    <% } %>
+  </nav>
+</section>

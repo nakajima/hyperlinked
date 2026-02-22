@@ -2,6 +2,7 @@ use crate::{
     entity::hyperlink,
     model::hyperlink_processing_job::ProcessingQueueSender,
     processors::{
+        oembed_fetch::{OembedFetchOutput, OembedFetcher},
         processor::{ProcessingError, Processor},
         readability_fetch::{ReadabilityFetchOutput, ReadabilityFetcher},
         snapshot_fetch::{SnapshotFetchOutput, SnapshotFetcher},
@@ -45,6 +46,15 @@ impl<'a> Pipeline<'a> {
         connection: &DatabaseConnection,
     ) -> Result<ReadabilityFetchOutput, ProcessingError> {
         ReadabilityFetcher::new(self.job_id)
+            .process(self.hyperlink, connection)
+            .await
+    }
+
+    pub async fn process_oembed(
+        &mut self,
+        connection: &DatabaseConnection,
+    ) -> Result<OembedFetchOutput, ProcessingError> {
+        OembedFetcher::new(self.job_id)
             .process(self.hyperlink, connection)
             .await
     }

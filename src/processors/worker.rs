@@ -73,6 +73,7 @@ pub async fn process_job(
                 hyperlink_active_model.updated_at = Set(now_utc());
                 hyperlink_active_model.update(connection).await?;
                 mark_job_succeeded(connection, running_job.id).await?;
+                enqueue_oembed_job(connection, sender, running_job.hyperlink_id).await?;
                 enqueue_readability_job(connection, sender, running_job.hyperlink_id).await?;
             }
             Err(error) => {
@@ -107,6 +108,21 @@ pub async fn process_job(
                 }
             }
         }
+        HyperlinkProcessingJobKind::Oembed => match pipeline.process_oembed(connection).await {
+            Ok(_) => {
+                mark_job_succeeded(connection, running_job.id).await?;
+            }
+            Err(error) => {
+                mark_job_failed(connection, running_job.id, &error.to_string()).await?;
+                tracing::warn!(
+                    hyperlink_id = running_job.hyperlink_id,
+                    job_id = running_job.id,
+                    kind = "oembed",
+                    error = %error,
+                    "hyperlink processing job failed"
+                );
+            }
+        },
         HyperlinkProcessingJobKind::SublinkDiscovery => {
             match pipeline.process_sublink_discovery(connection).await {
                 Ok(_) => {
@@ -138,6 +154,21 @@ async fn enqueue_readability_job(
         connection,
         hyperlink_id,
         HyperlinkProcessingJobKind::Readability,
+        Some(sender),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn enqueue_oembed_job(
+    connection: &DatabaseConnection,
+    sender: &ProcessingQueueSender,
+    hyperlink_id: i32,
+) -> Result<(), sea_orm::DbErr> {
+    hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
+        connection,
+        hyperlink_id,
+        HyperlinkProcessingJobKind::Oembed,
         Some(sender),
     )
     .await?;

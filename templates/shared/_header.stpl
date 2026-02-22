@@ -10,7 +10,13 @@
 
   <nav class="flex basis-full flex-row justify-end gap-4 text-sm sm:basis-auto">
     <a href="/hyperlinks/new">Add</a>
-    <a href="/jobs">Queue</a>
+    <a href="/admin/jobs" class="flex flex-row items-center gap-1">
+      <span>Queue</span>
+      <span
+        data-queue-pending-badge
+        class="hidden rounded-badge bg-badge px-badge-x py-1 text-badge leading-badge text-black"
+      >0</span>
+    </a>
     <a href="/admin">Admin</a>
   </nav>
 </header>

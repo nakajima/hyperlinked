@@ -24,6 +24,8 @@ pub enum HyperlinkProcessingJobState {
 pub enum HyperlinkProcessingJobKind {
     #[sea_orm(string_value = "snapshot")]
     Snapshot,
+    #[sea_orm(string_value = "oembed")]
+    Oembed,
     #[sea_orm(string_value = "readability")]
     Readability,
     #[sea_orm(string_value = "sublink_discovery")]

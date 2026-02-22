@@ -360,7 +360,7 @@ fn extract_from_pdf(
     Ok((text_payload, meta_payload))
 }
 
-fn extract_html_from_warc(payload: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn extract_html_from_warc(payload: &[u8]) -> Result<Vec<u8>, String> {
     let mut cursor = 0usize;
 
     while cursor < payload.len() {
