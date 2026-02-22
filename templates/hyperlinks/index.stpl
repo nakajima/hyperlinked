@@ -1,6 +1,6 @@
-<section class="vstack gap-4" aria-labelledby="links-heading">
-  <form method="get" action="/hyperlinks" class="vstack gap-3">
-    <div class="hstack gap-2 align-center">
+<section class="flex flex-col gap-4" aria-labelledby="links-heading">
+  <form method="get" action="/hyperlinks" class="flex flex-col gap-3">
+    <div class="flex flex-row items-center gap-compact">
       <input
         id="hyperlinks-query"
         name="q"
@@ -8,13 +8,14 @@
         value="<%= self.query_input %>"
         placeholder="Filter with tokens, e.g. status:failed order:random"
         autocomplete="off"
+        class="min-w-0 flex-1"
       />
-      <a href="/hyperlinks" class="text-sm subdue">Clear</a>
+      <a href="/hyperlinks" class="shrink-0 text-sm text-subdued">Clear</a>
     </div>
 
-    <div class="hstack gap-2 flex-wrap align-center">
-      <div class="hstack gap-1 align-center">
-        <label for="status-filter" class="tertiary text-sm">Status</label>
+    <div class="flex flex-row flex-wrap items-center gap-compact">
+      <div class="flex flex-row items-center gap-1">
+        <label for="status-filter" class="text-sm text-tertiary">Status</label>
         <select id="status-filter">
         <option value="" <% if self.status_select_value().is_empty() { %>selected<% } %>>Status</option>
         <option value="processing" <% if self.status_select_value() == "processing" { %>selected<% } %>>Processing</option>
@@ -24,8 +25,8 @@
         </select>
       </div>
 
-      <div class="hstack gap-1 align-center">
-        <label for="scope-filter" class="tertiary text-sm">Scope</label>
+      <div class="flex flex-row items-center gap-1">
+        <label for="scope-filter" class="text-sm text-tertiary">Scope</label>
         <select id="scope-filter">
         <option value="" <% if self.scope_select_value().is_empty() { %>selected<% } %>>Scope</option>
         <option value="all" <% if self.scope_select_value() == "all" { %>selected<% } %>>All</option>
@@ -33,8 +34,8 @@
         </select>
       </div>
 
-      <div class="hstack gap-1 align-center">
-        <label for="type-filter" class="tertiary text-sm">Type</label>
+      <div class="flex flex-row items-center gap-1">
+        <label for="type-filter" class="text-sm text-tertiary">Type</label>
         <select id="type-filter">
         <option value="" <% if self.type_select_value().is_empty() { %>selected<% } %>>Type</option>
         <option value="pdf" <% if self.type_select_value() == "pdf" { %>selected<% } %>>PDF</option>
@@ -42,8 +43,8 @@
         </select>
       </div>
 
-      <div class="hstack gap-1 align-center">
-        <label for="order-filter" class="tertiary text-sm">Sort</label>
+      <div class="flex flex-row items-center gap-1">
+        <label for="order-filter" class="text-sm text-tertiary">Sort</label>
         <select id="order-filter">
         <option value="" <% if self.order_select_value().is_empty() { %>selected<% } %>>Sort</option>
         <option value="newest" <% if self.order_select_value() == "newest" { %>selected<% } %>>Newest</option>
@@ -58,7 +59,7 @@
       </div>
     </div>
     <% if !self.ignored_tokens.is_empty() { %>
-      <p class="tertiary text-sm">
+      <p class="text-sm text-tertiary">
         Ignored tokens:
         <%= self.ignored_tokens.join(" ") %>
       </p>
@@ -81,7 +82,7 @@
       <p>No hyperlinks yet.</p>
     <% } %>
   <% } else { %>
-    <ul class="vstack gap-4">
+    <ul class="flex flex-col gap-4">
       <% for link in self.links { %>
         <% let latest_job = self.latest_jobs.get(&link.id); %>
         <% let match_snippet = self.match_snippets.get(&link.id).map(|snippet| snippet.as_str()); %>

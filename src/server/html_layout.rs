@@ -56,7 +56,7 @@ mod tests {
         let html = page_with_dev_restart_alert("Title", "<p>Body</p>", &mut flash, None)
             .expect("layout should render")
             .0;
-        assert!(!html.contains("flash-dev-alert"));
+        assert!(!html.contains("text-dev-alert"));
     }
 
     #[test]
@@ -70,7 +70,7 @@ mod tests {
         )
         .expect("layout should render")
         .0;
-        assert!(html.contains("flash-dev-alert"));
+        assert!(html.contains("text-dev-alert"));
         assert!(html.contains("Hot reload restart failed: test failure"));
     }
 }

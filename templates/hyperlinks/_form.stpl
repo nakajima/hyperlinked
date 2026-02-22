@@ -1,15 +1,15 @@
-<form class="vstack gap-4 items-start" action="<%= action %>" method="post">
-  <div class="vstack gap-2 full-width">
+<form class="flex flex-col items-start gap-4" action="<%= action %>" method="post">
+  <div class="flex w-full flex-col gap-compact">
     <label for="url">URL</label>
     <input id="url" name="url" type="url" required value="<%= url %>" autofocus />
   </div>
 
   <% if is_new_record { %>
-    <input type="hidden" name="title" value="" class="full-width" />
+    <input type="hidden" name="title" value="" class="w-full" />
   <% } else { %>
-    <div class="vstack gap-2">
+    <div class="flex w-full flex-col gap-compact">
       <label for="title">Title</label>
-      <input id="title" name="title" type="text" required value="<%= title %>" class="full-width" />
+      <input id="title" name="title" type="text" required value="<%= title %>" class="w-full" />
     </div>
   <% } %>
 

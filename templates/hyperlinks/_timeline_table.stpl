@@ -2,7 +2,7 @@
   <p class="text-sm">No processing jobs yet.</p>
 <% } else { %>
   <div>
-    <table class="mono text-sm">
+    <table class="font-mono text-sm">
       <thead>
         <tr>
           <th scope="col">Kind</th>

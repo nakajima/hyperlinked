@@ -2,7 +2,7 @@
   <p class="text-sm">No artifacts available yet.</p>
 <% } else { %>
   <div>
-    <table class="mono text-sm">
+    <table class="font-mono text-sm">
       <thead>
         <tr>
           <th scope="col">Artifact</th>

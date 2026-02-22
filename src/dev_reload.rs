@@ -45,6 +45,15 @@ pub async fn run_dev(host: String, port: String) -> Result<(), String> {
     clear_restart_marker(&restart_marker_path);
     println!("server started (pid {})", child.id());
 
+    let mut tailwind_child = match spawn_tailwind_watch_process() {
+        Ok(child) => child,
+        Err(err) => {
+            let _ = stop_server_process(&mut child);
+            return Err(err);
+        }
+    };
+    println!("tailwind watcher started (pid {})", tailwind_child.id());
+
     let (watch_event_tx, watch_event_rx) = mpsc::channel::<notify::Result<Event>>();
     let mut watcher = notify::recommended_watcher(move |event| {
         let _ = watch_event_tx.send(event);
@@ -70,7 +79,7 @@ pub async fn run_dev(host: String, port: String) -> Result<(), String> {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     println!("received Ctrl+C, stopping dev server");
-                    stop_server_process(&mut child)?;
+                    stop_dev_processes(&mut child, &mut tailwind_child)?;
                     drop(watcher);
                     let _ = bridge.join();
                     return Ok(());
@@ -175,7 +184,7 @@ pub async fn run_dev(host: String, port: String) -> Result<(), String> {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     println!("received Ctrl+C, stopping dev server");
-                    stop_server_process(&mut child)?;
+                    stop_dev_processes(&mut child, &mut tailwind_child)?;
                     drop(watcher);
                     let _ = bridge.join();
                     return Ok(());
@@ -321,20 +330,67 @@ fn spawn_server_process(host: &str, port: &str, marker_path: &Path) -> Result<Ch
         })
 }
 
+fn spawn_tailwind_watch_process() -> Result<Child, String> {
+    let script = manifest_dir().join("scripts").join("tailwind-watch.sh");
+    if !script.exists() {
+        return Err(format!(
+            "failed to start tailwind watcher: {} does not exist",
+            script.display()
+        ));
+    }
+
+    Command::new(&script)
+        .current_dir(manifest_dir())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|err| {
+            format!(
+                "failed to start tailwind watcher {}: {err}",
+                script.display()
+            )
+        })
+}
+
 fn stop_server_process(child: &mut Child) -> Result<(), String> {
+    stop_child_process(child, "server process")
+}
+
+fn stop_tailwind_watch_process(child: &mut Child) -> Result<(), String> {
+    stop_child_process(child, "tailwind watcher process")
+}
+
+fn stop_dev_processes(server_child: &mut Child, tailwind_child: &mut Child) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(err) = stop_tailwind_watch_process(tailwind_child) {
+        errors.push(err);
+    }
+    if let Err(err) = stop_server_process(server_child) {
+        errors.push(err);
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn stop_child_process(child: &mut Child, label: &str) -> Result<(), String> {
     if let Some(_status) = child
         .try_wait()
-        .map_err(|err| format!("failed to inspect server process state: {err}"))?
+        .map_err(|err| format!("failed to inspect {label} state: {err}"))?
     {
         return Ok(());
     }
 
     child
         .kill()
-        .map_err(|err| format!("failed to stop server process: {err}"))?;
+        .map_err(|err| format!("failed to stop {label}: {err}"))?;
     child
         .wait()
-        .map_err(|err| format!("failed while waiting for server shutdown: {err}"))?;
+        .map_err(|err| format!("failed while waiting for {label} shutdown: {err}"))?;
     Ok(())
 }
 

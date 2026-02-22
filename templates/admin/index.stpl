@@ -1,20 +1,20 @@
-<section class="vstack gap-4" aria-labelledby="admin-heading">
-  <article class="vstack gap-2">
+<section class="flex flex-col gap-4" aria-labelledby="admin-heading">
+  <article class="flex flex-col gap-compact">
     <p class="text-sm">Site admin</p>
     <h2 id="admin-heading">Admin tasks</h2>
     <p class="text-sm">Maintenance operations for the processing pipeline.</p>
   </article>
 
-  <section class="vstack gap-2">
+  <section class="flex flex-col gap-compact">
     <h3>Flash examples</h3>
-    <p class="flash flash-notice" role="status">Notice example: Changes saved.</p>
-    <p class="flash flash-alert" role="alert">Alert example: Something went wrong.</p>
-    <p class="flash flash-dev-alert" role="alert">Dev alert example: Restart failed.</p>
+    <p class="mb-2 rounded-form border border-notice-border bg-notice-bg px-3 py-flash text-sm leading-5 text-notice" role="status">Notice example: Changes saved.</p>
+    <p class="mb-2 rounded-form border border-invalid bg-form-control px-3 py-flash text-sm leading-5 text-alert" role="alert">Alert example: Something went wrong.</p>
+    <p class="mb-2 rounded-form border border-dev-alert-border bg-dev-alert-bg px-3 py-flash text-sm leading-5 text-dev-alert" role="alert">Dev alert example: Restart failed.</p>
   </section>
 
-  <section class="vstack gap-3">
+  <section class="flex flex-col gap-3">
     <h3>Process all missing artifacts</h3>
-    <div class="vstack gap-2">
+    <div class="flex flex-col gap-compact">
       <div aria-label="Missing artifacts summary">
         <table>
           <thead>

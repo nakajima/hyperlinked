@@ -1,4 +1,4 @@
-<section aria-labelledby="new-link-heading" class="vstack gap-4">
+<section aria-labelledby="new-link-heading" class="flex flex-col gap-4">
   <h2 id="new-link-heading">Add Link</h2>
   <% let action = "/hyperlinks"; %>
   <% let submit_label = "Create"; %>

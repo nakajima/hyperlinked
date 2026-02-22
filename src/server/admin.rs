@@ -442,8 +442,8 @@ mod tests {
         page.assert_status_ok();
         let body = page.text();
         assert!(body.contains("Flash examples"));
-        assert!(body.contains("flash flash-notice"));
-        assert!(body.contains("flash flash-alert"));
-        assert!(body.contains("flash flash-dev-alert"));
+        assert!(body.contains("border-notice-border"));
+        assert!(body.contains("border-invalid"));
+        assert!(body.contains("border-dev-alert-border"));
     }
 }
