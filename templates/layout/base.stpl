@@ -12,6 +12,17 @@
   </head>
   <body>
     <% include!("../shared/_header.stpl"); %>
-    <main><%- self.body_html %></main>
+    <main class="vstack gap-3">
+      <% if let Some(dev_restart_alert) = self.dev_restart_alert.as_ref() { %>
+        <p class="flash flash-dev-alert" role="alert"><%= dev_restart_alert %></p>
+      <% } %>
+      <% if let Some(notice) = self.notice_flash.as_ref() { %>
+        <p class="flash flash-notice" role="status"><%= notice %></p>
+      <% } %>
+      <% if let Some(alert) = self.alert_flash.as_ref() { %>
+        <p class="flash flash-alert" role="alert"><%= alert %></p>
+      <% } %>
+      <%- self.body_html %>
+    </main>
   </body>
 </html>

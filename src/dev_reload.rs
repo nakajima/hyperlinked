@@ -7,6 +7,8 @@ use std::{
     time::Duration,
 };
 
+use crate::dev_reload_marker::{self, RestartPhase};
+
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(350);
 const DEV_PROFILE: &str = "dev-hot";
 
@@ -25,9 +27,22 @@ enum PathAction {
 
 pub async fn run_dev(host: String, port: String) -> Result<(), String> {
     println!("starting dev watcher");
-    ensure_server_binary_exists()?;
+    let restart_marker_path = dev_reload_marker::default_marker_path();
+    clear_restart_marker(&restart_marker_path);
 
-    let mut child = spawn_server_process(&host, &port)?;
+    if let Err(err) = ensure_server_binary_exists() {
+        mark_restart_failed(&restart_marker_path, RestartPhase::Startup, &err);
+        return Err(err);
+    }
+
+    let mut child = match spawn_server_process(&host, &port, &restart_marker_path) {
+        Ok(child) => child,
+        Err(err) => {
+            mark_restart_failed(&restart_marker_path, RestartPhase::Startup, &err);
+            return Err(err);
+        }
+    };
+    clear_restart_marker(&restart_marker_path);
     println!("server started (pid {})", child.id());
 
     let (watch_event_tx, watch_event_rx) = mpsc::channel::<notify::Result<Event>>();
@@ -94,13 +109,39 @@ pub async fn run_dev(host: String, port: String) -> Result<(), String> {
                     match action {
                         PendingChangeAction::RebuildAndRestart => {
                             println!("change detected ({summary}), rebuilding");
+                            mark_restart_pending(&restart_marker_path, RestartPhase::Rebuild);
                             match build_server_binary() {
                                 Ok(()) => {
-                                    stop_server_process(&mut child)?;
-                                    child = spawn_server_process(&host, &port)?;
+                                    if let Err(err) = stop_server_process(&mut child) {
+                                        mark_restart_failed(
+                                            &restart_marker_path,
+                                            RestartPhase::Restart,
+                                            &err,
+                                        );
+                                        return Err(err);
+                                    }
+                                    child =
+                                        match spawn_server_process(&host, &port, &restart_marker_path)
+                                        {
+                                            Ok(child) => child,
+                                            Err(err) => {
+                                                mark_restart_failed(
+                                                    &restart_marker_path,
+                                                    RestartPhase::Restart,
+                                                    &err,
+                                                );
+                                                return Err(err);
+                                            }
+                                        };
+                                    clear_restart_marker(&restart_marker_path);
                                     println!("server restarted (pid {})", child.id());
                                 }
                                 Err(err) => {
+                                    mark_restart_failed(
+                                        &restart_marker_path,
+                                        RestartPhase::Rebuild,
+                                        &err,
+                                    );
                                     eprintln!("{err}");
                                     eprintln!("build failed; keeping the current server process");
                                 }
@@ -108,8 +149,23 @@ pub async fn run_dev(host: String, port: String) -> Result<(), String> {
                         }
                         PendingChangeAction::RestartOnly => {
                             println!("change detected ({summary}), restarting");
-                            stop_server_process(&mut child)?;
-                            child = spawn_server_process(&host, &port)?;
+                            mark_restart_pending(&restart_marker_path, RestartPhase::Restart);
+                            if let Err(err) = stop_server_process(&mut child) {
+                                mark_restart_failed(&restart_marker_path, RestartPhase::Restart, &err);
+                                return Err(err);
+                            }
+                            child = match spawn_server_process(&host, &port, &restart_marker_path) {
+                                Ok(child) => child,
+                                Err(err) => {
+                                    mark_restart_failed(
+                                        &restart_marker_path,
+                                        RestartPhase::Restart,
+                                        &err,
+                                    );
+                                    return Err(err);
+                                }
+                            };
+                            clear_restart_marker(&restart_marker_path);
                             println!("server restarted (pid {})", child.id());
                         }
                     }
@@ -242,7 +298,7 @@ fn build_server_binary() -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_server_process(host: &str, port: &str) -> Result<Child, String> {
+fn spawn_server_process(host: &str, port: &str, marker_path: &Path) -> Result<Child, String> {
     let executable = server_executable_path();
     Command::new(&executable)
         .arg("serve")
@@ -250,6 +306,8 @@ fn spawn_server_process(host: &str, port: &str) -> Result<Child, String> {
         .arg(host)
         .arg("--port")
         .arg(port)
+        .env(dev_reload_marker::DEV_MODE_ENV, "1")
+        .env(dev_reload_marker::RESTART_MARKER_ENV, marker_path)
         .current_dir(manifest_dir())
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -278,6 +336,24 @@ fn stop_server_process(child: &mut Child) -> Result<(), String> {
         .wait()
         .map_err(|err| format!("failed while waiting for server shutdown: {err}"))?;
     Ok(())
+}
+
+fn clear_restart_marker(path: &Path) {
+    if let Err(err) = dev_reload_marker::clear_marker(path) {
+        eprintln!("{err}");
+    }
+}
+
+fn mark_restart_pending(path: &Path, phase: RestartPhase) {
+    if let Err(err) = dev_reload_marker::write_pending(path, phase) {
+        eprintln!("{err}");
+    }
+}
+
+fn mark_restart_failed(path: &Path, phase: RestartPhase, error: &str) {
+    if let Err(marker_err) = dev_reload_marker::write_failed(path, phase, error) {
+        eprintln!("{marker_err}");
+    }
 }
 
 fn manifest_dir() -> PathBuf {

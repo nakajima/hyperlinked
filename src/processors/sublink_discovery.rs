@@ -62,7 +62,10 @@ impl Processor for SublinkDiscoveryProcessor {
             return Ok(SublinkDiscoveryOutput::default());
         };
 
-        let markdown = String::from_utf8_lossy(&readable_text.payload);
+        let markdown_payload = hyperlink_artifact::load_payload(&readable_text)
+            .await
+            .map_err(ProcessingError::DB)?;
+        let markdown = String::from_utf8_lossy(&markdown_payload);
         let raw_urls = extract_markdown_urls(&markdown);
 
         let mut normalized = Vec::new();

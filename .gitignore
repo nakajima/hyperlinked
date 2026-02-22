@@ -1,3 +1,5 @@
 /target
 backup.json
-dev.db
+dev.db*
+artifacts/
+olddb/

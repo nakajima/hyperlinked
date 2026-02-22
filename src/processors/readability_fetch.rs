@@ -7,7 +7,10 @@ use crate::{
         hyperlink,
         hyperlink_artifact::{self as hyperlink_artifact_entity, HyperlinkArtifactKind},
     },
-    model::hyperlink_artifact as hyperlink_artifact_model,
+    model::{
+        hyperlink_artifact as hyperlink_artifact_model,
+        hyperlink_search_doc as hyperlink_search_doc_model,
+    },
     processors::processor::{ProcessingError, Processor},
 };
 
@@ -128,7 +131,10 @@ impl Processor for ReadabilityFetcher {
 
         let extraction = match source {
             ReadabilitySource::Html(snapshot) => {
-                let html = match extract_html_from_warc(&snapshot.payload) {
+                let snapshot_payload = hyperlink_artifact_model::load_payload(&snapshot)
+                    .await
+                    .map_err(ProcessingError::DB)?;
+                let html = match extract_html_from_warc(&snapshot_payload) {
                     Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
                     Err(error) => {
                         let error_artifact = persist_readability_error(
@@ -150,12 +156,17 @@ impl Processor for ReadabilityFetcher {
 
                 extract_from_html(&html)
             }
-            ReadabilitySource::Pdf(pdf_source) => extract_from_pdf(
-                self.pdf_extractor.as_ref(),
-                hyperlink.title.as_ref(),
-                hyperlink.url.as_ref(),
-                &pdf_source.payload,
-            ),
+            ReadabilitySource::Pdf(pdf_source) => {
+                let pdf_payload = hyperlink_artifact_model::load_payload(&pdf_source)
+                    .await
+                    .map_err(ProcessingError::DB)?;
+                extract_from_pdf(
+                    self.pdf_extractor.as_ref(),
+                    hyperlink.title.as_ref(),
+                    hyperlink.url.as_ref(),
+                    &pdf_payload,
+                )
+            }
         };
 
         let (text_payload, meta_payload) = match extraction {
@@ -193,11 +204,28 @@ impl Processor for ReadabilityFetcher {
             hyperlink_id,
             Some(self.job_id),
             HyperlinkArtifactKind::ReadableText,
-            text_payload,
+            text_payload.clone(),
             READABLE_TEXT_CONTENT_TYPE,
         )
         .await
         .map_err(ProcessingError::DB)?;
+
+        let readable_text = String::from_utf8_lossy(&text_payload).to_string();
+        if let Err(error) = hyperlink_search_doc_model::upsert_readable_text(
+            connection,
+            hyperlink_id,
+            &readable_text,
+        )
+        .await
+        {
+            if !hyperlink_search_doc_model::is_search_doc_missing_error(&error) {
+                return Err(ProcessingError::DB(error));
+            }
+            tracing::debug!(
+                hyperlink_id,
+                "skipping search doc update because hyperlink_search_doc is unavailable"
+            );
+        }
 
         let meta_artifact = hyperlink_artifact_model::insert(
             connection,

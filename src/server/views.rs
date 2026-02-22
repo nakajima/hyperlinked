@@ -4,7 +4,7 @@ use axum::{
 };
 use sailfish::{RenderError, TemplateSimple};
 
-use super::html_layout;
+use super::{flash::Flash, html_layout};
 
 #[derive(TemplateSimple)]
 #[template(path = "errors/simple.stpl")]
@@ -16,8 +16,12 @@ struct ErrorBodyTemplate<'a> {
     back_label: &'a str,
 }
 
-pub(crate) fn render_html_page(title: &str, body: Result<String, RenderError>) -> Response {
-    render_html_page_with_status(StatusCode::OK, title, body)
+pub(crate) fn render_html_page_with_flash(
+    title: &str,
+    body: Result<String, RenderError>,
+    flash: Flash,
+) -> Response {
+    render_html_page_with_status_and_flash(StatusCode::OK, title, body, flash)
 }
 
 pub(crate) fn render_html_page_with_status(
@@ -25,13 +29,26 @@ pub(crate) fn render_html_page_with_status(
     title: &str,
     body: Result<String, RenderError>,
 ) -> Response {
+    render_html_page_with_status_and_flash(status, title, body, Flash::default())
+}
+
+pub(crate) fn render_html_page_with_status_and_flash(
+    status: StatusCode,
+    title: &str,
+    body: Result<String, RenderError>,
+    mut flash: Flash,
+) -> Response {
     let body = match body {
         Ok(body) => body,
         Err(err) => return template_render_failure_response(err),
     };
 
-    match html_layout::page(title, &body) {
-        Ok(html) => (status, html).into_response(),
+    match html_layout::page(title, &body, &mut flash) {
+        Ok(html) => {
+            let mut response = (status, html).into_response();
+            flash.apply_to_response_headers(response.headers_mut());
+            response
+        }
         Err(err) => template_render_failure_response(err),
     }
 }

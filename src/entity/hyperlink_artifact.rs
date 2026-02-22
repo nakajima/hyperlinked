@@ -27,6 +27,16 @@ pub enum HyperlinkArtifactKind {
     ReadableMeta,
     #[sea_orm(string_value = "readable_error")]
     ReadableError,
+    #[sea_orm(string_value = "screenshot_png")]
+    ScreenshotPng,
+    #[sea_orm(string_value = "screenshot_thumb_png")]
+    ScreenshotThumbPng,
+    #[sea_orm(string_value = "screenshot_dark_png")]
+    ScreenshotDarkPng,
+    #[sea_orm(string_value = "screenshot_thumb_dark_png")]
+    ScreenshotThumbDarkPng,
+    #[sea_orm(string_value = "screenshot_error")]
+    ScreenshotError,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
@@ -38,6 +48,9 @@ pub struct Model {
     pub job_id: Option<i32>,
     pub kind: HyperlinkArtifactKind,
     pub payload: Vec<u8>,
+    pub storage_path: Option<String>,
+    pub storage_backend: Option<String>,
+    pub checksum_sha256: Option<String>,
     pub content_type: String,
     pub size_bytes: i32,
     pub created_at: DateTime,

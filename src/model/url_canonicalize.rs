@@ -209,8 +209,8 @@ mod tests {
 
     #[test]
     fn renders_root_without_trailing_slash() {
-        let canonicalized = canonicalize_submitted_url("https://example.com/")
-            .expect("url should canonicalize");
+        let canonicalized =
+            canonicalize_submitted_url("https://example.com/").expect("url should canonicalize");
         assert_eq!(canonicalized.canonical_url, "https://example.com");
     }
 

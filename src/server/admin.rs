@@ -2,14 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use axum::{
     Router,
-    extract::{Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Redirect, Response},
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::Response,
     routing,
 };
 use sailfish::Template;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QuerySelect};
-use serde::Deserialize;
 
 use crate::{
     entity::{
@@ -20,7 +19,10 @@ use crate::{
     model::hyperlink_processing_job::{
         self as hyperlink_processing_job_model, ProcessingQueueSender,
     },
-    server::context::Context,
+    server::{
+        context::Context,
+        flash::{Flash, FlashName, redirect_with_flash},
+    },
 };
 
 use super::views;
@@ -49,12 +51,6 @@ struct MissingArtifactsSummary {
     readability_will_queue: usize,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct AdminQuery {
-    snapshot_queued: Option<usize>,
-    readability_queued: Option<usize>,
-}
-
 #[derive(Default)]
 struct ArtifactPresence {
     has_source: bool,
@@ -68,7 +64,7 @@ struct MissingArtifactsPlan {
     readability_hyperlink_ids: Vec<i32>,
 }
 
-async fn index(State(state): State<Context>, Query(query): Query<AdminQuery>) -> Response {
+async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
     let plan = match build_missing_artifacts_plan(&state.connection).await {
         Ok(plan) => plan,
         Err(err) => {
@@ -79,11 +75,14 @@ async fn index(State(state): State<Context>, Query(query): Query<AdminQuery>) ->
         }
     };
 
-    let last_run = parse_last_run_summary(query);
-    views::render_html_page("Admin", render_index(&plan.summary, last_run))
+    views::render_html_page_with_flash(
+        "Admin",
+        render_index(&plan.summary),
+        Flash::from_headers(&headers),
+    )
 }
 
-async fn process_missing_artifacts(State(state): State<Context>) -> Response {
+async fn process_missing_artifacts(State(state): State<Context>, headers: HeaderMap) -> Response {
     let plan = match build_missing_artifacts_plan(&state.connection).await {
         Ok(plan) => plan,
         Err(err) => {
@@ -110,23 +109,15 @@ async fn process_missing_artifacts(State(state): State<Context>) -> Response {
         }
     };
 
-    Redirect::to(&format!(
-        "/admin?snapshot_queued={}&readability_queued={}",
-        result.snapshot_queued, result.readability_queued
-    ))
-    .into_response()
-}
-
-fn parse_last_run_summary(query: AdminQuery) -> Option<LastRunSummary> {
-    let snapshot_queued = query.snapshot_queued.unwrap_or(0);
-    let readability_queued = query.readability_queued.unwrap_or(0);
-    if query.snapshot_queued.is_none() && query.readability_queued.is_none() {
-        return None;
-    }
-    Some(LastRunSummary {
-        snapshot_queued,
-        readability_queued,
-    })
+    redirect_with_flash(
+        &headers,
+        "/admin",
+        FlashName::Notice,
+        format!(
+            "Queued {} snapshot job(s) and {} readability job(s).",
+            result.snapshot_queued, result.readability_queued
+        ),
+    )
 }
 
 async fn build_missing_artifacts_plan(
@@ -289,17 +280,12 @@ async fn execute_missing_artifacts_plan(
 #[template(path = "admin/index.stpl")]
 struct AdminIndexTemplate<'a> {
     summary: &'a MissingArtifactsSummary,
-    last_run: Option<LastRunSummary>,
     has_missing_artifacts_to_process: bool,
 }
 
-fn render_index(
-    summary: &MissingArtifactsSummary,
-    last_run: Option<LastRunSummary>,
-) -> Result<String, sailfish::RenderError> {
+fn render_index(summary: &MissingArtifactsSummary) -> Result<String, sailfish::RenderError> {
     AdminIndexTemplate {
         summary,
-        last_run,
         has_missing_artifacts_to_process: summary.snapshot_will_queue > 0
             || summary.readability_will_queue > 0,
     }
@@ -356,7 +342,7 @@ mod tests {
 
         let action = server.post("/admin/process-missing-artifacts").await;
         action.assert_status_see_other();
-        action.assert_header("location", "/admin?snapshot_queued=1&readability_queued=1");
+        action.assert_header("location", "/admin");
 
         let snapshot_jobs = hyperlink_processing_job::Entity::find()
             .filter(hyperlink_processing_job::Column::Kind.eq(HyperlinkProcessingJobKind::Snapshot))
@@ -421,7 +407,7 @@ mod tests {
 
         let action = server.post("/admin/process-missing-artifacts").await;
         action.assert_status_see_other();
-        action.assert_header("location", "/admin?snapshot_queued=0&readability_queued=0");
+        action.assert_header("location", "/admin");
     }
 
     #[tokio::test]
@@ -446,5 +432,18 @@ mod tests {
         assert!(body.contains(
             "<input type=\"submit\" value=\"Process all missing artifacts\" disabled />"
         ));
+    }
+
+    #[tokio::test]
+    async fn admin_page_shows_flash_style_examples() {
+        let (server, _) = new_server("").await;
+
+        let page = server.get("/admin").await;
+        page.assert_status_ok();
+        let body = page.text();
+        assert!(body.contains("Flash examples"));
+        assert!(body.contains("flash flash-notice"));
+        assert!(body.contains("flash flash-alert"));
+        assert!(body.contains("flash flash-dev-alert"));
     }
 }

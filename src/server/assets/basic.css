@@ -7,10 +7,15 @@
   --text-xl: 1.25rem;
   --text-2xl: 1.5rem;
   --text-3xl: 3rem;
+  --body-font: "iA Writer Quattro S", sans-serif;
+
+  --round: 0.2rem;
 
   /* Colors */
+  --primary: oklch(95% 0.01 264);
   --subdued: oklch(65.476% 0.06472 241.613);
   --tertiary: oklch(47.6% 0.051 242);
+  --highlight: oklch(79.9% 0.249 98);
 
   --form-control-bg: oklch(20% 0.01 264);
   --form-control-border: oklch(35% 0.014 264);
@@ -32,13 +37,15 @@
   src: url("/assets/iAWriterMonoS-Regular.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
-  font-display: swap;
+  /* font-display: swap; */
 }
 
 @font-face {
-  font-family: "Inter";
-  src: url("/assets/InterVariable.woff2") format("woff2");
+  font-family: "iA Writer Quattro S";
+  src: url("/assets/iAWriterQuattroS-Regular.woff2") format("woff2");
+  font-weight: 400;
   font-style: normal;
+  /* font-display: swap; */
 }
 
 html,
@@ -46,7 +53,7 @@ body {
   background-color: oklch(12% 0.005 264);
   color: oklch(95% 0.01 264);
   font-weight: 400;
-  font-family: "Inter", sans-serif;
+  font-family: var(--body-font);
   font-style: normal;
   line-height: 1rem;
 }
@@ -69,10 +76,16 @@ header {
   margin-bottom: 1rem;
 }
 
+em {
+  background-color: rgba(244, 250.665, 199.665, 0.2);
+  font-style: normal;
+  border-radius: 2px;
+}
+
 b,
 .bold {
   font-weight: 700;
-  font-family: "Inter", sans-serif;
+  font-family: var(--body-font);
 }
 
 h1,
@@ -98,6 +111,11 @@ h1 {
   font-size: var(--text-3xl);
 }
 
+blockquote {
+  border-left: 1px solid var(--subdued);
+  padding: 0.5rem;
+}
+
 label {
   display: block;
   font-size: var(--text-sm);
@@ -107,16 +125,42 @@ label {
 input,
 textarea,
 select {
-  background-color: var(--form-control-bg);
   border: 1px solid var(--form-control-border);
   border-radius: var(--form-control-radius);
-  color: var(--form-control-text);
-  padding: var(--form-control-py) var(--form-control-px);
   min-width: 0;
-  width: 100%;
 }
 
 input,
+textarea {
+  background-color: var(--form-control-bg);
+  color: var(--form-control-text);
+  padding: var(--form-control-py) var(--form-control-px);
+  width: 100%;
+}
+
+select {
+  appearance: none;
+  background-color: transparent;
+  border-color: var(--form-control-border);
+  color: var(--subdued);
+  font-size: var(--text-xs);
+  line-height: 1.1;
+  padding: 0.2rem 1.4rem 0.2rem 0.55rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%23808aa0' stroke-width='1.25' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.45rem center;
+  background-size: 0.65rem 0.65rem;
+  width: auto;
+  max-width: 100%;
+  min-height: 1.75rem;
+}
+
+select:hover {
+  border-color: var(--form-control-border-focus);
+  color: var(--secondary);
+}
+
+/* input,
 textarea,
 select,
 button:not(.btn-link) {
@@ -127,7 +171,7 @@ button:not(.btn-link) {
     "Helvetica Neue",
     Arial,
     sans-serif;
-}
+} */
 
 input {
   min-height: var(--form-control-min-h);
@@ -183,7 +227,7 @@ button:not(.btn-link):active {
 hr {
   height: 1px;
   border: none;
-  background-color: var(--secondary);
+  background-color: var(--tertiary);
 }
 
 table,
@@ -212,8 +256,12 @@ dl {
   grid-template-columns: max-content;
 }
 
-dt {
+dd {
   color: var(--tertiary);
+}
+
+picture {
+  border-radius: var(--round);
 }
 
 /* Type utils */
@@ -226,6 +274,10 @@ dt {
 }
 
 /* Color utils */
+.placeholder {
+  background: var(--tertiary);
+  border-radius: var(--round);
+}
 
 .subdue {
   color: var(--subdued);
@@ -299,6 +351,74 @@ dt {
 
 .full-width {
   width: 100%;
+}
+
+.full-height {
+  height: 100%;
+}
+
+.block {
+  display: block;
+}
+
+.overflow-hidden {
+  overflow: hidden;
+}
+
+.rounded {
+  border-radius: var(--round);
+}
+
+.object-cover {
+  object-fit: cover;
+}
+
+.w-1 {
+  width: 1rem;
+}
+
+.w-2 {
+  width: 2rem;
+}
+
+.w-3 {
+  width: 3rem;
+}
+
+.w-4 {
+  width: 4rem;
+}
+
+.w-5 {
+  width: 5rem;
+}
+
+.w-6 {
+  width: 6rem;
+}
+
+.h-1 {
+  height: 1rem;
+}
+
+.h-2 {
+  height: 2rem;
+}
+
+.h-3 {
+  height: 3rem;
+}
+
+.h-4 {
+  height: 4rem;
+}
+
+.h-5 {
+  height: 5rem;
+}
+
+.h-6 {
+  height: 6rem;
 }
 
 .stack {

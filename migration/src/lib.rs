@@ -10,6 +10,8 @@ mod m20260219_000007_add_processing_jobs_and_snapshots;
 mod m20260219_000008_add_job_kinds_and_artifacts;
 mod m20260220_000009_add_hyperlink_discovery_relations;
 mod m20260221_000010_add_hyperlink_raw_url_and_canonicalize;
+mod m20260222_000011_add_hyperlink_search_fts;
+mod m20260222_000012_add_artifact_file_storage_and_screenshots;
 
 pub struct Migrator;
 
@@ -27,6 +29,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260219_000008_add_job_kinds_and_artifacts::Migration),
             Box::new(m20260220_000009_add_hyperlink_discovery_relations::Migration),
             Box::new(m20260221_000010_add_hyperlink_raw_url_and_canonicalize::Migration),
+            Box::new(m20260222_000011_add_hyperlink_search_fts::Migration),
+            Box::new(m20260222_000012_add_artifact_file_storage_and_screenshots::Migration),
         ]
     }
 }

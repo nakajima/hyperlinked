@@ -19,10 +19,10 @@
           <% if let Some(artifact) = self.artifact_for(kind) { %>
             <tr>
               <td><%= label %></td>
-              <td class="artifacts-content-type-cell"><%= artifact.content_type.as_str() %></td>
+              <td><%= artifact.content_type.as_str() %></td>
               <td><%= format_size_bytes(artifact.size_bytes) %></td>
               <td><%- render_relative_time(&artifact.created_at) %></td>
-              <td><a class="link-soft" href="<%= self.artifact_download_path(kind) %>">Download <%= slug %></a></td>
+              <td><a href="<%= self.artifact_download_path(kind) %>">Download <%= slug %></a></td>
             </tr>
           <% } %>
         <% } %>

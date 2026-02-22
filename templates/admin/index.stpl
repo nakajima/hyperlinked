@@ -1,21 +1,22 @@
-<section class="show-page vstack gap-4" aria-labelledby="admin-heading">
-  <article class="show-overview vstack gap-2">
-    <p class="show-kicker text-sm leading-tight link-soft">Site admin</p>
-    <h2 id="admin-heading" class="show-title">Admin tasks</h2>
-    <p class="text-sm leading-tight link-soft">Maintenance operations for the processing pipeline.</p>
+<section class="vstack gap-4" aria-labelledby="admin-heading">
+  <article class="vstack gap-2">
+    <p class="text-sm">Site admin</p>
+    <h2 id="admin-heading">Admin tasks</h2>
+    <p class="text-sm">Maintenance operations for the processing pipeline.</p>
   </article>
 
-  <section class="show-diagnostics vstack gap-3">
-    <h3 class="card-title">Process all missing artifacts</h3>
-    <div class="vstack gap-2">
-      <% if let Some(last_run) = self.last_run { %>
-        <p class="text-sm leading-tight">
-          Last run queued <%= last_run.snapshot_queued %> snapshot job(s) and <%= last_run.readability_queued %> readability job(s).
-        </p>
-      <% } %>
+  <section class="vstack gap-2">
+    <h3>Flash examples</h3>
+    <p class="flash flash-notice" role="status">Notice example: Changes saved.</p>
+    <p class="flash flash-alert" role="alert">Alert example: Something went wrong.</p>
+    <p class="flash flash-dev-alert" role="alert">Dev alert example: Restart failed.</p>
+  </section>
 
-      <div class="artifacts-table-wrap" aria-label="Missing artifacts summary">
-        <table class="artifacts-table">
+  <section class="vstack gap-3">
+    <h3>Process all missing artifacts</h3>
+    <div class="vstack gap-2">
+      <div aria-label="Missing artifacts summary">
+        <table>
           <thead>
             <tr>
               <th>Total links</th>

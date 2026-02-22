@@ -1,8 +1,8 @@
 <% if self.recent_jobs.is_empty() { %>
-  <p class="text-sm leading-tight link-soft">No processing jobs yet.</p>
+  <p class="text-sm">No processing jobs yet.</p>
 <% } else { %>
-  <div class="recent-jobs-table-wrap">
-    <table class="recent-jobs-table mono text-sm">
+  <div>
+    <table class="mono text-sm">
       <thead>
         <tr>
           <th scope="col">Kind</th>
@@ -20,8 +20,8 @@
             <td><%= kind %></td>
             <td><%= state %></td>
             <td><%- render_relative_time(&job.created_at) %></td>
-            <td><span class="link-soft">job#<%= job.id %></span></td>
-            <td class="recent-jobs-error-cell">
+            <td><span>job#<%= job.id %></span></td>
+            <td>
               <% if let Some(error_message) = &job.error_message { %>
                 <span title="<%= error_message %>"><%= error_message %></span>
               <% } %>

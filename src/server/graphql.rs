@@ -1,10 +1,13 @@
 use axum::{Json, Router, extract::State, response::Html, routing::get};
-use sea_orm::DatabaseConnection;
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
 use seaography::{
-    Builder, BuilderContext, async_graphql,
+    Builder, BuilderContext, ConnectionObjectBuilder, EntityObjectBuilder, FilterInputBuilder,
+    OrderInputBuilder, PaginationInputBuilder, apply_order, apply_pagination, async_graphql,
     async_graphql::{
         Request, Response, ServerError,
-        dynamic::{Schema, SchemaError},
+        dynamic::{Field, FieldFuture, FieldValue, InputValue, Schema, SchemaError, TypeRef},
         http::graphiql_source,
         parser::types::{DocumentOperations, OperationType},
     },
@@ -13,7 +16,7 @@ use seaography::{
 };
 
 use crate::{
-    entity::{hyperlink, hyperlink_artifact, hyperlink_processing_job},
+    entity::{hyperlink, hyperlink_artifact, hyperlink_processing_job, hyperlink_relation},
     server::context::Context,
 };
 
@@ -77,12 +80,100 @@ fn schema(connection: DatabaseConnection) -> Result<Schema, SchemaError> {
     register_read_only_entity!(builder, hyperlink);
     register_read_only_entity!(builder, hyperlink_processing_job);
     register_read_only_entity!(builder, hyperlink_artifact);
+    register_hyperlink_sublinks_field(&mut builder);
 
     builder.register_enumeration::<hyperlink_processing_job::HyperlinkProcessingJobState>();
     builder.register_enumeration::<hyperlink_processing_job::HyperlinkProcessingJobKind>();
     builder.register_enumeration::<hyperlink_artifact::HyperlinkArtifactKind>();
 
     builder.schema_builder().data(connection).finish()
+}
+
+fn register_hyperlink_sublinks_field(builder: &mut Builder) {
+    let context = builder.context;
+    let entity_object_builder = EntityObjectBuilder { context };
+    let connection_object_builder = ConnectionObjectBuilder { context };
+    let filter_input_builder = FilterInputBuilder { context };
+    let order_input_builder = OrderInputBuilder { context };
+
+    let hyperlink_type_name = entity_object_builder.type_name::<hyperlink::Entity>();
+    let hyperlink_connection_type_name = connection_object_builder.type_name(&hyperlink_type_name);
+    let field_filters_name = context.entity_query_field.filters.clone();
+    let field_order_by_name = context.entity_query_field.order_by.clone();
+    let field_pagination_name = context.entity_query_field.pagination.clone();
+    let resolver_filters_name = field_filters_name.clone();
+    let resolver_order_by_name = field_order_by_name.clone();
+    let resolver_pagination_name = field_pagination_name.clone();
+    let pagination_input_type_name = context.pagination_input.type_name.clone();
+
+    let sublinks_field = Field::new(
+        "sublinks",
+        TypeRef::named_nn(hyperlink_connection_type_name),
+        move |ctx| {
+            let context = context;
+            let field_filters_name = resolver_filters_name.clone();
+            let field_order_by_name = resolver_order_by_name.clone();
+            let field_pagination_name = resolver_pagination_name.clone();
+            FieldFuture::new(async move {
+                let parent = ctx
+                    .parent_value
+                    .try_downcast_ref::<hyperlink::Model>()
+                    .expect("parent hyperlink should exist");
+                let db = ctx.data::<DatabaseConnection>()?;
+
+                let filters = ctx.args.get(&field_filters_name);
+                let filters =
+                    seaography::get_filter_conditions::<hyperlink::Entity>(context, filters);
+                let order_by = ctx.args.get(&field_order_by_name);
+                let order_by =
+                    OrderInputBuilder { context }.parse_object::<hyperlink::Entity>(order_by);
+                let pagination = ctx.args.get(&field_pagination_name);
+                let pagination = PaginationInputBuilder { context }.parse_object(pagination);
+
+                let stmt = hyperlink::Entity::find()
+                    .join(
+                        JoinType::InnerJoin,
+                        hyperlink_relation::Relation::ChildHyperlink.def().rev(),
+                    )
+                    .filter(hyperlink_relation::Column::ParentHyperlinkId.eq(parent.id))
+                    .filter(filters);
+                let stmt = apply_order(stmt, order_by);
+                let connection =
+                    apply_pagination::<hyperlink::Entity>(db, stmt, pagination).await?;
+
+                Ok(Some(FieldValue::owned_any(connection)))
+            })
+        },
+    )
+    .argument(InputValue::new(
+        &field_filters_name,
+        TypeRef::named(filter_input_builder.type_name(&hyperlink_type_name)),
+    ))
+    .argument(InputValue::new(
+        &field_order_by_name,
+        TypeRef::named(order_input_builder.type_name(&hyperlink_type_name)),
+    ))
+    .argument(InputValue::new(
+        &field_pagination_name,
+        TypeRef::named(&pagination_input_type_name),
+    ));
+
+    let mut sublinks_field = Some(sublinks_field);
+    builder.outputs = builder
+        .outputs
+        .drain(..)
+        .map(|object| {
+            if object.type_name() == hyperlink_type_name {
+                object.field(
+                    sublinks_field
+                        .take()
+                        .expect("sublinks field should only be added once"),
+                )
+            } else {
+                object
+            }
+        })
+        .collect();
 }
 
 fn operation_type(request: &Request) -> Option<OperationType> {
@@ -131,6 +222,8 @@ mod tests {
                 INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
                 VALUES (1, 1, 1, 'snapshot_warc', x'01AB', 'application/warc', 2, '2026-02-19 00:00:02'),
                        (2, 1, 1, 'pdf_source', x'25504446', 'application/pdf', 4, '2026-02-19 00:00:03');
+                INSERT INTO hyperlink_relation (id, parent_hyperlink_id, child_hyperlink_id, created_at)
+                VALUES (1, 1, 2, '2026-02-19 00:00:11');
             "#,
         )
         .await;
@@ -172,6 +265,12 @@ mod tests {
                   url
                   rawUrl
                   discoveryDepth
+                  sublinks(
+                    pagination: { page: { limit: 10, page: 0 } }
+                    orderBy: { id: ASC }
+                  ) {
+                    nodes { id url }
+                  }
                   hyperlinkProcessingJob(
                     pagination: { page: { limit: 10, page: 0 } }
                     orderBy: { id: ASC }
@@ -196,6 +295,14 @@ mod tests {
         assert_eq!(
             payload["data"]["hyperlinks"]["nodes"][0]["discoveryDepth"],
             0
+        );
+        assert_eq!(
+            payload["data"]["hyperlinks"]["nodes"][0]["sublinks"]["nodes"][0]["id"],
+            2
+        );
+        assert_eq!(
+            payload["data"]["hyperlinks"]["nodes"][0]["sublinks"]["nodes"][0]["url"],
+            "https://example.com/child"
         );
         assert_eq!(
             payload["data"]["hyperlinks"]["nodes"]

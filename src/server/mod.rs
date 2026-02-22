@@ -1,7 +1,9 @@
 pub mod admin;
 pub mod context;
+mod flash;
 pub mod graphql;
 mod html_layout;
+mod hyperlink_fetcher;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod views;
@@ -20,6 +22,7 @@ pub async fn start(host: &str, port: &str) -> Result<(), String> {
         .map_err(|err| format!("failed to initialize database connection: {err}"))?;
     let processing_queue = crate::queue::ProcessingQueue::connect(connection.clone()).await?;
     processing_queue.spawn_worker(connection.clone()).await?;
+    let _artifact_gc_worker = crate::storage::gc::spawn(connection.clone());
 
     let jobs_dashboard = lilqueue::dashboard::router(processing_queue.dashboard_db());
     let state = context::Context {

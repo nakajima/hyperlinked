@@ -70,3 +70,71 @@ document.addEventListener(
   },
   true,
 );
+
+function tokenizeQuery(value) {
+  return value
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+}
+
+function tokenKey(token) {
+  const idx = token.indexOf(":");
+  if (idx <= 0) {
+    return "";
+  }
+  const key = token.slice(0, idx).toLowerCase();
+  if (key === "kind") {
+    return "scope";
+  }
+  if (key === "is") {
+    return "type";
+  }
+  return key;
+}
+
+document.addEventListener(
+  "change",
+  (event) => {
+    if (!(event.target instanceof Element)) {
+      return;
+    }
+
+    const select = event.target.closest("select[id$='-filter']");
+    if (!(select instanceof HTMLSelectElement)) {
+      return;
+    }
+
+    const suffix = "-filter";
+    if (!select.id.endsWith(suffix)) {
+      return;
+    }
+
+    const key = select.id.slice(0, -suffix.length);
+    if (!["status", "scope", "type", "order"].includes(key)) {
+      return;
+    }
+
+    const form = select.closest("form");
+    if (!(form instanceof HTMLFormElement)) {
+      return;
+    }
+
+    const input = form.querySelector("input[name='q']");
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+
+    let tokens = tokenizeQuery(input.value);
+
+    tokens = tokens.filter((token) => tokenKey(token) !== key);
+
+    if (select.value) {
+      tokens.push(`${key}:${select.value}`);
+    }
+
+    input.value = tokens.join(" ");
+    form.requestSubmit();
+  },
+  true,
+);

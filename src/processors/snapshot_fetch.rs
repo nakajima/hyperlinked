@@ -1,10 +1,13 @@
+use image::{GenericImageView, imageops::FilterType};
 use reqwest::{Url, header::CONTENT_TYPE};
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use std::collections::HashSet;
+use std::io::Cursor;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::{net::lookup_host, time::sleep};
+use tokio::{net::lookup_host, process::Command, time::sleep};
 
 use crate::{
     entity::{hyperlink, hyperlink_artifact::HyperlinkArtifactKind},
@@ -20,20 +23,34 @@ const MAX_TOTAL_CSS_BYTES: usize = 20 * 1024 * 1024;
 const SNAPSHOT_CONTENT_TYPE: &str = "application/warc";
 const SNAPSHOT_ERROR_CONTENT_TYPE: &str = "application/json";
 const PDF_SOURCE_DEFAULT_CONTENT_TYPE: &str = "application/pdf";
+const SCREENSHOT_CONTENT_TYPE: &str = "image/png";
+const SCREENSHOT_ERROR_CONTENT_TYPE: &str = "application/json";
 
 const RETRY_ATTEMPTS: usize = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(30);
 const RETRY_BASE_BACKOFF_MS: u64 = 200;
 const RETRY_JITTER_MAX_MS: u64 = 125;
+const DEFAULT_SCREENSHOT_TIMEOUT_SECS: u64 = 20;
+const DEFAULT_SCREENSHOT_DESKTOP_VIEWPORT: Viewport = Viewport {
+    width: 1366,
+    height: 4096,
+};
+const DEFAULT_SCREENSHOT_THUMB_SIZE: u32 = 400;
+const DEFAULT_SCREENSHOT_RENDER_WAIT_MS: u64 = 5000;
 
 pub struct SnapshotFetcher {
     job_id: i32,
 }
 
 pub struct SnapshotFetchOutput {
-    pub artifact_id: i32,
-    pub artifact_kind: HyperlinkArtifactKind,
+    pub source_artifact_id: i32,
+    pub source_artifact_kind: HyperlinkArtifactKind,
+    pub screenshot_artifact_id: Option<i32>,
+    pub screenshot_dark_artifact_id: Option<i32>,
+    pub screenshot_thumb_artifact_id: Option<i32>,
+    pub screenshot_thumb_dark_artifact_id: Option<i32>,
+    pub screenshot_error_artifact_id: Option<i32>,
 }
 
 impl SnapshotFetcher {
@@ -51,6 +68,7 @@ impl Processor for SnapshotFetcher {
         connection: &'a DatabaseConnection,
     ) -> Result<Self::Output, super::processor::ProcessingError> {
         let hyperlink_id = *hyperlink.id.as_ref();
+        let source_url = hyperlink.url.as_ref().to_string();
 
         match capture_snapshot(hyperlink.url.as_ref()).await {
             Ok(capture) => {
@@ -66,7 +84,7 @@ impl Processor for SnapshotFetcher {
                     } => (HyperlinkArtifactKind::PdfSource, payload, content_type),
                 };
 
-                let artifact = hyperlink_artifact::insert(
+                let source_artifact = hyperlink_artifact::insert(
                     connection,
                     hyperlink_id,
                     Some(self.job_id),
@@ -76,10 +94,129 @@ impl Processor for SnapshotFetcher {
                 )
                 .await
                 .map_err(ProcessingError::DB)?;
-                Ok(SnapshotFetchOutput {
-                    artifact_id: artifact.id,
-                    artifact_kind: kind,
-                })
+
+                let mut output = SnapshotFetchOutput {
+                    source_artifact_id: source_artifact.id,
+                    source_artifact_kind: kind,
+                    screenshot_artifact_id: None,
+                    screenshot_dark_artifact_id: None,
+                    screenshot_thumb_artifact_id: None,
+                    screenshot_thumb_dark_artifact_id: None,
+                    screenshot_error_artifact_id: None,
+                };
+
+                match capture_screenshots(&source_url).await {
+                    Ok(capture) => {
+                        let screenshot_artifact = hyperlink_artifact::insert(
+                            connection,
+                            hyperlink_id,
+                            Some(self.job_id),
+                            HyperlinkArtifactKind::ScreenshotPng,
+                            capture.desktop_png,
+                            SCREENSHOT_CONTENT_TYPE,
+                        )
+                        .await
+                        .map_err(ProcessingError::DB)?;
+                        output.screenshot_artifact_id = Some(screenshot_artifact.id);
+
+                        if let Some(dark_png) = capture.desktop_dark_png {
+                            let dark_artifact = hyperlink_artifact::insert(
+                                connection,
+                                hyperlink_id,
+                                Some(self.job_id),
+                                HyperlinkArtifactKind::ScreenshotDarkPng,
+                                dark_png,
+                                SCREENSHOT_CONTENT_TYPE,
+                            )
+                            .await
+                            .map_err(ProcessingError::DB)?;
+                            output.screenshot_dark_artifact_id = Some(dark_artifact.id);
+                        }
+
+                        let thumbnail_artifact = hyperlink_artifact::insert(
+                            connection,
+                            hyperlink_id,
+                            Some(self.job_id),
+                            HyperlinkArtifactKind::ScreenshotThumbPng,
+                            capture.thumbnail_png,
+                            SCREENSHOT_CONTENT_TYPE,
+                        )
+                        .await
+                        .map_err(ProcessingError::DB)?;
+                        output.screenshot_thumb_artifact_id = Some(thumbnail_artifact.id);
+
+                        if let Some(dark_thumbnail_png) = capture.thumbnail_dark_png {
+                            let dark_thumbnail_artifact = hyperlink_artifact::insert(
+                                connection,
+                                hyperlink_id,
+                                Some(self.job_id),
+                                HyperlinkArtifactKind::ScreenshotThumbDarkPng,
+                                dark_thumbnail_png,
+                                SCREENSHOT_CONTENT_TYPE,
+                            )
+                            .await
+                            .map_err(ProcessingError::DB)?;
+                            output.screenshot_thumb_dark_artifact_id =
+                                Some(dark_thumbnail_artifact.id);
+                        }
+
+                        if !capture.warnings.is_empty() {
+                            let payload = serde_json::to_vec_pretty(&ScreenshotFailureArtifact {
+                                source_url: source_url.clone(),
+                                failed_at: now_utc().to_string(),
+                                errors: capture.warnings,
+                                chromium_path: screenshot_chromium_path(),
+                                timeout_secs: screenshot_timeout().as_secs(),
+                            })
+                            .unwrap_or_else(|encode_error| {
+                                format!(
+                                    "{{\"error\":\"failed to encode screenshot warning payload: {encode_error}\"}}"
+                                )
+                                .into_bytes()
+                            });
+                            let warning_artifact = hyperlink_artifact::insert(
+                                connection,
+                                hyperlink_id,
+                                Some(self.job_id),
+                                HyperlinkArtifactKind::ScreenshotError,
+                                payload,
+                                SCREENSHOT_ERROR_CONTENT_TYPE,
+                            )
+                            .await
+                            .map_err(ProcessingError::DB)?;
+                            output.screenshot_error_artifact_id = Some(warning_artifact.id);
+                        }
+                    }
+                    Err(error) => {
+                        let payload = serde_json::to_vec_pretty(&ScreenshotFailureArtifact {
+                            source_url: source_url.clone(),
+                            failed_at: now_utc().to_string(),
+                            errors: vec![error],
+                            chromium_path: screenshot_chromium_path(),
+                            timeout_secs: screenshot_timeout().as_secs(),
+                        })
+                        .unwrap_or_else(|encode_error| {
+                            format!(
+                                "{{\"error\":\"failed to encode screenshot error payload: {encode_error}\"}}"
+                            )
+                            .into_bytes()
+                        });
+
+                        let error_artifact = hyperlink_artifact::insert(
+                            connection,
+                            hyperlink_id,
+                            Some(self.job_id),
+                            HyperlinkArtifactKind::ScreenshotError,
+                            payload,
+                            SCREENSHOT_ERROR_CONTENT_TYPE,
+                        )
+                        .await
+                        .map_err(ProcessingError::DB)?;
+                        output.screenshot_error_artifact_id = Some(error_artifact.id);
+                    }
+                }
+
+                Ok(output)
             }
             Err(error) => {
                 let payload = serde_json::to_vec_pretty(&error.artifact)
@@ -118,6 +255,20 @@ enum SnapshotCapture {
 struct SnapshotCaptureError {
     message: String,
     artifact: SnapshotFailureArtifact,
+}
+
+struct ScreenshotCapture {
+    desktop_png: Vec<u8>,
+    desktop_dark_png: Option<Vec<u8>>,
+    thumbnail_png: Vec<u8>,
+    thumbnail_dark_png: Option<Vec<u8>>,
+    warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+struct Viewport {
+    width: u32,
+    height: u32,
 }
 
 #[derive(Clone)]
@@ -159,6 +310,21 @@ struct SnapshotFailureArtifact {
     final_error: String,
     attempts: Vec<SnapshotFetchAttempt>,
     retry_policy: SnapshotRetryPolicy,
+}
+
+#[derive(Serialize)]
+struct ScreenshotFailureArtifact {
+    source_url: String,
+    failed_at: String,
+    errors: Vec<String>,
+    chromium_path: String,
+    timeout_secs: u64,
+}
+
+#[derive(Clone, Copy)]
+enum ScreenshotVariant {
+    Light,
+    Dark,
 }
 
 #[derive(Serialize)]
@@ -418,6 +584,207 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
     );
 
     Ok(SnapshotCapture::Html { archive })
+}
+
+async fn capture_screenshots(url: &str) -> Result<ScreenshotCapture, String> {
+    let parsed = Url::parse(url).map_err(|err| format!("invalid screenshot url: {err}"))?;
+    ensure_fetchable_url(&parsed).await?;
+
+    let desktop_viewport = screenshot_desktop_viewport();
+    let desktop_png =
+        capture_single_screenshot(parsed.as_str(), desktop_viewport, ScreenshotVariant::Light)
+            .await?;
+    let thumbnail_png = build_square_thumbnail(&desktop_png, screenshot_thumbnail_size())?;
+
+    let mut warnings = Vec::new();
+    let (desktop_dark_png, thumbnail_dark_png) = if screenshot_dark_mode_enabled() {
+        match capture_single_screenshot(parsed.as_str(), desktop_viewport, ScreenshotVariant::Dark)
+            .await
+        {
+            Ok(bytes) => {
+                let thumbnail = match build_square_thumbnail(&bytes, screenshot_thumbnail_size()) {
+                    Ok(thumbnail) => Some(thumbnail),
+                    Err(error) => {
+                        warnings.push(format!("dark thumbnail build failed: {error}"));
+                        None
+                    }
+                };
+                (Some(bytes), thumbnail)
+            }
+            Err(error) => {
+                warnings.push(format!("dark screenshot failed: {error}"));
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+
+    Ok(ScreenshotCapture {
+        desktop_png,
+        desktop_dark_png,
+        thumbnail_png,
+        thumbnail_dark_png,
+        warnings,
+    })
+}
+
+async fn capture_single_screenshot(
+    url: &str,
+    viewport: Viewport,
+    variant: ScreenshotVariant,
+) -> Result<Vec<u8>, String> {
+    let screenshot_path = screenshot_temp_path();
+    let window_size = format!("{},{}", viewport.width, viewport.height);
+
+    let mut command = Command::new(screenshot_chromium_path());
+    command
+        .arg("--headless=new")
+        .arg("--disable-gpu")
+        .arg("--hide-scrollbars")
+        .arg("--run-all-compositor-stages-before-draw")
+        .arg(format!(
+            "--virtual-time-budget={}",
+            screenshot_render_wait_ms()
+        ))
+        .arg(format!("--window-size={window_size}"))
+        .arg(format!("--screenshot={}", screenshot_path.display()))
+        .arg(url);
+    if matches!(variant, ScreenshotVariant::Dark) {
+        command
+            .arg("--force-dark-mode")
+            .arg("--enable-features=WebContentsForceDark");
+    }
+
+    let timeout = screenshot_timeout();
+    let output = tokio::time::timeout(timeout, command.output())
+        .await
+        .map_err(|_| format!("screenshot capture timed out after {}s", timeout.as_secs()))?
+        .map_err(|err| format!("failed to launch chromium for screenshot: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = tokio::fs::remove_file(&screenshot_path).await;
+        return Err(format!(
+            "chromium exited with status {}: stderr={}, stdout={}",
+            output.status, stderr, stdout
+        ));
+    }
+
+    let bytes = tokio::fs::read(&screenshot_path)
+        .await
+        .map_err(|err| format!("failed to read screenshot file {screenshot_path:?}: {err}"))?;
+    let _ = tokio::fs::remove_file(&screenshot_path).await;
+
+    if bytes.is_empty() {
+        return Err("chromium created an empty screenshot payload".to_string());
+    }
+
+    Ok(bytes)
+}
+
+fn screenshot_temp_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let jitter = jitter_ms();
+    std::env::temp_dir().join(format!("hyperlinked-screenshot-{nanos:x}-{jitter:x}.png"))
+}
+
+fn screenshot_chromium_path() -> String {
+    std::env::var("SCREENSHOT_CHROMIUM_PATH").unwrap_or_else(|_| "chromium".to_string())
+}
+
+fn screenshot_timeout() -> Duration {
+    Duration::from_secs(env_u64(
+        "SCREENSHOT_TIMEOUT_SECS",
+        DEFAULT_SCREENSHOT_TIMEOUT_SECS,
+        1,
+        120,
+    ))
+}
+
+fn screenshot_desktop_viewport() -> Viewport {
+    parse_viewport_env(
+        "SCREENSHOT_DESKTOP_VIEWPORT",
+        DEFAULT_SCREENSHOT_DESKTOP_VIEWPORT,
+    )
+}
+
+fn screenshot_thumbnail_size() -> u32 {
+    env_u64(
+        "SCREENSHOT_THUMB_SIZE",
+        DEFAULT_SCREENSHOT_THUMB_SIZE as u64,
+        64,
+        2048,
+    ) as u32
+}
+
+fn screenshot_render_wait_ms() -> u64 {
+    env_u64(
+        "SCREENSHOT_RENDER_WAIT_MS",
+        DEFAULT_SCREENSHOT_RENDER_WAIT_MS,
+        0,
+        60_000,
+    )
+}
+
+fn screenshot_dark_mode_enabled() -> bool {
+    env_bool("SCREENSHOT_DARK_MODE_ENABLED", true)
+}
+
+fn parse_viewport_env(key: &str, default: Viewport) -> Viewport {
+    let Some(raw) = std::env::var(key).ok() else {
+        return default;
+    };
+
+    let normalized = raw.trim().replace(',', "x");
+    let mut parts = normalized.split('x');
+    let Some(width_raw) = parts.next() else {
+        return default;
+    };
+    let Some(height_raw) = parts.next() else {
+        return default;
+    };
+    if parts.next().is_some() {
+        return default;
+    }
+
+    let Ok(width) = width_raw.trim().parse::<u32>() else {
+        return default;
+    };
+    let Ok(height) = height_raw.trim().parse::<u32>() else {
+        return default;
+    };
+
+    if width == 0 || height == 0 {
+        return default;
+    }
+
+    Viewport { width, height }
+}
+
+fn build_square_thumbnail(source_png: &[u8], size: u32) -> Result<Vec<u8>, String> {
+    let image = image::load_from_memory(source_png)
+        .map_err(|err| format!("invalid screenshot png: {err}"))?;
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return Err("invalid screenshot dimensions".to_string());
+    }
+
+    let side = width.min(height);
+    let x = (width.saturating_sub(side)) / 2;
+    let y = 0;
+    let square = image.crop_imm(x, y, side, side);
+    let thumbnail = square.resize_exact(size, size, FilterType::Lanczos3);
+
+    let mut buffer = Cursor::new(Vec::new());
+    thumbnail
+        .write_to(&mut buffer, image::ImageFormat::Png)
+        .map_err(|err| format!("failed to encode screenshot thumbnail png: {err}"))?;
+    Ok(buffer.into_inner())
 }
 
 async fn fetch_response_with_retry(
@@ -839,6 +1206,26 @@ fn extract_attr_value(tag: &str, attribute: &str) -> Option<String> {
 
 fn is_attr_name_char(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':')
+}
+
+fn env_u64(key: &str, default: u64, min: u64, max: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default.clamp(min, max))
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .and_then(|value| match value.as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
 }
 
 fn now_utc() -> sea_orm::entity::prelude::DateTime {

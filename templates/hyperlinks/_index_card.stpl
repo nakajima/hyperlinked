@@ -1,30 +1,51 @@
 <% let status = index_status(latest_job); %>
-<li class="hyperlink">
-  <article class="vstack gap-2">
-    <h3 class="text-base">
-      <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= link.id %>"><%= link.title %></a>
-    </h3>
-    <p class="hstack gap-2 align-center text-sm leading-tight">
-      <a class="tertiary" href="<%= link.url %>" data-hyperlink-id="<%= link.id %>"><%= link.url %></a>
-      <% if link.url.ends_with(".pdf") { %>
-        <span class="badge">PDF</span>
+<li>
+  <article class="hstack gap-4">
+    <% if let Some(thumbnail_path) = self.thumbnail_inline_path(link.id) { %>
+      <a href="/hyperlinks/<%= link.id %>" class="block w-4 h-4 overflow-hidden rounded">
+        <picture class="block full-width full-height">
+          <% if let Some(thumbnail_dark_path) = self.thumbnail_dark_inline_path(link.id) { %>
+            <source srcset="<%= thumbnail_dark_path %>" media="(prefers-color-scheme: dark)">
+          <% } %>
+          <img class="block full-width full-height object-cover" src="<%= thumbnail_path %>" alt="Screenshot thumbnail for <%= link.title %>" loading="lazy">
+        </picture>
+      </a>
+    <% } else { %>
+      <div class="placeholder w-4 h-4"></div>
+    <% } %>
+
+    <div class="vstack gap-2">
+      <h3 class="text-base bold">
+        <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= link.id %>"><%= link.title %></a>
+      </h3>
+
+      <% if let Some(snippet) = match_snippet { %>
+        <blockquote class="text-sm"><%- snippet %></blockquote>
       <% } %>
-    </p>
-    <div class="tertiary hstack gap-2 align-center text-sm leading-tight link-soft">
-      <span>
-        <%- render_relative_time(&link.created_at) %>
-      </span>
-      <% if let Some(status) = status.as_ref() { %>
+
+      <p class="hstack gap-2 align-center text-sm">
+        <a class="tertiary" href="<%= link.url %>" data-hyperlink-id="<%= link.id %>"><%= link.url %></a>
+        <% if link.url.ends_with(".pdf") { %>
+          <span class="badge">PDF</span>
+        <% } %>
+      </p>
+      
+      <div class="tertiary hstack gap-2 align-center text-sm">
+        <span>
+          <%- render_relative_time(&link.created_at) %>
+        </span>
+        <% if let Some(status) = status.as_ref() { %>
+          <span>|</span>
+          <% if matches!(status, IndexStatus::Processing) { %>
+            <span>Processing</span>
+          <% } %>
+          <% if matches!(status, IndexStatus::Failed) { %>
+            <span>Failed</span>
+          <% } %>
+        <% } %>
         <span>|</span>
-        <% if matches!(status, IndexStatus::Processing) { %>
-          <span>Processing</span>
-        <% } %>
-        <% if matches!(status, IndexStatus::Failed) { %>
-          <span>Failed</span>
-        <% } %>
-      <% } %>
-      <span>|</span>
-      <a class="index-card-action-link" href="/hyperlinks/<%= link.id %>">Details</a>
+        <a href="/hyperlinks/<%= link.id %>">Details</a>
+      </div>
     </div>
   </article>
 </li>

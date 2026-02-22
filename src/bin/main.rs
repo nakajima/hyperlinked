@@ -29,6 +29,10 @@ enum Commands {
     ImportLinkwarden {
         input: PathBuf,
     },
+    ArtifactsBackfill {
+        #[arg(long, default_value_t = 500)]
+        batch_size: u64,
+    },
 }
 
 #[tokio::main]
@@ -72,6 +76,7 @@ async fn run() -> Result<i32, String> {
             Ok(0)
         }
         Commands::ImportLinkwarden { input } => run_linkwarden_import(input).await,
+        Commands::ArtifactsBackfill { batch_size } => run_artifacts_backfill(batch_size).await,
     }
 }
 
@@ -101,6 +106,26 @@ async fn run_linkwarden_import(input: PathBuf) -> Result<i32, String> {
         report.summary.inserted,
         report.summary.updated,
         report.summary.failed
+    );
+
+    Ok(0)
+}
+
+async fn run_artifacts_backfill(batch_size: u64) -> Result<i32, String> {
+    let connection = hyperlinked::db::connection::init()
+        .await
+        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+
+    let report = hyperlinked::model::hyperlink_artifact::backfill_blob_payloads_to_disk(
+        &connection,
+        batch_size,
+    )
+    .await
+    .map_err(|err| format!("artifact backfill failed: {err}"))?;
+
+    println!(
+        "artifact backfill: scanned={}, migrated={}, skipped_without_payload={}",
+        report.scanned, report.migrated, report.skipped_without_payload
     );
 
     Ok(0)
