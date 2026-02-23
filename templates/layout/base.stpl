@@ -14,13 +14,13 @@
     <% include!("../shared/_header.stpl"); %>
     <main class="flex flex-col gap-3">
       <% if let Some(dev_restart_alert) = self.dev_restart_alert.as_ref() { %>
-        <p class="mb-2 rounded-form border border-dev-alert-border bg-dev-alert-bg px-3 py-flash text-sm leading-5 text-dev-alert" role="alert"><%= dev_restart_alert %></p>
+        <p class="mb-2 rounded-[0.4rem] border border-dev-alert-border bg-dev-alert-bg px-3 py-[0.65rem] text-sm leading-5 text-dev-alert" role="alert"><%= dev_restart_alert %></p>
       <% } %>
       <% if let Some(notice) = self.notice_flash.as_ref() { %>
-        <p class="mb-2 rounded-form border border-notice-border bg-notice-bg px-3 py-flash text-sm leading-5 text-notice" role="status"><%= notice %></p>
+        <p class="mb-2 rounded-[0.4rem] border border-notice-border bg-notice-bg px-3 py-[0.65rem] text-sm leading-5 text-notice" role="status"><%= notice %></p>
       <% } %>
       <% if let Some(alert) = self.alert_flash.as_ref() { %>
-        <p class="mb-2 rounded-form border border-invalid bg-form-control px-3 py-flash text-sm leading-5 text-alert" role="alert"><%= alert %></p>
+        <p class="mb-2 rounded-[0.4rem] border border-invalid bg-form-control px-3 py-[0.65rem] text-sm leading-5 text-alert" role="alert"><%= alert %></p>
       <% } %>
       <%- self.body_html %>
     </main>

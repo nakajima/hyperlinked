@@ -92,7 +92,7 @@ async fn run_linkwarden_import(input: PathBuf) -> Result<i32, String> {
         &connection,
         &input,
         hyperlinked::import::linkwarden::ImportFormat::Auto,
-        &processing_queue,
+        Some(&processing_queue),
     )
     .await
     .map_err(|message| format!("linkwarden import failed: {message}"))?;

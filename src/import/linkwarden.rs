@@ -50,13 +50,22 @@ pub async fn import_file(
     connection: &DatabaseConnection,
     path: &Path,
     format: ImportFormat,
-    processing_queue: &ProcessingQueueSender,
+    processing_queue: Option<&ProcessingQueueSender>,
 ) -> Result<ImportReport, String> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    let root: Value = serde_json::from_str(&content)
-        .map_err(|err| format!("failed to parse json from {}: {err}", path.display()))?;
+    import_json_content(connection, &content, format, processing_queue).await
+}
+
+pub async fn import_json_content(
+    connection: &DatabaseConnection,
+    content: &str,
+    format: ImportFormat,
+    processing_queue: Option<&ProcessingQueueSender>,
+) -> Result<ImportReport, String> {
+    let root: Value =
+        serde_json::from_str(&content).map_err(|err| format!("failed to parse json: {err}"))?;
 
     let rows = match format {
         ImportFormat::Auto => detect_rows_auto(&root),
@@ -92,13 +101,8 @@ pub async fn import_file(
             }
         };
 
-        match hyperlink::upsert_by_url(
-            connection,
-            normalized,
-            parsed.created_at,
-            Some(processing_queue),
-        )
-        .await
+        match hyperlink::upsert_by_url(connection, normalized, parsed.created_at, processing_queue)
+            .await
         {
             Ok(UpsertResult::Inserted) => report.summary.inserted += 1,
             Ok(UpsertResult::Updated) => report.summary.updated += 1,
@@ -356,9 +360,14 @@ mod tests {
             .await
             .expect("processing queue should initialize");
         let path = write_temp_file(content, suffix).await;
-        let report = import_file(connection, &path, ImportFormat::Auto, &processing_queue)
-            .await
-            .expect("import should complete");
+        let report = import_file(
+            connection,
+            &path,
+            ImportFormat::Auto,
+            Some(&processing_queue),
+        )
+        .await
+        .expect("import should complete");
         tokio::fs::remove_file(path)
             .await
             .expect("temp file should be removed");

@@ -1,43 +1,43 @@
 <section class="flex flex-col gap-4" aria-labelledby="admin-jobs-heading">
-  <article class="flex flex-col gap-compact">
+  <article class="flex flex-col gap-[0.4rem]">
     <p class="text-sm">Queue</p>
     <h2 id="admin-jobs-heading">Jobs dashboard</h2>
     <p class="text-sm">ProcessingTask queue rows joined with hyperlink processing context.</p>
     <p class="text-sm"><a href="/jobs">Open raw lilqueue dashboard</a></p>
   </article>
 
-  <section class="flex flex-row flex-wrap gap-compact text-sm">
-    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+  <section class="flex flex-row flex-wrap gap-[0.4rem] text-sm">
+    <div class="rounded-[0.4rem] border border-form-control bg-form-control px-3 py-1">
       <span class="text-tertiary">Pending:</span>
       <span><%= self.stats.queued + self.stats.processing %></span>
     </div>
-    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+    <div class="rounded-[0.4rem] border border-form-control bg-form-control px-3 py-1">
       <span class="text-tertiary">Queued:</span>
       <span><%= self.stats.queued %></span>
     </div>
-    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+    <div class="rounded-[0.4rem] border border-form-control bg-form-control px-3 py-1">
       <span class="text-tertiary">Processing:</span>
       <span><%= self.stats.processing %></span>
     </div>
-    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+    <div class="rounded-[0.4rem] border border-form-control bg-form-control px-3 py-1">
       <span class="text-tertiary">Completed:</span>
       <span><%= self.stats.completed %></span>
     </div>
-    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+    <div class="rounded-[0.4rem] border border-form-control bg-form-control px-3 py-1">
       <span class="text-tertiary">Failed:</span>
       <span><%= self.stats.failed %></span>
     </div>
-    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+    <div class="rounded-[0.4rem] border border-form-control bg-form-control px-3 py-1">
       <span class="text-tertiary">Cleared:</span>
       <span><%= self.stats.cleared %></span>
     </div>
-    <div class="rounded-form border border-form-control bg-form-control px-3 py-1">
+    <div class="rounded-[0.4rem] border border-form-control bg-form-control px-3 py-1">
       <span class="text-tertiary">Total:</span>
       <span><%= self.stats.total %></span>
     </div>
   </section>
 
-  <form method="get" action="/admin/jobs" class="flex flex-row flex-wrap items-center gap-compact">
+  <form method="get" action="/admin/jobs" class="flex flex-row flex-wrap items-center gap-[0.4rem]">
     <label for="jobs-status-filter" class="text-sm text-tertiary">Status</label>
     <select id="jobs-status-filter" name="status">
       <option value="all" <% if self.status_filter == "all" { %>selected<% } %>>All</option>
@@ -53,7 +53,7 @@
     <span class="text-sm text-tertiary">Showing up to <%= self.limit %> rows.</span>
   </form>
 
-  <section class="flex flex-row flex-wrap items-center gap-compact text-sm">
+  <section class="flex flex-row flex-wrap items-center gap-[0.4rem] text-sm">
     <form method="post" action="/admin/jobs/recover-orphans">
       <button type="submit">Recover orphans</button>
     </form>
@@ -73,7 +73,7 @@
   <% if self.rows.is_empty() { %>
     <p class="text-sm">No matching ProcessingTask queue rows.</p>
   <% } else { %>
-    <form method="post" action="/admin/jobs/clear-failed" class="flex flex-col gap-compact">
+    <form method="post" action="/admin/jobs/clear-failed" class="flex flex-col gap-[0.4rem]">
       <button type="submit">Clear selected failed</button>
       <div>
         <table class="font-mono text-sm">
@@ -149,7 +149,7 @@
     </form>
   <% } %>
 
-  <nav class="flex flex-row items-center gap-compact text-sm" aria-label="Jobs pagination">
+  <nav class="flex flex-row items-center gap-[0.4rem] text-sm" aria-label="Jobs pagination">
     <% if let Some(prev_href) = self.prev_page_href.as_ref() { %>
       <a href="<%= prev_href %>">Previous</a>
     <% } else { %>

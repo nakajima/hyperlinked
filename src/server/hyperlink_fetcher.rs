@@ -972,6 +972,9 @@ fn parse_query(raw_q: Option<&str>) -> ParseQueryOutput {
             "scope" => parse_scope_token(&value)
                 .map(|scope| push_unique(&mut parsed_query.scopes, scope))
                 .is_some(),
+            "with" => parse_with_token(&value)
+                .map(|scope| push_unique(&mut parsed_query.scopes, scope))
+                .is_some(),
             "type" => parse_type_token(&value)
                 .map(|link_type| push_unique(&mut parsed_query.types, link_type))
                 .is_some(),
@@ -1024,6 +1027,13 @@ fn parse_scope_token(value: &str) -> Option<ScopeToken> {
         "root" => Some(ScopeToken::Root),
         "all" => Some(ScopeToken::All),
         "discovered" | "sublinks" => Some(ScopeToken::Discovered),
+        _ => None,
+    }
+}
+
+fn parse_with_token(value: &str) -> Option<ScopeToken> {
+    match value {
+        "discovered" => Some(ScopeToken::All),
         _ => None,
     }
 }
@@ -1088,6 +1098,19 @@ mod tests {
     fn parse_query_merges_status_aliases_and_avoids_duplicates() {
         let parsed = parse_query(Some("status:running status:processing status:queued"));
         assert_eq!(parsed.parsed_query.statuses, vec![StatusToken::Processing]);
+    }
+
+    #[test]
+    fn parse_query_supports_with_discovered_alias() {
+        let parsed = parse_query(Some("with:discovered"));
+        assert_eq!(parsed.parsed_query.scopes, vec![ScopeToken::All]);
+        assert!(parsed.ignored_tokens.is_empty());
+    }
+
+    #[test]
+    fn parse_query_rejects_unknown_with_tokens() {
+        let parsed = parse_query(Some("with:unknown"));
+        assert_eq!(parsed.ignored_tokens, vec!["with:unknown".to_string()]);
     }
 
     #[test]

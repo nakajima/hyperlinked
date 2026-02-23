@@ -1,19 +1,19 @@
 <section class="flex flex-col gap-4" aria-labelledby="show-link-heading">
-  <section class="flex flex-col gap-3 md:flex-row md:items-start md:gap-6">
-    <article class="flex flex-col gap-3 md:min-w-0 md:flex-1">
+  <section class="flex flex-col gap-3 md:flex-row md:items-stretch md:gap-6">
+    <article class="flex flex-col gap-3 md:min-h-0 md:min-w-0 md:flex-1">
       <h2><%= self.display_title() %></h2>
       <p>
-        <a href="<%= self.link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= self.link.id %>" class="text-sm"><%= self.link.url %></a>
+        <a href="<%= self.link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= self.link.id %>" class="text-sm break-all"><%= self.link.url %></a>
       </p>
 
       <% if self.link.raw_url != self.link.url { %>
-        <p class="text-sm">Submitted URL: <%= self.link.raw_url %></p>
+        <p class="text-sm">Submitted URL: <span class="break-all"><%= self.link.raw_url %></span></p>
       <% } %>
       <% if let Some(error_message) = self.latest_error_message() { %>
-        <p class="text-sm">Latest error: <%= error_message %></p>
+        <p class="text-sm">Latest error: <span class="break-all"><%= error_message %></span></p>
       <% } %>
 
-      <dl class="flex flex-row gap-4 text-sm">
+      <dl class="flex flex-row flex-wrap gap-4 text-sm">
         <div class="flex flex-row gap-1">
         <dt>Saved</dt>
         <dd><%- render_relative_time(&self.link.created_at) %></dd>
@@ -43,11 +43,34 @@
         <dd><%= self.link.clicks_count %></dd>
         </div>
       </dl>
+
+      <% if let Some(screenshot_path) = self.screenshot_inline_path() { %>
+        <a
+          href="<%= screenshot_path %>"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="block overflow-hidden rounded-[0.4rem] border border-form-control bg-form-control md:min-h-0 md:flex-1"
+          style="aspect-ratio: 16 / 10;"
+        >
+          <picture class="block h-full w-full">
+            <% if let Some(screenshot_dark_path) = self.screenshot_dark_inline_path() { %>
+              <source srcset="<%= screenshot_dark_path %>" media="(prefers-color-scheme: dark)">
+            <% } %>
+            <img
+              class="block h-full w-full object-cover"
+              style="object-position: top;"
+              src="<%= screenshot_path %>"
+              alt="Screenshot for <%= self.display_title() %>"
+              loading="lazy"
+            >
+          </picture>
+        </a>
+      <% } %>
     </article>
 
     <% if let Some(summary) = self.og_summary() { %>
       <% if summary.has_values() { %>
-        <aside class="flex w-full flex-col gap-2 rounded-form border border-form-control bg-form-control px-3 py-3 text-sm md:w-80 md:flex-none">
+        <aside class="flex w-full flex-col gap-2 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3 text-sm md:w-80 md:flex-none">
           <h4 class="font-bold">Open Graph</h4>
           <dl class="flex flex-col gap-2">
             <% if let Some(title) = summary.title() { %>
@@ -81,6 +104,9 @@
               </div>
             <% } %>
             <% if let Some(image_url) = summary.image_url() { %>
+              <picture>
+                <img src="<%= image_url %>" />
+              </picture>
               <div class="flex flex-col gap-0.5">
                 <dt class="text-subdued">Image</dt>
                 <dd><a class="break-all" href="<%= image_url %>" target="_blank" rel="noopener noreferrer"><%= image_url %></a></dd>
@@ -113,27 +139,27 @@
   
   <section class="flex flex-col gap-4">
   <hr>
-    <section class="flex flex-row gap-4">
+    <section class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
         <h4 class="font-bold text-subdued">Actions</h4>
-        <nav class="flex flex-row flex-wrap gap-4 overflow-x-visible whitespace-normal" aria-label="Link actions">
+        <nav class="flex flex-row flex-wrap gap-2 overflow-x-visible whitespace-normal sm:gap-4" aria-label="Link actions">
           <a href="/hyperlinks/<%= self.link.id %>/edit">Edit</a>
           <form action="/hyperlinks/<%= self.link.id %>/reprocess" method="post" class="inline">
-            <button class="inline min-h-auto border-0 bg-transparent p-0" type="submit">Reprocess</button>
+            <button class="inline min-h-0 border-0 bg-transparent p-0" type="submit">Reprocess</button>
           </form>
           <form action="/hyperlinks/<%= self.link.id %>/delete" method="post" data-confirm="Delete this link?" class="inline">
-            <button class="inline min-h-auto border-0 bg-transparent p-0" type="submit">Delete</button>
+            <button class="inline min-h-0 border-0 bg-transparent p-0" type="submit">Delete</button>
           </form>
         </nav>
     </section>
     <hr>
     <div class="grid items-start gap-5">
-      <section class="flex flex-col gap-compact">
+      <section class="flex flex-col gap-[0.4rem]">
         <h4 class="font-bold">Artifacts</h4>
         <% let present_kinds = self.present_artifact_kinds(); %>
         <% let missing_labels = self.missing_artifact_labels(); %>
         <% include!("_artifacts_table.stpl"); %>
       </section>
-      <section class="flex flex-col gap-compact">
+      <section class="flex flex-col gap-[0.4rem]">
         <h4 class="font-bold">Recent jobs</h4>
         <% include!("_timeline_table.stpl"); %>
       </section>

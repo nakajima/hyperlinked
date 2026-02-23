@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
+use reqwest::{Url, header::CONTENT_TYPE};
 use sea_orm::ActiveValue::Set;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
@@ -13,11 +15,14 @@ use crate::{
     processors::{
         processor::{ProcessingError, Processor},
         readability_fetch::extract_html_from_warc,
+        snapshot_fetch::ensure_fetchable_url,
     },
 };
 
 const OG_META_CONTENT_TYPE: &str = "application/json";
 const OG_ERROR_CONTENT_TYPE: &str = "application/json";
+const OG_IMAGE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(8);
+const OG_IMAGE_DOWNLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct OgFetcher {
     job_id: i32,
@@ -26,6 +31,7 @@ pub struct OgFetcher {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct OgFetchOutput {
     pub meta_artifact_id: Option<i32>,
+    pub image_artifact_id: Option<i32>,
     pub error_artifact_id: Option<i32>,
 }
 
@@ -70,6 +76,8 @@ impl Processor for OgFetcher {
                     captured_at: now_utc().to_string(),
                     source_kind: "pdf".to_string(),
                     source_artifact_id: Some(pdf_artifact.id),
+                    image_artifact_id: None,
+                    image_download_error: None,
                     selected: OgSelected::default(),
                     tags: Vec::new(),
                 })
@@ -91,6 +99,7 @@ impl Processor for OgFetcher {
 
                 return Ok(OgFetchOutput {
                     meta_artifact_id: Some(meta_artifact.id),
+                    image_artifact_id: None,
                     error_artifact_id: None,
                 });
             }
@@ -137,7 +146,36 @@ impl Processor for OgFetcher {
         };
 
         let tags = extract_open_graph_tags(&html);
-        let selected = select_open_graph_fields(&tags);
+        let mut selected = select_open_graph_fields(&tags);
+        canonicalize_og_image_url(&source_url, &mut selected);
+
+        let (image_artifact_id, image_download_error) = match selected.image.as_deref() {
+            Some(image_url) => {
+                match download_og_image_artifact(
+                    connection,
+                    hyperlink_id,
+                    self.job_id,
+                    &source_url,
+                    image_url,
+                )
+                .await
+                {
+                    Ok(artifact) => (Some(artifact.id), None),
+                    Err(error) => {
+                        tracing::warn!(
+                            hyperlink_id,
+                            job_id = self.job_id,
+                            image_url,
+                            error = %error,
+                            "failed to download og:image payload"
+                        );
+                        (None, Some(error))
+                    }
+                }
+            }
+            None => (None, None),
+        };
+
         apply_selected_fields(hyperlink, &selected);
 
         let payload = serde_json::to_vec_pretty(&OgMetaArtifact {
@@ -145,6 +183,8 @@ impl Processor for OgFetcher {
             captured_at: now_utc().to_string(),
             source_kind: "html".to_string(),
             source_artifact_id: Some(snapshot_artifact.id),
+            image_artifact_id,
+            image_download_error,
             selected,
             tags,
         })
@@ -165,6 +205,7 @@ impl Processor for OgFetcher {
 
         Ok(OgFetchOutput {
             meta_artifact_id: Some(meta_artifact.id),
+            image_artifact_id,
             error_artifact_id: None,
         })
     }
@@ -176,6 +217,8 @@ struct OgMetaArtifact {
     captured_at: String,
     source_kind: String,
     source_artifact_id: Option<i32>,
+    image_artifact_id: Option<i32>,
+    image_download_error: Option<String>,
     selected: OgSelected,
     tags: Vec<OgTag>,
 }
@@ -276,6 +319,185 @@ fn apply_selected_fields(hyperlink: &mut hyperlink::ActiveModel, selected: &OgSe
     hyperlink.og_url = Set(selected.url.clone());
     hyperlink.og_image_url = Set(selected.image.clone());
     hyperlink.og_site_name = Set(selected.site_name.clone());
+}
+
+fn canonicalize_og_image_url(source_url: &str, selected: &mut OgSelected) {
+    let Some(image_url) = selected.image.as_deref() else {
+        return;
+    };
+
+    if let Ok(resolved) = resolve_og_image_url(source_url, image_url) {
+        selected.image = Some(resolved.to_string());
+    }
+}
+
+fn resolve_og_image_url(source_url: &str, raw_image_url: &str) -> Result<Url, String> {
+    let base =
+        Url::parse(source_url).map_err(|err| format!("invalid hyperlink source url: {err}"))?;
+    let image_url = raw_image_url.trim();
+    if image_url.is_empty() {
+        return Err("og:image URL is empty".to_string());
+    }
+    base.join(image_url)
+        .map_err(|err| format!("invalid og:image URL: {err}"))
+}
+
+async fn download_og_image_artifact(
+    connection: &DatabaseConnection,
+    hyperlink_id: i32,
+    job_id: i32,
+    source_url: &str,
+    raw_image_url: &str,
+) -> Result<hyperlink_artifact_entity::Model, String> {
+    let image_url = resolve_og_image_url(source_url, raw_image_url)?;
+    ensure_fetchable_url(&image_url).await?;
+
+    let client = reqwest::Client::builder()
+        .timeout(OG_IMAGE_DOWNLOAD_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|err| format!("failed to build og:image http client: {err}"))?;
+
+    let mut response = client
+        .get(image_url.clone())
+        .send()
+        .await
+        .map_err(|err| format!("failed to fetch og:image URL {image_url}: {err}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "failed to fetch og:image URL {image_url}: status {status}"
+        ));
+    }
+
+    let content_type_header = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let mut payload = Vec::with_capacity(4096);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| format!("failed reading og:image body {image_url}: {err}"))?
+    {
+        let remaining = OG_IMAGE_DOWNLOAD_MAX_BYTES.saturating_sub(payload.len());
+        if remaining == 0 {
+            return Err(format!(
+                "og:image payload exceeded {} bytes",
+                OG_IMAGE_DOWNLOAD_MAX_BYTES
+            ));
+        }
+
+        if chunk.len() > remaining {
+            payload.extend_from_slice(&chunk[..remaining]);
+            return Err(format!(
+                "og:image payload exceeded {} bytes",
+                OG_IMAGE_DOWNLOAD_MAX_BYTES
+            ));
+        }
+
+        payload.extend_from_slice(&chunk);
+    }
+
+    if payload.is_empty() {
+        return Err("og:image payload was empty".to_string());
+    }
+
+    let content_type =
+        select_og_image_content_type(content_type_header.as_deref(), &payload, &image_url)
+            .ok_or_else(|| "og:image payload does not look like an image".to_string())?;
+
+    hyperlink_artifact_model::insert(
+        connection,
+        hyperlink_id,
+        Some(job_id),
+        HyperlinkArtifactKind::OgImage,
+        payload,
+        &content_type,
+    )
+    .await
+    .map_err(|err| format!("failed to persist og:image artifact: {err}"))
+}
+
+fn select_og_image_content_type(header: Option<&str>, payload: &[u8], url: &Url) -> Option<String> {
+    if let Some(header) = header {
+        if is_image_content_type(header) {
+            return Some(header.to_string());
+        }
+    }
+
+    if let Some(content_type) = infer_image_content_type_from_payload(payload) {
+        return Some(content_type.to_string());
+    }
+
+    infer_image_content_type_from_url(url).map(ToString::to_string)
+}
+
+fn is_image_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("image/"))
+}
+
+fn infer_image_content_type_from_payload(payload: &[u8]) -> Option<&'static str> {
+    if payload.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if payload.len() >= 3 && payload[0] == 0xFF && payload[1] == 0xD8 && payload[2] == 0xFF {
+        return Some("image/jpeg");
+    }
+    if payload.starts_with(b"GIF87a") || payload.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if payload.len() >= 12 && payload.starts_with(b"RIFF") && &payload[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if payload.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    if payload.len() >= 12
+        && &payload[4..8] == b"ftyp"
+        && matches!(
+            &payload[8..12],
+            b"avif" | b"avis" | b"heic" | b"heix" | b"heif" | b"hevc"
+        )
+    {
+        return Some("image/avif");
+    }
+
+    let sample = String::from_utf8_lossy(&payload[..payload.len().min(256)]).to_ascii_lowercase();
+    if sample.contains("<svg") {
+        return Some("image/svg+xml");
+    }
+
+    None
+}
+
+fn infer_image_content_type_from_url(url: &Url) -> Option<&'static str> {
+    let path = url.path().to_ascii_lowercase();
+    if path.ends_with(".png") {
+        Some("image/png")
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        Some("image/jpeg")
+    } else if path.ends_with(".gif") {
+        Some("image/gif")
+    } else if path.ends_with(".webp") {
+        Some("image/webp")
+    } else if path.ends_with(".bmp") {
+        Some("image/bmp")
+    } else if path.ends_with(".svg") {
+        Some("image/svg+xml")
+    } else if path.ends_with(".avif") {
+        Some("image/avif")
+    } else {
+        None
+    }
 }
 
 fn normalize_property(value: &str) -> String {
@@ -467,6 +689,13 @@ mod tests {
         assert_eq!(tags[0].content, "https://example.com/path");
     }
 
+    #[test]
+    fn resolves_relative_og_image_url_against_source_url() {
+        let resolved = resolve_og_image_url("https://example.com/posts/42", "/media/cover.png")
+            .expect("relative og:image URL should resolve");
+        assert_eq!(resolved.as_str(), "https://example.com/media/cover.png");
+    }
+
     #[tokio::test]
     async fn process_sets_hyperlink_og_fields_and_persists_meta_artifact() {
         let connection = test_support::new_memory_connection().await;
@@ -529,6 +758,14 @@ mod tests {
             .expect("og fetch should succeed");
         assert!(output.meta_artifact_id.is_some());
         assert!(output.error_artifact_id.is_none());
+        if let Some(image_artifact_id) = output.image_artifact_id {
+            let image_artifact = hyperlink_artifact::Entity::find_by_id(image_artifact_id)
+                .one(&connection)
+                .await
+                .expect("image artifact query should succeed")
+                .expect("image artifact should exist");
+            assert_eq!(image_artifact.kind, HyperlinkArtifactKind::OgImage);
+        }
 
         let updated = hyperlink_active
             .update(&connection)
@@ -565,5 +802,75 @@ mod tests {
             meta_json["selected"]["description"],
             json!("Example OG Description")
         );
+    }
+
+    #[tokio::test]
+    async fn process_ignores_non_http_og_image_urls_and_still_persists_meta_artifact() {
+        let connection = test_support::new_memory_connection().await;
+        test_support::initialize_hyperlinks_schema_with_search(&connection).await;
+
+        test_support::execute_sql(
+            &connection,
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Example', 'https://example.com/post', 'https://example.com/post', 0, 0, NULL, '2026-02-22 00:00:00', '2026-02-22 00:00:00');
+            "#,
+        )
+        .await;
+
+        let html = r#"
+            <html><head>
+              <meta property="og:title" content="Example OG Title">
+              <meta property="og:image" content="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB">
+            </head><body></body></html>
+        "#;
+        let warc_payload = format!(
+            "WARC/1.0\r\nWARC-Type: response\r\nWARC-Target-URI: https://example.com/post\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            html.len(),
+            html
+        )
+        .into_bytes();
+
+        hyperlink_artifact::ActiveModel {
+            hyperlink_id: Set(1),
+            job_id: Set(None),
+            kind: Set(HyperlinkArtifactKind::SnapshotWarc),
+            payload: Set(warc_payload.clone()),
+            storage_path: Set(None),
+            storage_backend: Set(None),
+            checksum_sha256: Set(None),
+            content_type: Set("application/warc".to_string()),
+            size_bytes: Set(i32::try_from(warc_payload.len()).expect("payload len fits in i32")),
+            created_at: Set(now_utc()),
+            ..Default::default()
+        }
+        .insert(&connection)
+        .await
+        .expect("snapshot artifact should insert");
+
+        let mut hyperlink_active: hyperlink::ActiveModel = hyperlink::Entity::find_by_id(1)
+            .one(&connection)
+            .await
+            .expect("query should succeed")
+            .expect("row should exist")
+            .into();
+
+        let mut fetcher = OgFetcher::new(99);
+        let output = fetcher
+            .process(&mut hyperlink_active, &connection)
+            .await
+            .expect("og fetch should succeed");
+        assert!(output.meta_artifact_id.is_some());
+        assert!(output.image_artifact_id.is_none());
+        assert!(output.error_artifact_id.is_none());
+
+        let image_artifact = hyperlink_artifact_model::latest_for_hyperlink_kind(
+            &connection,
+            1,
+            HyperlinkArtifactKind::OgImage,
+        )
+        .await
+        .expect("image artifact query should succeed");
+        assert!(image_artifact.is_none());
     }
 }

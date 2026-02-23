@@ -41,6 +41,7 @@ tower-http = { version = "0.6.6", features = ["fs"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 tracing-tree = "0.4.0"
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 axum-test = "18.7.0"

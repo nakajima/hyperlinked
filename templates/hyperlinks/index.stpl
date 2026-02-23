@@ -1,62 +1,68 @@
 <section class="flex flex-col gap-4" aria-labelledby="links-heading">
   <form method="get" action="/hyperlinks" class="flex flex-col gap-3">
-    <div class="flex flex-row items-center gap-compact">
+    <div class="url-intent-row">
       <input
         id="hyperlinks-query"
         name="q"
         type="text"
+        data-url-intent-input
         value="<%= self.query_input %>"
-        placeholder="Filter with tokens, e.g. status:failed order:random"
+        placeholder="Search for something. Or enter a link to add. Go nuts."
         autocomplete="off"
         class="min-w-0 flex-1"
       />
-      <a href="/hyperlinks" class="shrink-0 text-sm text-subdued">Clear</a>
+      <span data-url-intent-add-slot class="inline-reveal-slot shrink-0" aria-hidden="true">
+        <button
+          type="submit"
+          form="hyperlinks-url-intent-add-form"
+          data-url-intent-add-button
+          class="shrink-0 motion-safe:animate-pulse"
+          disabled
+        >
+          Add
+        </button>
+      </span>
+      <a href="/hyperlinks" class="url-intent-clear shrink-0 text-sm text-subdued">Clear</a>
     </div>
 
-    <div class="flex flex-row flex-wrap items-center gap-compact">
-      <div class="flex flex-row items-center gap-1">
-        <label for="status-filter" class="text-sm text-tertiary">Status</label>
-        <select id="status-filter">
-        <option value="" <% if self.status_select_value().is_empty() { %>selected<% } %>>Status</option>
-        <option value="processing" <% if self.status_select_value() == "processing" { %>selected<% } %>>Processing</option>
-        <option value="failed" <% if self.status_select_value() == "failed" { %>selected<% } %>>Failed</option>
-        <option value="idle" <% if self.status_select_value() == "idle" { %>selected<% } %>>Idle</option>
-        <option value="succeeded" <% if self.status_select_value() == "succeeded" { %>selected<% } %>>Succeeded</option>
-        </select>
-      </div>
+    <div
+      data-url-intent
+      class="hidden"
+      aria-live="polite"
+      aria-hidden="true"
+    >
+      <p
+        data-url-intent-root-message
+        class="hidden rounded-[0.4rem] border border-notice-border bg-notice-bg px-3 py-3 text-sm leading-5 text-notice"
+        hidden
+      >
+        You know, you've already saved this link.
+      </p>
+    </div>
 
-      <div class="flex flex-row items-center gap-1">
-        <label for="scope-filter" class="text-sm text-tertiary">Scope</label>
-        <select id="scope-filter">
-        <option value="" <% if self.scope_select_value().is_empty() { %>selected<% } %>>Scope</option>
-        <option value="all" <% if self.scope_select_value() == "all" { %>selected<% } %>>All</option>
-        <option value="discovered" <% if self.scope_select_value() == "discovered" { %>selected<% } %>>Discovered</option>
-        </select>
+    <% if self.mobile_filters_open() { %>
+      <details class="group sm:hidden" open>
+    <% } else { %>
+      <details class="group sm:hidden">
+    <% } %>
+      <summary class="list-none inline-flex w-full items-center justify-between rounded-[0.4rem] px-3 py-1 text-sm text-subdued">
+        <span>Filters</span>
+        <svg
+          aria-hidden="true"
+          class="h-3 w-3 shrink-0 transition-transform duration-200 group-open:rotate-180"
+          viewBox="0 0 12 12"
+          fill="none"
+        >
+          <path d="M2.5 4.5L6 8l3.5-3.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </summary>
+      <div class="mt-2 flex flex-col gap-2">
+        <% include!("_index_filters_controls.stpl"); %>
       </div>
+    </details>
 
-      <div class="flex flex-row items-center gap-1">
-        <label for="type-filter" class="text-sm text-tertiary">Type</label>
-        <select id="type-filter">
-        <option value="" <% if self.type_select_value().is_empty() { %>selected<% } %>>Type</option>
-        <option value="pdf" <% if self.type_select_value() == "pdf" { %>selected<% } %>>PDF</option>
-        <option value="non-pdf" <% if self.type_select_value() == "non-pdf" { %>selected<% } %>>Non-PDF</option>
-        </select>
-      </div>
-
-      <div class="flex flex-row items-center gap-1">
-        <label for="order-filter" class="text-sm text-tertiary">Sort</label>
-        <select id="order-filter">
-        <option value="" <% if self.order_select_value().is_empty() { %>selected<% } %>>Sort</option>
-        <option value="newest" <% if self.order_select_value() == "newest" { %>selected<% } %>>Newest</option>
-        <% if self.has_free_text() { %>
-          <option value="relevance" <% if self.order_select_value() == "relevance" { %>selected<% } %>>Relevance</option>
-        <% } %>
-        <option value="oldest" <% if self.order_select_value() == "oldest" { %>selected<% } %>>Oldest</option>
-        <option value="most-clicked" <% if self.order_select_value() == "most-clicked" { %>selected<% } %>>Most Clicked</option>
-        <option value="recently-clicked" <% if self.order_select_value() == "recently-clicked" { %>selected<% } %>>Recently Clicked</option>
-        <option value="random" <% if self.order_select_value() == "random" { %>selected<% } %>>Random</option>
-      </select>
-      </div>
+    <div class="hidden sm:flex sm:flex-row sm:flex-nowrap sm:items-center sm:gap-[0.4rem]">
+      <% include!("_index_filters_controls.stpl"); %>
     </div>
     <% if !self.ignored_tokens.is_empty() { %>
       <p class="text-sm text-tertiary">
@@ -64,6 +70,17 @@
         <%= self.ignored_tokens.join(" ") %>
       </p>
     <% } %>
+  </form>
+
+  <form
+    id="hyperlinks-url-intent-add-form"
+    method="post"
+    action="/hyperlinks"
+    data-url-intent-add-form
+    class="hidden"
+  >
+    <input type="hidden" name="title" value="" />
+    <input type="hidden" name="url" value="" data-url-intent-add-url />
   </form>
 
   <hr>

@@ -1,20 +1,13 @@
 <section class="flex flex-col gap-4" aria-labelledby="admin-heading">
-  <article class="flex flex-col gap-compact">
+  <article class="flex flex-col gap-[0.4rem]">
     <p class="text-sm">Site admin</p>
     <h2 id="admin-heading">Admin tasks</h2>
     <p class="text-sm">Maintenance operations for the processing pipeline.</p>
   </article>
 
-  <section class="flex flex-col gap-compact">
-    <h3>Flash examples</h3>
-    <p class="mb-2 rounded-form border border-notice-border bg-notice-bg px-3 py-flash text-sm leading-5 text-notice" role="status">Notice example: Changes saved.</p>
-    <p class="mb-2 rounded-form border border-invalid bg-form-control px-3 py-flash text-sm leading-5 text-alert" role="alert">Alert example: Something went wrong.</p>
-    <p class="mb-2 rounded-form border border-dev-alert-border bg-dev-alert-bg px-3 py-flash text-sm leading-5 text-dev-alert" role="alert">Dev alert example: Restart failed.</p>
-  </section>
-
   <section class="flex flex-col gap-3">
     <h3>Process all missing artifacts</h3>
-    <div class="flex flex-col gap-compact">
+    <div class="flex flex-col gap-[0.4rem]">
       <div aria-label="Missing artifacts summary">
         <table>
           <thead>
@@ -57,4 +50,60 @@
       </form>
     </div>
   </section>
+
+  <section class="flex flex-col gap-3">
+    <h3>Import / Export</h3>
+    <div class="flex flex-col gap-[0.4rem] rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
+      <p class="text-sm text-tertiary">
+        Download a full ZIP backup (including artifacts) or restore from a previously exported ZIP.
+      </p>
+      <p>
+        <a href="/admin/export">Download backup ZIP</a>
+      </p>
+      <form action="/admin/import" method="post" enctype="multipart/form-data" class="flex flex-col gap-[0.4rem]">
+        <label for="admin-import-archive">Import backup ZIP</label>
+        <input id="admin-import-archive" name="archive" type="file" accept=".zip,application/zip" required />
+        <div>
+          <button type="submit">Import backup ZIP</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <details class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
+    <summary class="font-bold">Diagnostics and examples</summary>
+
+    <section class="flex flex-col gap-[0.4rem]">
+      <h4>Dataset stats</h4>
+      <table aria-label="Dataset stats">
+        <thead>
+          <tr>
+            <th>Total links</th>
+            <th>Root links</th>
+            <th>Discovered links</th>
+            <th>Total artifacts</th>
+            <th>Total jobs</th>
+            <th>Active jobs</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><%= self.stats.total_hyperlinks %></td>
+            <td><%= self.stats.root_hyperlinks %></td>
+            <td><%= self.stats.discovered_hyperlinks %></td>
+            <td><%= self.stats.total_artifacts %></td>
+            <td><%= self.stats.total_processing_jobs %></td>
+            <td><%= self.stats.active_processing_jobs %></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="flex flex-col gap-[0.4rem]">
+      <h4>Flash examples</h4>
+      <p class="rounded-[0.4rem] border border-notice-border bg-notice-bg px-3 py-[0.65rem] text-sm leading-5 text-notice" role="status">Notice example: Changes saved.</p>
+      <p class="rounded-[0.4rem] border border-invalid bg-form-control px-3 py-[0.65rem] text-sm leading-5 text-alert" role="alert">Alert example: Something went wrong.</p>
+      <p class="rounded-[0.4rem] border border-dev-alert-border bg-dev-alert-bg px-3 py-[0.65rem] text-sm leading-5 text-dev-alert" role="alert">Dev alert example: Restart failed.</p>
+    </section>
+  </details>
 </section>

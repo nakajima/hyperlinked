@@ -41,6 +41,7 @@ pub fn links() -> Router<Context> {
         .route("/hyperlinks", routing::get(index))
         .route("/hyperlinks/new", routing::get(new))
         .route("/hyperlinks.json", routing::get(index_json))
+        .route("/hyperlinks/lookup", routing::get(lookup_url))
         .route("/hyperlinks", routing::post(create))
         .route("/hyperlinks.json", routing::post(create_json))
         .route("/hyperlinks/{id}/click", routing::post(click))
@@ -100,6 +101,18 @@ struct HyperlinksIndexResponse {
     query: HyperlinksIndexQueryResponse,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct HyperlinkLookupQuery {
+    url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HyperlinkLookupResponse {
+    status: String,
+    id: Option<i32>,
+    canonical_url: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ResponseKind {
     Text,
@@ -149,6 +162,73 @@ async fn index_json(
     Query(query): Query<HyperlinkFetchQuery>,
 ) -> Response {
     index_with_kind(&state, query, ResponseKind::Json, Flash::default()).await
+}
+
+async fn lookup_url(
+    State(state): State<Context>,
+    Query(query): Query<HyperlinkLookupQuery>,
+) -> Response {
+    let Some(url) = query.url.as_deref() else {
+        return (
+            StatusCode::OK,
+            Json(HyperlinkLookupResponse {
+                status: "invalid_url".to_string(),
+                id: None,
+                canonical_url: None,
+            }),
+        )
+            .into_response();
+    };
+
+    let canonicalized = match crate::model::url_canonicalize::canonicalize_submitted_url(url) {
+        Ok(canonicalized) => canonicalized,
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(HyperlinkLookupResponse {
+                    status: "invalid_url".to_string(),
+                    id: None,
+                    canonical_url: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    match crate::model::hyperlink::find_by_url(&state.connection, &canonicalized.canonical_url)
+        .await
+    {
+        Ok(Some(link)) => {
+            let status = if link.discovery_depth == crate::model::hyperlink::ROOT_DISCOVERY_DEPTH {
+                "root"
+            } else {
+                "discovered"
+            };
+            (
+                StatusCode::OK,
+                Json(HyperlinkLookupResponse {
+                    status: status.to_string(),
+                    id: Some(link.id),
+                    canonical_url: Some(canonicalized.canonical_url),
+                }),
+            )
+                .into_response()
+        }
+        Ok(None) => (
+            StatusCode::OK,
+            Json(HyperlinkLookupResponse {
+                status: "not_found".to_string(),
+                id: None,
+                canonical_url: Some(canonicalized.canonical_url),
+            }),
+        )
+            .into_response(),
+        Err(err) => response_error(
+            ResponseKind::Json,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to lookup hyperlink by url: {err}"),
+        ),
+    }
 }
 
 async fn create(
@@ -845,33 +925,19 @@ impl<'a> HyperlinksIndexTemplate<'a> {
         if self.parsed_query.statuses.is_empty()
             || self.parsed_query.statuses.contains(&StatusToken::All)
         {
-            return "";
+            return "all";
         }
 
         if self.parsed_query.statuses.len() != 1 {
-            return "";
+            return "all";
         }
 
         match self.parsed_query.statuses[0] {
-            StatusToken::All => "",
+            StatusToken::All => "all",
             StatusToken::Processing => "processing",
             StatusToken::Failed => "failed",
             StatusToken::Idle => "idle",
             StatusToken::Succeeded => "succeeded",
-        }
-    }
-
-    fn scope_select_value(&self) -> &'static str {
-        let has_all = self.parsed_query.scopes.contains(&ScopeToken::All);
-        let has_root = self.parsed_query.scopes.contains(&ScopeToken::Root);
-        let has_discovered = self.parsed_query.scopes.contains(&ScopeToken::Discovered);
-
-        if has_all || (has_root && has_discovered) {
-            "all"
-        } else if has_discovered {
-            "discovered"
-        } else {
-            ""
         }
     }
 
@@ -881,7 +947,7 @@ impl<'a> HyperlinksIndexTemplate<'a> {
         let has_non_pdf = self.parsed_query.types.contains(&TypeToken::NonPdf);
 
         if has_all || (has_pdf && has_non_pdf) || self.parsed_query.types.is_empty() {
-            ""
+            "all"
         } else if has_pdf {
             "pdf"
         } else {
@@ -908,6 +974,20 @@ impl<'a> HyperlinksIndexTemplate<'a> {
         }
     }
 
+    fn show_discovered_links_checked(&self) -> bool {
+        let has_all = self.parsed_query.scopes.contains(&ScopeToken::All);
+        let has_discovered = self.parsed_query.scopes.contains(&ScopeToken::Discovered);
+
+        has_all || has_discovered
+    }
+
+    fn mobile_filters_open(&self) -> bool {
+        !self.parsed_query.statuses.is_empty()
+            || !self.parsed_query.types.is_empty()
+            || !self.parsed_query.orders.is_empty()
+            || self.show_discovered_links_checked()
+    }
+
     fn has_effective_filter(&self) -> bool {
         let status_filters_active = !self.parsed_query.statuses.is_empty()
             && !self.parsed_query.statuses.contains(&StatusToken::All);
@@ -923,6 +1003,10 @@ impl<'a> HyperlinksIndexTemplate<'a> {
         let type_filter_active = !has_type_all && (has_type_pdf ^ has_type_non_pdf);
 
         status_filters_active || scope_filter_active || type_filter_active || self.has_free_text()
+    }
+
+    fn link_display_title(&self, link: &hyperlink::Model) -> String {
+        normalize_link_title_for_display(link.title.as_str())
     }
 
     fn thumbnail_inline_path(&self, hyperlink_id: i32) -> Option<String> {
@@ -985,6 +1069,10 @@ struct HyperlinksShowTemplate<'a> {
 impl<'a> HyperlinksShowTemplate<'a> {
     fn display_title(&self) -> &str {
         self.display_title.as_str()
+    }
+
+    fn link_display_title(&self, link: &hyperlink::Model) -> String {
+        normalize_link_title_for_display(link.title.as_str())
     }
 
     fn processing_state(&self) -> &'static str {
@@ -1183,11 +1271,11 @@ fn load_og_summary(link: &hyperlink::Model) -> Option<OgSummary> {
 
 fn normalize_text_value(value: Option<&str>) -> Option<String> {
     let value = value?;
-    let collapsed = collapse_whitespace(value.trim());
-    if collapsed.is_empty() {
+    let normalized = normalize_display_text(value);
+    if normalized.is_empty() {
         None
     } else {
-        Some(collapsed)
+        Some(normalized)
     }
 }
 
@@ -1204,6 +1292,84 @@ fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn normalize_display_text(value: &str) -> String {
+    let decoded = decode_html_entities(value.trim());
+    collapse_whitespace(decoded.trim())
+}
+
+fn normalize_link_title_for_display(title: &str) -> String {
+    let normalized = normalize_display_text(title);
+    if normalized.is_empty() {
+        title.to_string()
+    } else {
+        normalized
+    }
+}
+
+fn decode_html_entities(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+
+    let mut decoded = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(entity_start_offset) = value[cursor..].find('&') {
+        let amp_index = cursor + entity_start_offset;
+        decoded.push_str(&value[cursor..amp_index]);
+
+        let entity_start = amp_index + 1;
+        let rest = &value[entity_start..];
+        let Some(entity_end_offset) = rest.find(';') else {
+            decoded.push('&');
+            cursor = entity_start;
+            continue;
+        };
+
+        let entity_end = entity_start + entity_end_offset;
+        let entity = &value[entity_start..entity_end];
+        if let Some(decoded_entity) = decode_html_entity(entity) {
+            decoded.push(decoded_entity);
+            cursor = entity_end + 1;
+            continue;
+        }
+
+        decoded.push('&');
+        cursor = entity_start;
+    }
+
+    decoded.push_str(&value[cursor..]);
+    decoded
+}
+
+fn decode_html_entity(entity: &str) -> Option<char> {
+    if let Some(decoded_numeric) = decode_numeric_html_entity(entity) {
+        return Some(decoded_numeric);
+    }
+
+    match entity.to_ascii_lowercase().as_str() {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some('\u{00A0}'),
+        _ => None,
+    }
+}
+
+fn decode_numeric_html_entity(entity: &str) -> Option<char> {
+    let value = if let Some(hex) = entity
+        .strip_prefix("#x")
+        .or_else(|| entity.strip_prefix("#X"))
+    {
+        u32::from_str_radix(hex, 16).ok()?
+    } else {
+        entity.strip_prefix('#')?.parse::<u32>().ok()?
+    };
+
+    char::from_u32(value)
+}
+
 fn select_show_display_title(link: &hyperlink::Model, og_summary: Option<&OgSummary>) -> String {
     if let Some(candidate_title) = og_summary.and_then(|summary| summary.title()) {
         if metadata_title_candidate_is_usable(candidate_title)
@@ -1218,12 +1384,12 @@ fn select_show_display_title(link: &hyperlink::Model, og_summary: Option<&OgSumm
         }
     }
 
-    link.title.clone()
+    normalize_link_title_for_display(link.title.as_str())
 }
 
 fn metadata_title_candidate_is_usable(candidate: &str) -> bool {
-    let trimmed = candidate.trim();
-    !trimmed.is_empty() && trimmed.chars().count() <= 200
+    let normalized = normalize_display_text(candidate);
+    !normalized.is_empty() && normalized.chars().count() <= 200
 }
 
 fn should_prefer_metadata_title(
@@ -1232,21 +1398,22 @@ fn should_prefer_metadata_title(
     raw_url: &str,
     candidate: &str,
 ) -> bool {
-    let current_title = collapse_whitespace(current.trim());
+    let current_title = normalize_display_text(current);
+    let candidate_title = normalize_display_text(candidate);
     let current_url_like = looks_like_url_title(&current_title, link_url, raw_url);
-    let candidate_url_like = looks_like_url_title(candidate, link_url, raw_url);
+    let candidate_url_like = looks_like_url_title(&candidate_title, link_url, raw_url);
 
     if current_url_like && !candidate_url_like {
         return true;
     }
 
     let current_len = current_title.chars().count();
-    let candidate_len = candidate.chars().count();
+    let candidate_len = candidate_title.chars().count();
     if current_len < 12 && candidate_len >= 20 && !candidate_url_like {
         return true;
     }
 
-    word_count(&current_title) == 1 && word_count(candidate) >= 2 && !candidate_url_like
+    word_count(&current_title) == 1 && word_count(&candidate_title) >= 2 && !candidate_url_like
 }
 
 fn looks_like_url_title(value: &str, link_url: &str, raw_url: &str) -> bool {
@@ -1268,12 +1435,13 @@ fn word_count(value: &str) -> usize {
     value.split_whitespace().count()
 }
 
-fn show_artifact_kinds() -> [HyperlinkArtifactKind; 13] {
+fn show_artifact_kinds() -> [HyperlinkArtifactKind; 14] {
     [
         HyperlinkArtifactKind::SnapshotWarc,
         HyperlinkArtifactKind::PdfSource,
         HyperlinkArtifactKind::SnapshotError,
         HyperlinkArtifactKind::OgMeta,
+        HyperlinkArtifactKind::OgImage,
         HyperlinkArtifactKind::OgError,
         HyperlinkArtifactKind::ScreenshotPng,
         HyperlinkArtifactKind::ScreenshotThumbPng,
@@ -1337,6 +1505,7 @@ fn artifact_kind_info(
         HyperlinkArtifactKind::OembedMeta => ("oembed_meta", "oEmbed Metadata", "json", false),
         HyperlinkArtifactKind::OembedError => ("oembed_error", "oEmbed Error", "json", true),
         HyperlinkArtifactKind::OgMeta => ("og_meta", "Open Graph Metadata", "json", false),
+        HyperlinkArtifactKind::OgImage => ("og_image", "Open Graph Image", "img", false),
         HyperlinkArtifactKind::OgError => ("og_error", "Open Graph Error", "json", true),
         HyperlinkArtifactKind::ReadableText => ("readable_text", "Readable Markdown", "md", false),
         HyperlinkArtifactKind::ReadableMeta => {
@@ -1526,6 +1695,16 @@ mod tests {
         list_json_index(server, None).await.items
     }
 
+    async fn lookup_json(server: &TestServer, query: Option<&str>) -> HyperlinkLookupResponse {
+        let path = match query {
+            Some(query) => format!("/hyperlinks/lookup?{query}"),
+            None => "/hyperlinks/lookup".to_string(),
+        };
+        let response = server.get(&path).await;
+        response.assert_status_ok();
+        response.json()
+    }
+
     #[tokio::test]
     async fn json_crud_flow_works() {
         let server = new_server().await;
@@ -1593,6 +1772,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lookup_returns_invalid_url_without_query_param() {
+        let server = new_server().await;
+        let response = lookup_json(&server, None).await;
+        assert_eq!(response.status, "invalid_url");
+        assert!(response.id.is_none());
+        assert!(response.canonical_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn lookup_returns_invalid_url_for_unsupported_scheme() {
+        let server = new_server().await;
+        let response = lookup_json(&server, Some("url=mailto:test%40example.com")).await;
+        assert_eq!(response.status, "invalid_url");
+        assert!(response.id.is_none());
+        assert!(response.canonical_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn lookup_returns_not_found_for_valid_url() {
+        let server = new_server().await;
+        let response = lookup_json(
+            &server,
+            Some("url=https%3A%2F%2Fexample.com%2Fdocs%3Futm_source%3Dx%26q%3Drust"),
+        )
+        .await;
+        assert_eq!(response.status, "not_found");
+        assert!(response.id.is_none());
+        assert_eq!(
+            response.canonical_url.as_deref(),
+            Some("https://example.com/docs?q=rust")
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_returns_root_for_existing_root_link() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Root', 'https://example.com/root', 'https://example.com/root', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+            "#,
+        ))
+        .await;
+
+        let response = lookup_json(&server, Some("url=https%3A%2F%2Fexample.com%2Froot")).await;
+        assert_eq!(response.status, "root");
+        assert_eq!(response.id, Some(1));
+        assert_eq!(
+            response.canonical_url.as_deref(),
+            Some("https://example.com/root")
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_returns_discovered_for_existing_discovered_link() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (7, 'Discovered', 'https://example.com/discovered', 'https://example.com/discovered', 1, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+            "#,
+        ))
+        .await;
+
+        let response =
+            lookup_json(&server, Some("url=https%3A%2F%2Fexample.com%2Fdiscovered")).await;
+        assert_eq!(response.status, "discovered");
+        assert_eq!(response.id, Some(7));
+        assert_eq!(
+            response.canonical_url.as_deref(),
+            Some("https://example.com/discovered")
+        );
+    }
+
+    #[tokio::test]
     async fn visit_redirect_increments_click_count() {
         let server = new_server().await;
 
@@ -1646,6 +1898,30 @@ mod tests {
                 "data-hyperlink-id=\"1\"",
             ],
         );
+        assert!(index_body.contains("class=\"tap-target\""));
+        assert!(index_body.contains("data-url-intent-input"));
+        assert!(index_body.contains("data-url-intent"));
+        assert!(index_body.contains("aria-hidden=\"true\""));
+        assert!(index_body.contains("data-url-intent-add-button"));
+        assert!(index_body.contains("data-url-intent-root-message"));
+        assert!(index_body.contains("You know, you've already saved this link."));
+        assert!(index_body.contains("id=\"hyperlinks-url-intent-add-form\""));
+        assert!(index_body.contains("data-url-intent-add-form"));
+        assert!(index_body.contains("data-url-intent-add-url"));
+        assert!(index_body.contains("motion-safe:animate-pulse"));
+        assert!(index_body.contains("<details class=\"group sm:hidden\">"));
+        assert!(index_body.contains("<summary"));
+        assert!(index_body.contains("Filters"));
+        assert!(index_body.contains("group-open:rotate-180"));
+        assert!(index_body.contains(
+            "class=\"hidden sm:flex sm:flex-row sm:flex-nowrap sm:items-center sm:gap-[0.4rem]\""
+        ));
+        assert!(index_body.contains("data-filter-key=\"status\""));
+        assert!(index_body.contains("data-filter-key=\"type\""));
+        assert!(index_body.contains("data-filter-key=\"order\""));
+        assert!(index_body.contains("data-discovered-filter"));
+        assert!(!index_body.contains("id=\"scope-filter\""));
+        assert!(index_body.contains("class=\"flex flex-row gap-2 min-w-0 sm:gap-4\""));
         assert!(index_body.contains(&format!("/hyperlinks/{}\">Details", created.id)));
         assert!(!index_body.contains("/hyperlinks/1/visit"));
 
@@ -1806,6 +2082,169 @@ mod tests {
         let body = show.text();
         assert!(body.contains("<h2>Example OG Video</h2>"));
         assert!(body.contains("<h4 class=\"font-bold\">Open Graph</h4>"));
+    }
+
+    #[tokio::test]
+    async fn show_decodes_html_entities_in_open_graph_fields() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (
+                    id,
+                    title,
+                    url,
+                    raw_url,
+                    og_title,
+                    og_description,
+                    og_site_name,
+                    clicks_count,
+                    last_clicked_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    1,
+                    'https://example.com/article',
+                    'https://example.com/article',
+                    'https://example.com/article',
+                    'Cats &amp; Dogs',
+                    'Tips &amp; Tricks &#39;Daily&#39;',
+                    'News &amp; Co',
+                    0,
+                    NULL,
+                    '2026-02-22 00:00:00',
+                    '2026-02-22 00:00:00'
+                );
+            "#,
+        ))
+        .await;
+
+        let show = server.get("/hyperlinks/1").await;
+        show.assert_status_ok();
+        let body = show.text();
+        assert!(body.contains("<h2>Cats &amp; Dogs</h2>"));
+        assert!(!body.contains("<h2>Cats &amp;amp; Dogs</h2>"));
+        assert!(body.contains("Tips &amp; Tricks"));
+        assert!(body.contains("Daily"));
+        assert!(!body.contains("Tips &amp;amp; Tricks"));
+        assert!(!body.contains("&#38;#39;"));
+        assert!(!body.contains("&amp;#39;"));
+        assert!(body.contains("News &amp; Co"));
+        assert!(!body.contains("News &amp;amp; Co"));
+    }
+
+    #[tokio::test]
+    async fn show_decodes_html_entities_in_fallback_title() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (
+                    1,
+                    'Cats &amp; Dogs',
+                    'https://example.com/article',
+                    'https://example.com/article',
+                    0,
+                    NULL,
+                    '2026-02-22 00:00:00',
+                    '2026-02-22 00:00:00'
+                );
+            "#,
+        ))
+        .await;
+
+        let show = server.get("/hyperlinks/1").await;
+        show.assert_status_ok();
+        let body = show.text();
+        assert!(body.contains("<h2>Cats &amp; Dogs</h2>"));
+        assert!(!body.contains("<h2>Cats &amp;amp; Dogs</h2>"));
+    }
+
+    #[tokio::test]
+    async fn show_renders_dark_mode_aware_screenshot_when_artifacts_exist() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (
+                    1,
+                    'Example article',
+                    'https://example.com/article',
+                    'https://example.com/article',
+                    0,
+                    NULL,
+                    '2026-02-22 00:00:00',
+                    '2026-02-22 00:00:00'
+                );
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (1, 1, NULL, 'screenshot_png', X'00', 'image/png', 1, '2026-02-22 00:00:01'),
+                    (2, 1, NULL, 'screenshot_dark_png', X'00', 'image/png', 1, '2026-02-22 00:00:02');
+                INSERT INTO hyperlink_processing_job (id, hyperlink_id, kind, state, error_message, queued_at, started_at, finished_at, created_at, updated_at)
+                VALUES
+                    (42, 1, 'snapshot', 'succeeded', NULL, '2026-02-22 00:00:03', '2026-02-22 00:00:04', '2026-02-22 00:00:05', '2026-02-22 00:00:03', '2026-02-22 00:00:05');
+            "#,
+        ))
+        .await;
+
+        let show = server.get("/hyperlinks/1").await;
+        show.assert_status_ok();
+        let body = show.text();
+        assert!(body.contains("/hyperlinks/1/artifacts/screenshot_png/inline"));
+        assert!(body.contains("/hyperlinks/1/artifacts/screenshot_dark_png/inline"));
+        assert!(body.contains("media=\"(prefers-color-scheme: dark)\""));
+        assert!(body.contains("Screenshot for Example article"));
+        assert!(body.contains("class=\"text-sm break-all\""));
+        assert!(body.contains("class=\"flex flex-row flex-wrap gap-4 text-sm\""));
+        assert!(
+            body.contains("class=\"flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4\"")
+        );
+        assert!(body.contains("job#42"));
+        assert!(body.matches("class=\"overflow-x-auto\"").count() >= 2);
+    }
+
+    #[tokio::test]
+    async fn index_decodes_html_entities_in_link_title_card() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (
+                    1,
+                    'Cats &amp; Dogs',
+                    'https://example.com/article',
+                    'https://example.com/article',
+                    0,
+                    NULL,
+                    '2026-02-22 00:00:00',
+                    '2026-02-22 00:00:00'
+                );
+            "#,
+        ))
+        .await;
+
+        let index = server.get("/hyperlinks").await;
+        index.assert_status_ok();
+        let body = index.text();
+        assert!(body.contains("Cats &amp; Dogs"));
+        assert!(!body.contains("Cats &amp;amp; Dogs"));
+    }
+
+    #[tokio::test]
+    async fn show_decodes_html_entities_in_discovered_link_title_card() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'Parent', 'https://example.com/parent', 'https://example.com/parent', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00'),
+                    (2, 'Cats &amp; Dogs', 'https://example.com/child', 'https://example.com/child', 1, 0, NULL, '2026-02-19 00:00:01', '2026-02-19 00:00:01');
+                INSERT INTO hyperlink_relation (id, parent_hyperlink_id, child_hyperlink_id, created_at)
+                VALUES (1, 1, 2, '2026-02-19 00:00:02');
+            "#,
+        ))
+        .await;
+
+        let show = server.get("/hyperlinks/1").await;
+        show.assert_status_ok();
+        let body = show.text();
+        assert!(body.contains("Cats &amp; Dogs"));
+        assert!(!body.contains("Cats &amp;amp; Dogs"));
     }
 
     #[tokio::test]
@@ -2075,6 +2514,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn index_query_with_discovered_includes_discovered_links_in_html_and_json() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'Root', 'https://example.com/root', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00'),
+                    (2, 'Discovered', 'https://example.com/discovered', 1, 0, NULL, '2026-02-19 00:00:01', '2026-02-19 00:00:01');
+            "#,
+        ))
+        .await;
+
+        let html = server.get("/hyperlinks?q=with:discovered").await;
+        html.assert_status_ok();
+        let html_body = html.text();
+        assert!(html_body.contains("Root"));
+        assert!(html_body.contains("Discovered"));
+        assert!(html_body.contains("<details class=\"group sm:hidden\" open>"));
+        assert!(html_body.contains("data-discovered-filter"));
+        assert!(html_body.contains("checked"));
+
+        let json = list_json_index(&server, Some("q=with:discovered")).await;
+        let titles = json
+            .items
+            .iter()
+            .map(|item| item.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(titles.len(), 2);
+        assert!(titles.contains(&"Root"));
+        assert!(titles.contains(&"Discovered"));
+    }
+
+    #[tokio::test]
     async fn index_query_status_failed_filters_by_latest_processing_job_state() {
         let server = new_server_with_seed(Some(
             r#"
@@ -2178,6 +2649,12 @@ mod tests {
         let html = server.get("/hyperlinks").await;
         html.assert_status_ok();
         let body = html.text();
+        assert!(!body.contains("<option value=\"\">Status</option>"));
+        assert!(!body.contains("<option value=\"\">Type</option>"));
+        assert!(!body.contains("<option value=\"\">Sort</option>"));
+        assert!(!body.contains("id=\"scope-filter\""));
+        assert!(body.contains("data-discovered-filter"));
+        assert!(body.contains("value=\"all\" selected"));
         assert!(body.contains("value=\"newest\""));
         assert!(body.contains("value=\"newest\" selected"));
     }

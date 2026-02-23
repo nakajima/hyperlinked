@@ -1,36 +1,37 @@
 <% let status = index_status(latest_job); %>
 <li>
-  <article class="flex flex-row gap-4 min-w-0">
+  <article class="flex flex-row gap-2 min-w-0 sm:gap-4">
+    <% let display_title = self.link_display_title(link); %>
     <% if let Some(thumbnail_path) = self.thumbnail_inline_path(link.id) { %>
-      <a href="/hyperlinks/<%= link.id %>" class="block h-16 w-16 overflow-hidden rounded">
+      <a href="/hyperlinks/<%= link.id %>" class="block h-16 w-16 shrink-0 overflow-hidden rounded" style="aspect-ratio: 1 / 1;">
         <picture class="block h-full w-full">
           <% if let Some(thumbnail_dark_path) = self.thumbnail_dark_inline_path(link.id) { %>
             <source srcset="<%= thumbnail_dark_path %>" media="(prefers-color-scheme: dark)">
           <% } %>
-          <img class="block h-full w-full object-cover" src="<%= thumbnail_path %>" alt="Screenshot thumbnail for <%= link.title %>" loading="lazy">
+          <img class="block h-full w-full object-cover" style="object-position: top;" src="<%= thumbnail_path %>" alt="Screenshot thumbnail for <%= display_title.as_str() %>" loading="lazy">
         </picture>
       </a>
     <% } else { %>
-      <div class="h-16 w-16 rounded bg-tertiary"></div>
+      <div class="h-16 w-16 shrink-0 rounded bg-tertiary" style="aspect-ratio: 1 / 1;"></div>
     <% } %>
 
-    <div class="flex flex-col gap-compact min-w-0">
+    <div class="flex flex-col gap-[0.4rem] min-w-0">
       <h3 class="text-base font-bold min-w-0 leading-4">
-        <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= link.id %>" class="block break-all"><%= link.title %></a>
+        <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= link.id %>" class="block break-all"><%= display_title.as_str() %></a>
       </h3>
 
       <% if let Some(snippet) = match_snippet { %>
         <blockquote class="text-sm"><%- snippet %></blockquote>
       <% } %>
 
-      <p class="flex w-full min-w-0 flex-row flex-wrap items-center gap-compact text-sm leading-4">
+      <p class="flex w-full min-w-0 flex-row flex-wrap items-center gap-[0.4rem] text-sm leading-4">
         <a class="min-w-0 flex-1 break-all text-tertiary" href="<%= link.url %>" data-hyperlink-id="<%= link.id %>"><%= link.url %></a>
         <% if link.url.ends_with(".pdf") { %>
-          <span class="inline-block whitespace-nowrap rounded-badge bg-badge px-badge-x py-1 text-badge leading-badge text-center align-baseline text-black">PDF</span>
+          <span class="inline-block whitespace-nowrap rounded-[0.25rem] bg-badge px-[0.2rem] py-1 text-[0.5rem] leading-[0.5rem] text-center align-baseline text-black">PDF</span>
         <% } %>
       </p>
       
-      <div class="flex flex-row items-center gap-compact text-sm leading-4 text-tertiary">
+      <div class="flex flex-row flex-wrap items-center gap-[0.4rem] text-sm leading-4 text-tertiary">
         <span>
           <%- render_relative_time(&link.created_at) %>
         </span>

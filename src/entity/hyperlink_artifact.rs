@@ -27,6 +27,8 @@ pub enum HyperlinkArtifactKind {
     OembedError,
     #[sea_orm(string_value = "og_meta")]
     OgMeta,
+    #[sea_orm(string_value = "og_image")]
+    OgImage,
     #[sea_orm(string_value = "og_error")]
     OgError,
     #[sea_orm(string_value = "readable_text")]

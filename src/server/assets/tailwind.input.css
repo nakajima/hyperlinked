@@ -17,17 +17,6 @@
   --color-dev-alert-border: oklch(76% 0.17 81);
   --color-dev-alert-bg: oklch(39% 0.095 81 / 0.4);
   --color-badge: oklch(53.3% 0.12 316);
-
-  --radius-form: 0.4rem;
-  --radius-badge: 0.25rem;
-
-  --spacing-compact: 0.4rem;
-  --spacing-flash: 0.65rem;
-  --spacing-badge-x: 0.2rem;
-
-  --text-badge: 0.5rem;
-  --text-badge--line-height: 0.5rem;
-  --leading-badge: 0.5rem;
 }
 
 :root {
@@ -252,7 +241,14 @@ header,
 main {
   width: min(100%, 75rem);
   margin-inline: auto;
-  padding-inline: 1.5rem;
+  padding-inline: 0.75rem;
+}
+
+@media (width >= 40rem) {
+  header,
+  main {
+    padding-inline: 1.5rem;
+  }
 }
 
 header {
@@ -287,6 +283,12 @@ a,
 button {
   color: oklch(99.9% 0.277 308);
   text-decoration: none;
+}
+
+.tap-target {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
 }
 
 h1 {
@@ -434,4 +436,100 @@ dd {
 
 picture {
   border-radius: var(--round);
+}
+
+.inline-reveal-slot {
+  --inline-reveal-target-size: 0px;
+  display: inline-grid;
+  align-items: center;
+  flex-basis: 0;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+}
+
+.url-intent-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.url-intent-row > input[data-url-intent-input] {
+  flex: 1 1 0%;
+  min-width: 0;
+}
+
+.url-intent-clear {
+  order: 2;
+}
+
+.url-intent-row > .inline-reveal-slot {
+  order: 3;
+}
+
+.inline-reveal-slot > button {
+  min-height: var(--form-control-min-h);
+  min-width: max-content;
+  white-space: nowrap;
+  transform-origin: center;
+  transform: scale(0.6);
+  opacity: 0;
+}
+
+.inline-reveal-slot[data-visible="true"] {
+  width: 100%;
+  max-width: 100%;
+  opacity: 1;
+}
+
+.inline-reveal-slot[data-visible="true"] > button {
+  width: 100%;
+  transform: scale(1);
+  opacity: 1;
+}
+
+@media (width >= 40rem) {
+  .url-intent-row {
+    flex-wrap: nowrap;
+  }
+
+  .url-intent-row > .inline-reveal-slot {
+    order: 2;
+  }
+
+  .url-intent-clear {
+    order: 3;
+  }
+
+  .inline-reveal-slot[data-visible="true"] {
+    width: auto;
+    flex-basis: var(--inline-reveal-target-size);
+    max-width: var(--inline-reveal-target-size);
+  }
+
+  .inline-reveal-slot[data-visible="true"] > button {
+    width: auto;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .inline-reveal-slot[data-entering="true"] {
+    transition:
+      flex-basis 240ms cubic-bezier(0.16, 1, 0.3, 1),
+      max-width 240ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 150ms ease-out;
+  }
+
+  .inline-reveal-slot[data-entering="true"] > button {
+    transition:
+      transform 240ms cubic-bezier(0.16, 1, 0.3, 1),
+      opacity 150ms ease-out;
+  }
+}
+
+@media (width >= 40rem) {
+  .header-nav-menu > nav {
+    display: flex;
+  }
 }

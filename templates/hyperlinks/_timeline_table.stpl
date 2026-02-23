@@ -1,8 +1,8 @@
 <% if self.recent_jobs.is_empty() { %>
   <p class="text-sm">No processing jobs yet.</p>
 <% } else { %>
-  <div>
-    <table class="font-mono text-sm">
+  <div class="overflow-x-auto">
+    <table class="min-w-max font-mono text-sm">
       <thead>
         <tr>
           <th scope="col">Kind</th>

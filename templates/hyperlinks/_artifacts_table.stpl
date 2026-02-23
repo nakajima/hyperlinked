@@ -1,8 +1,8 @@
 <% if present_kinds.is_empty() { %>
   <p class="text-sm">No artifacts available yet.</p>
 <% } else { %>
-  <div>
-    <table class="font-mono text-sm">
+  <div class="overflow-x-auto">
+    <table class="min-w-max font-mono text-sm">
       <thead>
         <tr>
           <th scope="col">Artifact</th>
