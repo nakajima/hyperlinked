@@ -9,7 +9,7 @@
           <th scope="col">Content type</th>
           <th scope="col">Size</th>
           <th scope="col">Created</th>
-          <th scope="col">Download</th>
+          <th scope="col">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -22,7 +22,11 @@
               <td><%= artifact.content_type.as_str() %></td>
               <td><%= format_size_bytes(artifact.size_bytes) %></td>
               <td><%- render_relative_time(&artifact.created_at) %></td>
-              <td><a href="<%= self.artifact_download_path(kind) %>">Download <%= slug %></a></td>
+              <td>
+                <a href="<%= self.artifact_inline_path(kind) %>" target="_blank" rel="noopener noreferrer">View</a>
+                |
+                <a href="<%= self.artifact_download_path(kind) %>">Download <%= slug %></a>
+              </td>
             </tr>
           <% } %>
         <% } %>

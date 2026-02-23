@@ -2,23 +2,33 @@ use std::collections::{HashMap, HashSet};
 
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Query, RawForm, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing,
 };
 use sailfish::Template;
 use sea_orm::{
+    ActiveModelTrait,
+    ActiveValue::Set,
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, DbErr, EntityTrait, QueryFilter,
     QueryResult, Statement,
+    entity::prelude::{DateTime, DateTimeUtc},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    entity::{hyperlink, hyperlink_processing_job},
+    entity::{
+        hyperlink,
+        hyperlink_processing_job::{self, HyperlinkProcessingJobState},
+    },
     model::hyperlink_processing_job as hyperlink_processing_job_model,
     queue::ProcessingTask,
-    server::{context::Context, flash::Flash, views},
+    server::{
+        context::Context,
+        flash::{Flash, FlashName, redirect_with_flash},
+        views,
+    },
 };
 
 const DEFAULT_LIMIT: u64 = 50;
@@ -28,6 +38,18 @@ pub fn routes() -> Router<Context> {
     Router::new()
         .route("/admin/jobs", routing::get(index))
         .route("/admin/jobs/pending-count", routing::get(pending_count))
+        .route(
+            "/admin/jobs/recover-orphans",
+            routing::post(recover_orphans),
+        )
+        .route(
+            "/admin/jobs/clear-failed",
+            routing::post(clear_failed_selected),
+        )
+        .route(
+            "/admin/jobs/clear-failed-all",
+            routing::post(clear_failed_all),
+        )
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -44,6 +66,7 @@ enum QueueStatusFilter {
     Processing,
     Completed,
     Failed,
+    Cleared,
 }
 
 impl QueueStatusFilter {
@@ -53,6 +76,7 @@ impl QueueStatusFilter {
             "processing" => Self::Processing,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
+            "cleared" => Self::Cleared,
             _ => Self::All,
         }
     }
@@ -64,6 +88,7 @@ impl QueueStatusFilter {
             Self::Processing => "processing",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cleared => "cleared",
         }
     }
 }
@@ -75,6 +100,7 @@ struct QueueStats {
     processing: i64,
     completed: i64,
     failed: i64,
+    cleared: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +122,7 @@ struct QueueJobRow {
 struct AdminJobRowView {
     queue_id: i64,
     queue_status: String,
+    selectable_failed: bool,
     processing_job_id: Option<i32>,
     processing_state: Option<String>,
     processing_kind: Option<String>,
@@ -131,6 +158,14 @@ struct PendingCountResponse {
     pending: i64,
     queued: i64,
     processing: i64,
+}
+
+#[derive(Debug, Default)]
+struct OrphanRecoverySummary {
+    found: usize,
+    marked_failed: usize,
+    requeued: usize,
+    requeue_errors: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -224,6 +259,100 @@ async fn pending_count(State(state): State<Context>) -> Response {
     }
 }
 
+async fn recover_orphans(State(state): State<Context>, headers: HeaderMap) -> Response {
+    let summary =
+        match recover_orphaned_running_jobs(&state.connection, state.processing_queue.as_ref())
+            .await
+        {
+            Ok(summary) => summary,
+            Err(err) => {
+                return response_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to recover orphaned jobs: {err}"),
+                );
+            }
+        };
+
+    redirect_with_flash(
+        &headers,
+        "/admin/jobs",
+        FlashName::Notice,
+        format!(
+            "Recovered orphans: found={}, marked_failed={}, requeued={}, requeue_errors={}",
+            summary.found, summary.marked_failed, summary.requeued, summary.requeue_errors
+        ),
+    )
+}
+
+async fn clear_failed_selected(
+    State(state): State<Context>,
+    headers: HeaderMap,
+    RawForm(raw_form): RawForm,
+) -> Response {
+    let mut queue_ids = serde_urlencoded::from_bytes::<Vec<(String, String)>>(&raw_form)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(key, value)| {
+            if key == "queue_id" {
+                value.parse::<i64>().ok()
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    queue_ids.sort_unstable();
+    queue_ids.dedup();
+
+    if queue_ids.is_empty() {
+        return redirect_with_flash(
+            &headers,
+            "/admin/jobs",
+            FlashName::Notice,
+            "No failed queue rows selected.",
+        );
+    }
+
+    let cleared = match set_failed_rows_cleared_by_ids(&state.connection, &queue_ids).await {
+        Ok(cleared) => cleared,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to clear selected failed rows: {err}"),
+            );
+        }
+    };
+
+    redirect_with_flash(
+        &headers,
+        "/admin/jobs",
+        FlashName::Notice,
+        format!(
+            "Cleared {} failed queue row(s) out of {} selected.",
+            cleared,
+            queue_ids.len()
+        ),
+    )
+}
+
+async fn clear_failed_all(State(state): State<Context>, headers: HeaderMap) -> Response {
+    let cleared = match set_all_failed_rows_cleared(&state.connection).await {
+        Ok(cleared) => cleared,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to clear all failed rows: {err}"),
+            );
+        }
+    };
+
+    redirect_with_flash(
+        &headers,
+        "/admin/jobs",
+        FlashName::Notice,
+        format!("Cleared {} failed queue row(s).", cleared),
+    )
+}
+
 fn render_index(
     stats: &QueueStats,
     rows: &[AdminJobRowView],
@@ -279,7 +408,8 @@ async fn fetch_queue_stats(connection: &DatabaseConnection) -> Result<QueueStats
              COALESCE(SUM(CASE WHEN j.status = 'queued' THEN 1 ELSE 0 END), 0) AS queued,
              COALESCE(SUM(CASE WHEN j.status = 'processing' THEN 1 ELSE 0 END), 0) AS processing,
              COALESCE(SUM(CASE WHEN j.status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
-             COALESCE(SUM(CASE WHEN j.status = 'failed' OR hpj.state = 'failed' THEN 1 ELSE 0 END), 0) AS failed
+             COALESCE(SUM(CASE WHEN j.status = 'failed' OR hpj.state = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+             COALESCE(SUM(CASE WHEN j.status = 'cleared' THEN 1 ELSE 0 END), 0) AS cleared
          FROM jobs j
          LEFT JOIN hyperlink_processing_job hpj
            ON hpj.id = CASE
@@ -300,6 +430,7 @@ async fn fetch_queue_stats(connection: &DatabaseConnection) -> Result<QueueStats
         processing: try_get_by_index::<i64>(&row, 2)?,
         completed: try_get_by_index::<i64>(&row, 3)?,
         failed: try_get_by_index::<i64>(&row, 4)?,
+        cleared: try_get_by_index::<i64>(&row, 5)?,
     })
 }
 
@@ -450,10 +581,12 @@ async fn enrich_queue_rows(
             (None, Some(queue)) => Some(queue.to_string()),
             (None, None) => None,
         };
+        let selectable_failed = row.queue_status == "failed";
 
         rows.push(AdminJobRowView {
             queue_id: row.queue_id,
             queue_status: row.queue_status,
+            selectable_failed,
             processing_job_id: row.processing_job_id,
             processing_state,
             processing_kind,
@@ -473,6 +606,148 @@ async fn enrich_queue_rows(
     }
 
     Ok(rows)
+}
+
+async fn recover_orphaned_running_jobs(
+    connection: &DatabaseConnection,
+    queue: Option<&crate::queue::ProcessingQueue>,
+) -> Result<OrphanRecoverySummary, DbErr> {
+    let running_jobs = hyperlink_processing_job::Entity::find()
+        .filter(hyperlink_processing_job::Column::State.eq(HyperlinkProcessingJobState::Running))
+        .all(connection)
+        .await?;
+
+    let mut summary = OrphanRecoverySummary::default();
+    for running_job in running_jobs {
+        if has_active_queue_row_for_processing_job(connection, running_job.id).await? {
+            continue;
+        }
+
+        summary.found += 1;
+
+        let now = now_utc();
+        let mut failed: hyperlink_processing_job::ActiveModel = running_job.clone().into();
+        failed.state = Set(HyperlinkProcessingJobState::Failed);
+        failed.finished_at = Set(Some(now));
+        failed.updated_at = Set(now);
+        let message = running_job
+            .error_message
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                "marked failed by admin recover-orphans: orphaned running job".to_string()
+            });
+        failed.error_message = Set(Some(message));
+        failed.update(connection).await?;
+        summary.marked_failed += 1;
+
+        match hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
+            connection,
+            running_job.hyperlink_id,
+            running_job.kind.clone(),
+            queue,
+        )
+        .await
+        {
+            Ok(_) => {
+                summary.requeued += 1;
+            }
+            Err(error) => {
+                summary.requeue_errors += 1;
+                tracing::error!(
+                    processing_job_id = running_job.id,
+                    hyperlink_id = running_job.hyperlink_id,
+                    kind = ?running_job.kind,
+                    error = %error,
+                    "failed to requeue recovered orphaned job"
+                );
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+async fn has_active_queue_row_for_processing_job(
+    connection: &DatabaseConnection,
+    processing_job_id: i32,
+) -> Result<bool, DbErr> {
+    let statement = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "SELECT 1
+         FROM jobs
+         WHERE job_type = ?
+           AND status IN ('queued', 'processing')
+           AND json_valid(payload)
+           AND CAST(json_extract(payload, '$.processing_job_id') AS INTEGER) = ?
+         LIMIT 1"
+            .to_string(),
+        vec![processing_task_job_type().into(), processing_job_id.into()],
+    );
+
+    Ok(connection.query_one(statement).await?.is_some())
+}
+
+async fn set_failed_rows_cleared_by_ids(
+    connection: &DatabaseConnection,
+    queue_ids: &[i64],
+) -> Result<u64, DbErr> {
+    if queue_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut sql = String::from(
+        "UPDATE jobs
+         SET status = ?,
+             updated_at = ?,
+             last_finished_at = COALESCE(last_finished_at, ?)
+         WHERE job_type = ?
+           AND status = 'failed'
+           AND id IN (",
+    );
+
+    for (index, _) in queue_ids.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        sql.push('?');
+    }
+    sql.push(')');
+
+    let now_epoch = now_epoch_seconds();
+    let mut values = Vec::with_capacity(4 + queue_ids.len());
+    values.push("cleared".into());
+    values.push(now_epoch.into());
+    values.push(now_epoch.into());
+    values.push(processing_task_job_type().into());
+    for queue_id in queue_ids {
+        values.push((*queue_id).into());
+    }
+
+    let statement = Statement::from_sql_and_values(DbBackend::Sqlite, sql, values);
+    Ok(connection.execute(statement).await?.rows_affected())
+}
+
+async fn set_all_failed_rows_cleared(connection: &DatabaseConnection) -> Result<u64, DbErr> {
+    let now_epoch = now_epoch_seconds();
+    let statement = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "UPDATE jobs
+         SET status = ?,
+             updated_at = ?,
+             last_finished_at = COALESCE(last_finished_at, ?)
+         WHERE job_type = ?
+           AND status = 'failed'"
+            .to_string(),
+        vec![
+            "cleared".into(),
+            now_epoch.into(),
+            now_epoch.into(),
+            processing_task_job_type().into(),
+        ],
+    );
+
+    Ok(connection.execute(statement).await?.rows_affected())
 }
 
 fn response_error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -537,6 +812,10 @@ fn append_status_filter_clause(
             values.push("failed".into());
             values.push("failed".into());
         }
+        QueueStatusFilter::Cleared => {
+            sql.push_str(" AND j.status = ?");
+            values.push("cleared".into());
+        }
     }
 }
 
@@ -560,6 +839,18 @@ fn format_timing(total_ms: i64, last_ms: Option<i64>) -> String {
         "{total_ms} ms total | {} ms last",
         last_ms.unwrap_or_default()
     )
+}
+
+fn now_utc() -> DateTime {
+    DateTimeUtc::from(std::time::SystemTime::now()).naive_utc()
+}
+
+fn now_epoch_seconds() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    i64::try_from(secs).unwrap_or(i64::MAX)
 }
 
 fn try_get_by_index<T>(row: &QueryResult, index: usize) -> Result<T, DbErr>
@@ -630,6 +921,21 @@ mod tests {
             .execute(statement)
             .await
             .expect("queue row should insert");
+    }
+
+    async fn queue_status(connection: &DatabaseConnection, id: i64) -> String {
+        let statement = Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT status FROM jobs WHERE id = ?".to_string(),
+            vec![id.into()],
+        );
+        let row = connection
+            .query_one(statement)
+            .await
+            .expect("queue lookup should succeed")
+            .expect("queue row should exist");
+        row.try_get_by_index::<String>(0)
+            .expect("status should decode")
     }
 
     #[tokio::test]
@@ -706,6 +1012,37 @@ mod tests {
         assert!(body.contains("queue#2"));
         assert!(!body.contains("queue#1"));
         assert!(!body.contains("queue#3"));
+    }
+
+    #[tokio::test]
+    async fn jobs_dashboard_status_filter_supports_cleared_rows() {
+        let (server, connection) = new_server("").await;
+
+        insert_queue_job(
+            &connection,
+            1,
+            "failed",
+            r#"{"processing_job_id":1}"#,
+            Some("failed"),
+            processing_task_job_type(),
+        )
+        .await;
+        insert_queue_job(
+            &connection,
+            2,
+            "cleared",
+            r#"{"processing_job_id":2}"#,
+            None,
+            processing_task_job_type(),
+        )
+        .await;
+
+        let page = server.get("/admin/jobs?status=cleared").await;
+        page.assert_status_ok();
+        let body = page.text();
+
+        assert!(!body.contains("queue#1"));
+        assert!(body.contains("queue#2"));
     }
 
     #[tokio::test]
@@ -837,6 +1174,167 @@ mod tests {
         assert!(body.contains("queue#1"));
         assert!(body.contains("Unmapped payload"));
         assert!(body.contains("this is not json"));
+    }
+
+    #[tokio::test]
+    async fn clear_failed_selected_marks_only_selected_failed_rows_cleared() {
+        let (server, connection) = new_server("").await;
+
+        insert_queue_job(
+            &connection,
+            1,
+            "failed",
+            r#"{"processing_job_id":1}"#,
+            Some("failed one"),
+            processing_task_job_type(),
+        )
+        .await;
+        insert_queue_job(
+            &connection,
+            2,
+            "failed",
+            r#"{"processing_job_id":2}"#,
+            Some("failed two"),
+            processing_task_job_type(),
+        )
+        .await;
+        insert_queue_job(
+            &connection,
+            3,
+            "queued",
+            r#"{"processing_job_id":3}"#,
+            None,
+            processing_task_job_type(),
+        )
+        .await;
+
+        let response = server
+            .post("/admin/jobs/clear-failed")
+            .text("queue_id=2")
+            .content_type("application/x-www-form-urlencoded")
+            .await;
+        response.assert_status_see_other();
+        response.assert_header("location", "/admin/jobs");
+
+        assert_eq!(queue_status(&connection, 1).await, "failed");
+        assert_eq!(queue_status(&connection, 2).await, "cleared");
+        assert_eq!(queue_status(&connection, 3).await, "queued");
+    }
+
+    #[tokio::test]
+    async fn clear_failed_all_marks_all_failed_rows_cleared() {
+        let (server, connection) = new_server("").await;
+
+        insert_queue_job(
+            &connection,
+            10,
+            "failed",
+            r#"{"processing_job_id":10}"#,
+            Some("failed ten"),
+            processing_task_job_type(),
+        )
+        .await;
+        insert_queue_job(
+            &connection,
+            11,
+            "failed",
+            r#"{"processing_job_id":11}"#,
+            Some("failed eleven"),
+            processing_task_job_type(),
+        )
+        .await;
+        insert_queue_job(
+            &connection,
+            12,
+            "processing",
+            r#"{"processing_job_id":12}"#,
+            None,
+            processing_task_job_type(),
+        )
+        .await;
+
+        let response = server.post("/admin/jobs/clear-failed-all").await;
+        response.assert_status_see_other();
+        response.assert_header("location", "/admin/jobs");
+
+        assert_eq!(queue_status(&connection, 10).await, "cleared");
+        assert_eq!(queue_status(&connection, 11).await, "cleared");
+        assert_eq!(queue_status(&connection, 12).await, "processing");
+    }
+
+    #[tokio::test]
+    async fn recover_orphans_marks_running_jobs_failed_and_requeues() {
+        let (server, connection) = new_server(
+            r#"
+                INSERT INTO hyperlink (id, title, url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'Orphan', 'https://example.com/orphan', 0, 0, NULL, '2026-02-21 00:00:00', '2026-02-21 00:00:00'),
+                    (2, 'Active', 'https://example.com/active', 0, 0, NULL, '2026-02-21 00:00:00', '2026-02-21 00:00:00');
+                INSERT INTO hyperlink_processing_job (id, hyperlink_id, kind, state, error_message, queued_at, started_at, finished_at, created_at, updated_at)
+                VALUES
+                    (101, 1, 'readability', 'running', NULL, '2026-02-21 00:01:00', '2026-02-21 00:01:05', NULL, '2026-02-21 00:01:00', '2026-02-21 00:01:05'),
+                    (102, 2, 'readability', 'running', NULL, '2026-02-21 00:02:00', '2026-02-21 00:02:05', NULL, '2026-02-21 00:02:00', '2026-02-21 00:02:05');
+            "#,
+        )
+        .await;
+
+        insert_queue_job(
+            &connection,
+            900,
+            "processing",
+            r#"{"processing_job_id":102}"#,
+            None,
+            processing_task_job_type(),
+        )
+        .await;
+
+        let response = server.post("/admin/jobs/recover-orphans").await;
+        response.assert_status_see_other();
+        response.assert_header("location", "/admin/jobs");
+
+        let orphan_row = connection
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT state FROM hyperlink_processing_job WHERE id = ?".to_string(),
+                vec![101.into()],
+            ))
+            .await
+            .expect("orphan row query should succeed")
+            .expect("orphan row should exist");
+        let orphan_state = orphan_row
+            .try_get_by_index::<String>(0)
+            .expect("state should decode");
+        assert_eq!(orphan_state, "failed");
+
+        let active_row = connection
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT state FROM hyperlink_processing_job WHERE id = ?".to_string(),
+                vec![102.into()],
+            ))
+            .await
+            .expect("active row query should succeed")
+            .expect("active row should exist");
+        let active_state = active_row
+            .try_get_by_index::<String>(0)
+            .expect("state should decode");
+        assert_eq!(active_state, "running");
+
+        let requeue_count_row = connection
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT COUNT(*) FROM hyperlink_processing_job
+                 WHERE hyperlink_id = ? AND kind = 'readability' AND state = 'queued'"
+                    .to_string(),
+                vec![1.into()],
+            ))
+            .await
+            .expect("requeue count query should succeed")
+            .expect("requeue count row should exist");
+        let requeue_count = requeue_count_row
+            .try_get_by_index::<i64>(0)
+            .expect("count should decode");
+        assert_eq!(requeue_count, 1);
     }
 
     #[tokio::test]

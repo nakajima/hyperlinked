@@ -73,7 +73,7 @@ pub async fn process_job(
                 hyperlink_active_model.updated_at = Set(now_utc());
                 hyperlink_active_model.update(connection).await?;
                 mark_job_succeeded(connection, running_job.id).await?;
-                enqueue_oembed_job(connection, sender, running_job.hyperlink_id).await?;
+                enqueue_og_job(connection, sender, running_job.hyperlink_id).await?;
                 enqueue_readability_job(connection, sender, running_job.hyperlink_id).await?;
             }
             Err(error) => {
@@ -108,8 +108,10 @@ pub async fn process_job(
                 }
             }
         }
-        HyperlinkProcessingJobKind::Oembed => match pipeline.process_oembed(connection).await {
+        HyperlinkProcessingJobKind::Og => match pipeline.process_og(connection).await {
             Ok(_) => {
+                hyperlink_active_model.updated_at = Set(now_utc());
+                hyperlink_active_model.update(connection).await?;
                 mark_job_succeeded(connection, running_job.id).await?;
             }
             Err(error) => {
@@ -117,12 +119,21 @@ pub async fn process_job(
                 tracing::warn!(
                     hyperlink_id = running_job.hyperlink_id,
                     job_id = running_job.id,
-                    kind = "oembed",
+                    kind = "og",
                     error = %error,
                     "hyperlink processing job failed"
                 );
             }
         },
+        HyperlinkProcessingJobKind::Oembed => {
+            tracing::info!(
+                hyperlink_id = running_job.hyperlink_id,
+                job_id = running_job.id,
+                kind = "oembed",
+                "oembed processing is disabled; marking legacy job as succeeded"
+            );
+            mark_job_succeeded(connection, running_job.id).await?;
+        }
         HyperlinkProcessingJobKind::SublinkDiscovery => {
             match pipeline.process_sublink_discovery(connection).await {
                 Ok(_) => {
@@ -160,7 +171,7 @@ async fn enqueue_readability_job(
     Ok(())
 }
 
-async fn enqueue_oembed_job(
+async fn enqueue_og_job(
     connection: &DatabaseConnection,
     sender: &ProcessingQueueSender,
     hyperlink_id: i32,
@@ -168,7 +179,7 @@ async fn enqueue_oembed_job(
     hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
         connection,
         hyperlink_id,
-        HyperlinkProcessingJobKind::Oembed,
+        HyperlinkProcessingJobKind::Og,
         Some(sender),
     )
     .await?;

@@ -11,6 +11,7 @@ mod views;
 
 use axum::{Router, response::Redirect, routing::get};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tower_http::services::ServeDir;
 use tracing::instrument;
 
@@ -25,7 +26,11 @@ pub async fn start(host: &str, port: &str) -> Result<(), String> {
     processing_queue.spawn_worker(connection.clone()).await?;
     let _artifact_gc_worker = crate::storage::gc::spawn(connection.clone());
 
-    let jobs_dashboard = lilqueue::dashboard::router(processing_queue.dashboard_db());
+    let jobs_dashboard = lilqueue::dashboard::router_with_control(
+        processing_queue.dashboard_db(),
+        lilqueue::dashboard::DashboardOptions::default(),
+        Arc::new(processing_queue.clone()),
+    );
     let state = context::Context {
         connection,
         processing_queue: Some(processing_queue),

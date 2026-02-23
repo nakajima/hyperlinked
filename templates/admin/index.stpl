@@ -21,13 +21,13 @@
             <tr>
               <th>Total links</th>
               <th>Missing source</th>
-              <th>Missing oEmbed</th>
+              <th>Missing Open Graph</th>
               <th>Missing readability</th>
               <th>Snapshot active</th>
-              <th>oEmbed active</th>
+              <th>Open Graph active</th>
               <th>Readability active</th>
               <th>Snapshot to queue</th>
-              <th>oEmbed to queue</th>
+              <th>Open Graph to queue</th>
               <th>Readability to queue</th>
             </tr>
           </thead>
@@ -35,13 +35,13 @@
             <tr>
               <td><%= self.summary.total_hyperlinks %></td>
               <td><%= self.summary.missing_source %></td>
-              <td><%= self.summary.missing_oembed %></td>
+              <td><%= self.summary.missing_og %></td>
               <td><%= self.summary.missing_readability %></td>
               <td><%= self.summary.snapshot_already_processing %></td>
-              <td><%= self.summary.oembed_already_processing %></td>
+              <td><%= self.summary.og_already_processing %></td>
               <td><%= self.summary.readability_already_processing %></td>
               <td><%= self.summary.snapshot_will_queue %></td>
-              <td><%= self.summary.oembed_will_queue %></td>
+              <td><%= self.summary.og_will_queue %></td>
               <td><%= self.summary.readability_will_queue %></td>
             </tr>
           </tbody>
@@ -51,7 +51,7 @@
       <form
         action="/admin/process-missing-artifacts"
         method="post"
-        data-confirm="Queue snapshot/oembed/readability jobs for all hyperlinks missing required artifacts?"
+        data-confirm="Queue snapshot/og/readability jobs for all hyperlinks missing required artifacts?"
       >
         <input type="submit" value="Process all missing artifacts"<% if !self.has_missing_artifacts_to_process { %> disabled<% } %> />
       </form>

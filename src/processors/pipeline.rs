@@ -2,7 +2,7 @@ use crate::{
     entity::hyperlink,
     model::hyperlink_processing_job::ProcessingQueueSender,
     processors::{
-        oembed_fetch::{OembedFetchOutput, OembedFetcher},
+        og_fetch::{OgFetchOutput, OgFetcher},
         processor::{ProcessingError, Processor},
         readability_fetch::{ReadabilityFetchOutput, ReadabilityFetcher},
         snapshot_fetch::{SnapshotFetchOutput, SnapshotFetcher},
@@ -50,11 +50,11 @@ impl<'a> Pipeline<'a> {
             .await
     }
 
-    pub async fn process_oembed(
+    pub async fn process_og(
         &mut self,
         connection: &DatabaseConnection,
-    ) -> Result<OembedFetchOutput, ProcessingError> {
-        OembedFetcher::new(self.job_id)
+    ) -> Result<OgFetchOutput, ProcessingError> {
+        OgFetcher::new(self.job_id)
             .process(self.hyperlink, connection)
             .await
     }

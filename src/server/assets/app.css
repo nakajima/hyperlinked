@@ -122,8 +122,14 @@
 .justify-end {
   justify-content: flex-end;
 }
+.gap-0\.5 {
+  gap: calc(var(--spacing) * 0.5);
+}
 .gap-1 {
   gap: calc(var(--spacing) * 1);
+}
+.gap-2 {
+  gap: calc(var(--spacing) * 2);
 }
 .gap-3 {
   gap: calc(var(--spacing) * 3);
@@ -204,6 +210,9 @@
 }
 .py-1 {
   padding-block: calc(var(--spacing) * 1);
+}
+.py-3 {
+  padding-block: calc(var(--spacing) * 3);
 }
 .py-flash {
   padding-block: var(--spacing-flash);
@@ -290,6 +299,41 @@
     flex-basis: auto;
   }
 }
+.md\:w-80 {
+  @media (width >= 48rem) {
+    width: calc(var(--spacing) * 80);
+  }
+}
+.md\:min-w-0 {
+  @media (width >= 48rem) {
+    min-width: calc(var(--spacing) * 0);
+  }
+}
+.md\:flex-1 {
+  @media (width >= 48rem) {
+    flex: 1;
+  }
+}
+.md\:flex-none {
+  @media (width >= 48rem) {
+    flex: none;
+  }
+}
+.md\:flex-row {
+  @media (width >= 48rem) {
+    flex-direction: row;
+  }
+}
+.md\:items-start {
+  @media (width >= 48rem) {
+    align-items: flex-start;
+  }
+}
+.md\:gap-6 {
+  @media (width >= 48rem) {
+    gap: calc(var(--spacing) * 6);
+  }
+}
 :root {
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
@@ -298,9 +342,9 @@
   --text-xl: 1.25rem;
   --text-2xl: 1.5rem;
   --text-3xl: 3rem;
-  --body-font: "iA Writer Quattro S", sans-serif;
+  --body-font: "Barlow", sans-serif;
   --font-mono: "iA Writer Mono S", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-      "Liberation Mono", "Courier New", monospace;
+    "Liberation Mono", "Courier New", monospace;
   --round: 0.2rem;
   --primary: oklch(95% 0.01 264);
   --subdued: oklch(65.476% 0.06472 241.613);
@@ -321,16 +365,151 @@
   --form-label-gap: 0.2rem;
 }
 @font-face {
+  font-family: "League Mono";
+  src: url("/assets/LeagueMono-VF.woff2") format("woff2");
+  font-weight: 200;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-Thin.woff2") format("woff2");
+  font-weight: 100;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-ThinItalic.woff2") format("woff2");
+  font-weight: 100;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-ExtraLight.woff2") format("woff2");
+  font-weight: 200;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-ExtraLightItalic.woff2") format("woff2");
+  font-weight: 200;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-Light.woff2") format("woff2");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-LightItalic.woff2") format("woff2");
+  font-weight: 300;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-Italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-MediumItalic.woff2") format("woff2");
+  font-weight: 500;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-SemiBoldItalic.woff2") format("woff2");
+  font-weight: 600;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-BoldItalic.woff2") format("woff2");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-ExtraBold.woff2") format("woff2");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-ExtraBoldItalic.woff2") format("woff2");
+  font-weight: 800;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-Black.woff2") format("woff2");
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Barlow";
+  src: url("/assets/Barlow/Barlow-BlackItalic.woff2") format("woff2");
+  font-weight: 900;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
   font-family: "iA Writer Mono S";
   src: url("/assets/iAWriterMonoS-Regular.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
+  font-display: swap;
 }
 @font-face {
   font-family: "iA Writer Quattro S";
   src: url("/assets/iAWriterQuattroS-Regular.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
+  font-display: swap;
 }
 html, body {
   background-color: oklch(12% 0.005 264);
@@ -338,6 +517,7 @@ html, body {
   font-weight: 400;
   font-family: var(--body-font);
   font-style: normal;
+  font-synthesis: none;
   line-height: 1rem;
 }
 p {

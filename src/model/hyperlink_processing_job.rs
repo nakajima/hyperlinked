@@ -182,6 +182,7 @@ pub fn state_name(state: HyperlinkProcessingJobState) -> &'static str {
 pub fn kind_name(kind: HyperlinkProcessingJobKind) -> &'static str {
     match kind {
         HyperlinkProcessingJobKind::Snapshot => "snapshot",
+        HyperlinkProcessingJobKind::Og => "og",
         HyperlinkProcessingJobKind::Oembed => "oembed",
         HyperlinkProcessingJobKind::Readability => "readability",
         HyperlinkProcessingJobKind::SublinkDiscovery => "sublink_discovery",

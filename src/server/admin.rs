@@ -37,7 +37,7 @@ pub fn routes() -> Router<Context> {
 #[derive(Clone, Copy, Debug)]
 struct LastRunSummary {
     snapshot_queued: usize,
-    oembed_queued: usize,
+    og_queued: usize,
     readability_queued: usize,
 }
 
@@ -45,20 +45,20 @@ struct LastRunSummary {
 struct MissingArtifactsSummary {
     total_hyperlinks: usize,
     missing_source: usize,
-    missing_oembed: usize,
+    missing_og: usize,
     missing_readability: usize,
     snapshot_already_processing: usize,
-    oembed_already_processing: usize,
+    og_already_processing: usize,
     readability_already_processing: usize,
     snapshot_will_queue: usize,
-    oembed_will_queue: usize,
+    og_will_queue: usize,
     readability_will_queue: usize,
 }
 
 #[derive(Default)]
 struct ArtifactPresence {
     has_source: bool,
-    has_oembed_meta: bool,
+    has_og_meta: bool,
     has_readable_text: bool,
     has_readable_meta: bool,
 }
@@ -66,7 +66,7 @@ struct ArtifactPresence {
 struct MissingArtifactsPlan {
     summary: MissingArtifactsSummary,
     snapshot_hyperlink_ids: Vec<i32>,
-    oembed_hyperlink_ids: Vec<i32>,
+    og_hyperlink_ids: Vec<i32>,
     readability_hyperlink_ids: Vec<i32>,
 }
 
@@ -120,8 +120,8 @@ async fn process_missing_artifacts(State(state): State<Context>, headers: Header
         "/admin",
         FlashName::Notice,
         format!(
-            "Queued {} snapshot job(s), {} oembed job(s), and {} readability job(s).",
-            result.snapshot_queued, result.oembed_queued, result.readability_queued
+            "Queued {} snapshot job(s), {} og job(s), and {} readability job(s).",
+            result.snapshot_queued, result.og_queued, result.readability_queued
         ),
     )
 }
@@ -145,7 +145,7 @@ async fn build_missing_artifacts_plan(
         return Ok(MissingArtifactsPlan {
             summary,
             snapshot_hyperlink_ids: Vec::new(),
-            oembed_hyperlink_ids: Vec::new(),
+            og_hyperlink_ids: Vec::new(),
             readability_hyperlink_ids: Vec::new(),
         });
     }
@@ -158,7 +158,7 @@ async fn build_missing_artifacts_plan(
         .filter(hyperlink_artifact::Column::Kind.is_in([
             HyperlinkArtifactKind::SnapshotWarc,
             HyperlinkArtifactKind::PdfSource,
-            HyperlinkArtifactKind::OembedMeta,
+            HyperlinkArtifactKind::OgMeta,
             HyperlinkArtifactKind::ReadableText,
             HyperlinkArtifactKind::ReadableMeta,
         ]))
@@ -175,8 +175,8 @@ async fn build_missing_artifacts_plan(
             HyperlinkArtifactKind::SnapshotWarc | HyperlinkArtifactKind::PdfSource => {
                 presence.has_source = true;
             }
-            HyperlinkArtifactKind::OembedMeta => {
-                presence.has_oembed_meta = true;
+            HyperlinkArtifactKind::OgMeta => {
+                presence.has_og_meta = true;
             }
             HyperlinkArtifactKind::ReadableText => {
                 presence.has_readable_text = true;
@@ -199,7 +199,7 @@ async fn build_missing_artifacts_plan(
         ]))
         .filter(hyperlink_processing_job::Column::Kind.is_in([
             HyperlinkProcessingJobKind::Snapshot,
-            HyperlinkProcessingJobKind::Oembed,
+            HyperlinkProcessingJobKind::Og,
             HyperlinkProcessingJobKind::Readability,
         ]))
         .into_tuple::<(i32, HyperlinkProcessingJobKind)>()
@@ -207,15 +207,15 @@ async fn build_missing_artifacts_plan(
         .await?;
 
     let mut snapshot_active_hyperlinks = HashSet::<i32>::new();
-    let mut oembed_active_hyperlinks = HashSet::<i32>::new();
+    let mut og_active_hyperlinks = HashSet::<i32>::new();
     let mut readability_active_hyperlinks = HashSet::<i32>::new();
     for (hyperlink_id, kind) in active_rows {
         match kind {
             HyperlinkProcessingJobKind::Snapshot => {
                 snapshot_active_hyperlinks.insert(hyperlink_id);
             }
-            HyperlinkProcessingJobKind::Oembed => {
-                oembed_active_hyperlinks.insert(hyperlink_id);
+            HyperlinkProcessingJobKind::Og => {
+                og_active_hyperlinks.insert(hyperlink_id);
             }
             HyperlinkProcessingJobKind::Readability => {
                 readability_active_hyperlinks.insert(hyperlink_id);
@@ -225,7 +225,7 @@ async fn build_missing_artifacts_plan(
     }
 
     let mut snapshot_hyperlink_ids = Vec::new();
-    let mut oembed_hyperlink_ids = Vec::new();
+    let mut og_hyperlink_ids = Vec::new();
     let mut readability_hyperlink_ids = Vec::new();
 
     for hyperlink_id in hyperlink_ids {
@@ -241,13 +241,13 @@ async fn build_missing_artifacts_plan(
             continue;
         }
 
-        let has_oembed_meta = presence.is_some_and(|presence| presence.has_oembed_meta);
-        if !has_oembed_meta {
-            summary.missing_oembed += 1;
-            if oembed_active_hyperlinks.contains(&hyperlink_id) {
-                summary.oembed_already_processing += 1;
+        let has_og_meta = presence.is_some_and(|presence| presence.has_og_meta);
+        if !has_og_meta {
+            summary.missing_og += 1;
+            if og_active_hyperlinks.contains(&hyperlink_id) {
+                summary.og_already_processing += 1;
             } else {
-                oembed_hyperlink_ids.push(hyperlink_id);
+                og_hyperlink_ids.push(hyperlink_id);
             }
         }
 
@@ -264,13 +264,13 @@ async fn build_missing_artifacts_plan(
     }
 
     summary.snapshot_will_queue = snapshot_hyperlink_ids.len();
-    summary.oembed_will_queue = oembed_hyperlink_ids.len();
+    summary.og_will_queue = og_hyperlink_ids.len();
     summary.readability_will_queue = readability_hyperlink_ids.len();
 
     Ok(MissingArtifactsPlan {
         summary,
         snapshot_hyperlink_ids,
-        oembed_hyperlink_ids,
+        og_hyperlink_ids,
         readability_hyperlink_ids,
     })
 }
@@ -289,11 +289,11 @@ async fn execute_missing_artifacts_plan(
         )
         .await?;
     }
-    for hyperlink_id in &plan.oembed_hyperlink_ids {
+    for hyperlink_id in &plan.og_hyperlink_ids {
         hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
             connection,
             *hyperlink_id,
-            HyperlinkProcessingJobKind::Oembed,
+            HyperlinkProcessingJobKind::Og,
             queue,
         )
         .await?;
@@ -310,7 +310,7 @@ async fn execute_missing_artifacts_plan(
 
     Ok(LastRunSummary {
         snapshot_queued: plan.snapshot_hyperlink_ids.len(),
-        oembed_queued: plan.oembed_hyperlink_ids.len(),
+        og_queued: plan.og_hyperlink_ids.len(),
         readability_queued: plan.readability_hyperlink_ids.len(),
     })
 }
@@ -326,7 +326,7 @@ fn render_index(summary: &MissingArtifactsSummary) -> Result<String, sailfish::R
     AdminIndexTemplate {
         summary,
         has_missing_artifacts_to_process: summary.snapshot_will_queue > 0
-            || summary.oembed_will_queue > 0
+            || summary.og_will_queue > 0
             || summary.readability_will_queue > 0,
     }
     .render()
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_missing_artifacts_enqueues_snapshot_oembed_and_readability() {
+    async fn process_missing_artifacts_enqueues_snapshot_og_and_readability() {
         let (server, connection) = new_server(
             r#"
                 INSERT INTO hyperlink (id, title, url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
@@ -374,8 +374,9 @@ mod tests {
                 VALUES
                     (1, 2, NULL, 'snapshot_warc', X'77617263', 'application/warc', 4, '2026-02-21 00:01:00'),
                     (2, 3, NULL, 'snapshot_warc', X'77617263', 'application/warc', 4, '2026-02-21 00:01:00'),
-                    (3, 3, NULL, 'readable_text', X'74657874', 'text/markdown; charset=utf-8', 4, '2026-02-21 00:01:00'),
-                    (4, 3, NULL, 'readable_meta', X'7B7D', 'application/json', 2, '2026-02-21 00:01:00');
+                    (3, 3, NULL, 'og_meta', X'7B7D', 'application/json', 2, '2026-02-21 00:01:00'),
+                    (4, 3, NULL, 'readable_text', X'74657874', 'text/markdown; charset=utf-8', 4, '2026-02-21 00:01:00'),
+                    (5, 3, NULL, 'readable_meta', X'7B7D', 'application/json', 2, '2026-02-21 00:01:00');
             "#,
         )
         .await;
@@ -391,6 +392,13 @@ mod tests {
             .expect("snapshot jobs count should succeed");
         assert_eq!(snapshot_jobs, 1);
 
+        let og_jobs = hyperlink_processing_job::Entity::find()
+            .filter(hyperlink_processing_job::Column::Kind.eq(HyperlinkProcessingJobKind::Og))
+            .count(&connection)
+            .await
+            .expect("og jobs count should succeed");
+        assert_eq!(og_jobs, 1);
+
         let readability_jobs = hyperlink_processing_job::Entity::find()
             .filter(
                 hyperlink_processing_job::Column::Kind.eq(HyperlinkProcessingJobKind::Readability),
@@ -399,13 +407,6 @@ mod tests {
             .await
             .expect("readability jobs count should succeed");
         assert_eq!(readability_jobs, 1);
-
-        let oembed_jobs = hyperlink_processing_job::Entity::find()
-            .filter(hyperlink_processing_job::Column::Kind.eq(HyperlinkProcessingJobKind::Oembed))
-            .count(&connection)
-            .await
-            .expect("oembed jobs count should succeed");
-        assert_eq!(oembed_jobs, 2);
     }
 
     #[tokio::test]
@@ -428,10 +429,10 @@ mod tests {
         let body = page.text();
         assert!(body.contains("Process all missing artifacts"));
         assert!(body.contains("Missing source"));
-        assert!(body.contains("Missing oEmbed"));
+        assert!(body.contains("Missing Open Graph"));
         assert!(body.contains("Missing readability"));
         assert!(body.contains("Snapshot to queue"));
-        assert!(body.contains("oEmbed to queue"));
+        assert!(body.contains("Open Graph to queue"));
         assert!(body.contains("Readability to queue"));
     }
 
@@ -469,7 +470,7 @@ mod tests {
                 INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
                 VALUES
                     (1, 1, NULL, 'snapshot_warc', X'77617263', 'application/warc', 4, '2026-02-21 00:01:00'),
-                    (2, 1, NULL, 'oembed_meta', X'7B7D', 'application/json', 2, '2026-02-21 00:01:00'),
+                    (2, 1, NULL, 'og_meta', X'7B7D', 'application/json', 2, '2026-02-21 00:01:00'),
                     (3, 1, NULL, 'readable_text', X'74657874', 'text/markdown; charset=utf-8', 4, '2026-02-21 00:01:00'),
                     (4, 1, NULL, 'readable_meta', X'7B7D', 'application/json', 2, '2026-02-21 00:01:00');
             "#,

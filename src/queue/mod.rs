@@ -1,10 +1,11 @@
 use std::{
     sync::{Arc, Mutex, RwLock},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use lilqueue::{
     BackoffStrategy, Job, JobError, ProcessorOptions, SqliteJobProcessor, WorkerHandle,
+    dashboard::{DashboardRuntimeState, DashboardWakeResult},
 };
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,8 @@ struct WorkerRuntime {
 pub struct ProcessingQueue {
     processor: SqliteJobProcessor<ProcessingTask>,
     worker_handle: Arc<Mutex<Option<WorkerHandle>>>,
+    configured_concurrency: usize,
+    last_wake: Arc<Mutex<Option<DashboardWakeResult>>>,
 }
 
 impl std::fmt::Debug for ProcessingQueue {
@@ -97,10 +100,13 @@ impl ProcessingQueue {
         let processor = SqliteJobProcessor::<ProcessingTask>::new(connection, options)
             .await
             .map_err(|err| format!("failed to initialize sqlite processing queue: {err}"))?;
+        let configured_concurrency = worker_concurrency();
 
         Ok(Self {
             processor,
             worker_handle: Arc::new(Mutex::new(None)),
+            configured_concurrency,
+            last_wake: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -129,8 +135,7 @@ impl ProcessingQueue {
             *guard = Some(runtime);
         }
 
-        let concurrency = env_u32("PROCESSING_WORKER_CONCURRENCY", 1, 1, 32) as usize;
-        let new_handle = self.processor.spawn_workers(concurrency);
+        let new_handle = self.processor.spawn_workers(self.configured_concurrency);
 
         let old_handle = {
             let mut guard = self
@@ -162,6 +167,63 @@ impl ProcessingQueue {
 
         Ok(())
     }
+
+    fn workers_running(&self) -> Result<bool, String> {
+        let guard = self
+            .worker_handle
+            .lock()
+            .map_err(|_| "failed to access worker handle: lock poisoned".to_string())?;
+        Ok(guard.is_some())
+    }
+
+    pub fn wake_workers(&self) -> Result<DashboardWakeResult, String> {
+        let workers_running = self.workers_running()?;
+        self.processor.wake_workers();
+
+        let result = DashboardWakeResult {
+            at_epoch_s: now_epoch_seconds(),
+            result: if workers_running {
+                "wake signal sent".to_string()
+            } else {
+                "wake requested but workers are not running".to_string()
+            },
+        };
+
+        let mut guard = self
+            .last_wake
+            .lock()
+            .map_err(|_| "failed to store wake result: lock poisoned".to_string())?;
+        *guard = Some(result.clone());
+
+        Ok(result)
+    }
+
+    pub fn dashboard_runtime_state(&self) -> Result<DashboardRuntimeState, String> {
+        let workers_running = self.workers_running()?;
+        let last_wake = self
+            .last_wake
+            .lock()
+            .map_err(|_| "failed to access wake result: lock poisoned".to_string())?
+            .clone();
+
+        Ok(DashboardRuntimeState {
+            workers_running,
+            configured_concurrency: self.configured_concurrency,
+            last_wake_at_epoch_s: last_wake.as_ref().map(|event| event.at_epoch_s),
+            last_wake_result: last_wake.map(|event| event.result),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl lilqueue::dashboard::DashboardControl for ProcessingQueue {
+    async fn wake_workers(&self) -> Result<DashboardWakeResult, String> {
+        ProcessingQueue::wake_workers(self)
+    }
+
+    async fn runtime_state(&self) -> Result<DashboardRuntimeState, String> {
+        ProcessingQueue::dashboard_runtime_state(self)
+    }
 }
 
 fn env_u32(key: &str, default: u32, min: u32, max: u32) -> u32 {
@@ -178,4 +240,16 @@ fn env_u64(key: &str, default: u64, min: u64, max: u64) -> u64 {
         .and_then(|value| value.parse::<u64>().ok())
         .map(|value| value.clamp(min, max))
         .unwrap_or(default.clamp(min, max))
+}
+
+fn worker_concurrency() -> usize {
+    env_u32("PROCESSING_WORKER_CONCURRENCY", 1, 1, 32) as usize
+}
+
+fn now_epoch_seconds() -> i64 {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    i64::try_from(secs).unwrap_or(i64::MAX)
 }

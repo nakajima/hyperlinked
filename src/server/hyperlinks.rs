@@ -542,20 +542,26 @@ async fn show_with_kind(state: &Context, id: i32, kind: ResponseKind, flash: Fla
                 };
 
             match kind {
-                ResponseKind::Text => views::render_html_page_with_flash(
-                    "Show Hyperlink",
-                    render_show(
-                        &link,
-                        latest_job.as_ref(),
-                        &latest_artifacts,
-                        &recent_jobs,
-                        &discovered_links,
-                        &discovered_latest_jobs,
-                        &discovered_thumbnail_artifacts,
-                        &discovered_dark_thumbnail_artifacts,
-                    ),
-                    flash,
-                ),
+                ResponseKind::Text => {
+                    let og_summary = load_og_summary(&link);
+                    let display_title = select_show_display_title(&link, og_summary.as_ref());
+                    views::render_html_page_with_flash(
+                        "Show Hyperlink",
+                        render_show(
+                            &link,
+                            latest_job.as_ref(),
+                            &latest_artifacts,
+                            &recent_jobs,
+                            &discovered_links,
+                            &discovered_latest_jobs,
+                            &discovered_thumbnail_artifacts,
+                            &discovered_dark_thumbnail_artifacts,
+                            display_title,
+                            og_summary,
+                        ),
+                        flash,
+                    )
+                }
                 ResponseKind::Json => (
                     StatusCode::OK,
                     Json(to_response(&link, latest_job.as_ref())),
@@ -972,9 +978,15 @@ struct HyperlinksShowTemplate<'a> {
     discovered_latest_jobs: &'a HashMap<i32, hyperlink_processing_job::Model>,
     discovered_thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     discovered_dark_thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
+    display_title: String,
+    og_summary: Option<OgSummary>,
 }
 
 impl<'a> HyperlinksShowTemplate<'a> {
+    fn display_title(&self) -> &str {
+        self.display_title.as_str()
+    }
+
     fn processing_state(&self) -> &'static str {
         processing_state_name(self.latest_job)
     }
@@ -1015,6 +1027,16 @@ impl<'a> HyperlinksShowTemplate<'a> {
 
     fn artifact_inline_path(&self, kind: &HyperlinkArtifactKind) -> String {
         artifact_inline_path(self.link.id, kind)
+    }
+
+    fn og_summary(&self) -> Option<&OgSummary> {
+        self.og_summary.as_ref()
+    }
+
+    fn og_meta_inline_path(&self) -> Option<String> {
+        self.latest_artifacts
+            .contains_key(&HyperlinkArtifactKind::OgMeta)
+            .then_some(self.artifact_inline_path(&HyperlinkArtifactKind::OgMeta))
     }
 
     fn screenshot_inline_path(&self) -> Option<String> {
@@ -1073,6 +1095,8 @@ fn render_show(
     discovered_latest_jobs: &HashMap<i32, hyperlink_processing_job::Model>,
     discovered_thumbnail_artifacts: &HashMap<i32, hyperlink_artifact::Model>,
     discovered_dark_thumbnail_artifacts: &HashMap<i32, hyperlink_artifact::Model>,
+    display_title: String,
+    og_summary: Option<OgSummary>,
 ) -> Result<String, sailfish::RenderError> {
     HyperlinksShowTemplate {
         link,
@@ -1083,6 +1107,8 @@ fn render_show(
         discovered_latest_jobs,
         discovered_thumbnail_artifacts,
         discovered_dark_thumbnail_artifacts,
+        display_title,
+        og_summary,
     }
     .render()
 }
@@ -1097,13 +1123,158 @@ fn render_edit(link: &hyperlink::Model) -> Result<String, sailfish::RenderError>
     HyperlinksEditTemplate { link }.render()
 }
 
+#[derive(Clone, Debug)]
+struct OgSummary {
+    title: Option<String>,
+    description: Option<String>,
+    og_type: Option<String>,
+    url: Option<String>,
+    image_url: Option<String>,
+    site_name: Option<String>,
+}
+
+impl OgSummary {
+    fn has_values(&self) -> bool {
+        self.title.is_some()
+            || self.description.is_some()
+            || self.og_type.is_some()
+            || self.url.is_some()
+            || self.image_url.is_some()
+            || self.site_name.is_some()
+    }
+
+    fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    fn og_type(&self) -> Option<&str> {
+        self.og_type.as_deref()
+    }
+
+    fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    fn image_url(&self) -> Option<&str> {
+        self.image_url.as_deref()
+    }
+
+    fn site_name(&self) -> Option<&str> {
+        self.site_name.as_deref()
+    }
+}
+
+fn load_og_summary(link: &hyperlink::Model) -> Option<OgSummary> {
+    let summary = OgSummary {
+        title: normalize_text_value(link.og_title.as_deref()),
+        description: normalize_text_value(link.og_description.as_deref()),
+        og_type: normalize_text_value(link.og_type.as_deref()),
+        url: normalize_url_value(link.og_url.as_deref()),
+        image_url: normalize_url_value(link.og_image_url.as_deref()),
+        site_name: normalize_text_value(link.og_site_name.as_deref()),
+    };
+
+    summary.has_values().then_some(summary)
+}
+
+fn normalize_text_value(value: Option<&str>) -> Option<String> {
+    let value = value?;
+    let collapsed = collapse_whitespace(value.trim());
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed)
+    }
+}
+
+fn normalize_url_value(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn select_show_display_title(link: &hyperlink::Model, og_summary: Option<&OgSummary>) -> String {
+    if let Some(candidate_title) = og_summary.and_then(|summary| summary.title()) {
+        if metadata_title_candidate_is_usable(candidate_title)
+            && should_prefer_metadata_title(
+                link.title.as_str(),
+                link.url.as_str(),
+                link.raw_url.as_str(),
+                candidate_title,
+            )
+        {
+            return candidate_title.to_string();
+        }
+    }
+
+    link.title.clone()
+}
+
+fn metadata_title_candidate_is_usable(candidate: &str) -> bool {
+    let trimmed = candidate.trim();
+    !trimmed.is_empty() && trimmed.chars().count() <= 200
+}
+
+fn should_prefer_metadata_title(
+    current: &str,
+    link_url: &str,
+    raw_url: &str,
+    candidate: &str,
+) -> bool {
+    let current_title = collapse_whitespace(current.trim());
+    let current_url_like = looks_like_url_title(&current_title, link_url, raw_url);
+    let candidate_url_like = looks_like_url_title(candidate, link_url, raw_url);
+
+    if current_url_like && !candidate_url_like {
+        return true;
+    }
+
+    let current_len = current_title.chars().count();
+    let candidate_len = candidate.chars().count();
+    if current_len < 12 && candidate_len >= 20 && !candidate_url_like {
+        return true;
+    }
+
+    word_count(&current_title) == 1 && word_count(candidate) >= 2 && !candidate_url_like
+}
+
+fn looks_like_url_title(value: &str, link_url: &str, raw_url: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    if trimmed.eq_ignore_ascii_case(link_url.trim()) || trimmed.eq_ignore_ascii_case(raw_url.trim())
+    {
+        return true;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+fn word_count(value: &str) -> usize {
+    value.split_whitespace().count()
+}
+
 fn show_artifact_kinds() -> [HyperlinkArtifactKind; 13] {
     [
         HyperlinkArtifactKind::SnapshotWarc,
         HyperlinkArtifactKind::PdfSource,
         HyperlinkArtifactKind::SnapshotError,
-        HyperlinkArtifactKind::OembedMeta,
-        HyperlinkArtifactKind::OembedError,
+        HyperlinkArtifactKind::OgMeta,
+        HyperlinkArtifactKind::OgError,
         HyperlinkArtifactKind::ScreenshotPng,
         HyperlinkArtifactKind::ScreenshotThumbPng,
         HyperlinkArtifactKind::ScreenshotDarkPng,
@@ -1125,7 +1296,7 @@ fn required_show_artifact_kinds(
         HyperlinkArtifactKind::ScreenshotDarkPng,
         HyperlinkArtifactKind::ScreenshotThumbPng,
         HyperlinkArtifactKind::ScreenshotThumbDarkPng,
-        HyperlinkArtifactKind::OembedMeta,
+        HyperlinkArtifactKind::OgMeta,
         HyperlinkArtifactKind::ReadableText,
         HyperlinkArtifactKind::ReadableMeta,
     ]
@@ -1165,6 +1336,8 @@ fn artifact_kind_info(
         HyperlinkArtifactKind::SnapshotError => ("snapshot_error", "Snapshot Error", "json", true),
         HyperlinkArtifactKind::OembedMeta => ("oembed_meta", "oEmbed Metadata", "json", false),
         HyperlinkArtifactKind::OembedError => ("oembed_error", "oEmbed Error", "json", true),
+        HyperlinkArtifactKind::OgMeta => ("og_meta", "Open Graph Metadata", "json", false),
+        HyperlinkArtifactKind::OgError => ("og_error", "Open Graph Error", "json", true),
         HyperlinkArtifactKind::ReadableText => ("readable_text", "Readable Markdown", "md", false),
         HyperlinkArtifactKind::ReadableMeta => {
             ("readable_meta", "Readable Metadata", "json", false)
@@ -1546,6 +1719,167 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn show_ignores_oembed_title_when_no_open_graph_title() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'https://example.com/watch?v=1', 'https://example.com/watch?v=1', 'https://example.com/watch?v=1', 0, NULL, '2026-02-22 00:00:00', '2026-02-22 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES (
+                    1,
+                    1,
+                    NULL,
+                    'oembed_meta',
+                    CAST('{"captured_at":"2026-02-22T00:00:30Z","selected":{"title":"Example Video Walkthrough","type":"video","provider_name":"VideoHost","author_name":"Codex Team","thumbnail_url":"https://img.example.com/thumb.jpg","url":"https://cdn.example.com/embed/1"}}' AS BLOB),
+                    'application/json',
+                    230,
+                    '2026-02-22 00:00:31'
+                );
+            "#,
+        ))
+        .await;
+
+        let show = server.get("/hyperlinks/1").await;
+        show.assert_status_ok();
+        let body = show.text();
+        assert!(body.contains("<h2>https://example.com/watch?v=1</h2>"));
+        assert!(!body.contains("View full oEmbed JSON"));
+        assert!(!body.contains("<h4 class=\"font-bold\">oEmbed</h4>"));
+
+        let shown = show_json_hyperlink(&server, 1).await;
+        assert_eq!(shown.title, "https://example.com/watch?v=1");
+    }
+
+    #[tokio::test]
+    async fn show_uses_open_graph_title_when_current_title_is_url_like() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (
+                    id,
+                    title,
+                    url,
+                    raw_url,
+                    og_title,
+                    og_description,
+                    og_type,
+                    og_url,
+                    og_image_url,
+                    og_site_name,
+                    clicks_count,
+                    last_clicked_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    1,
+                    'https://example.com/watch?v=1',
+                    'https://example.com/watch?v=1',
+                    'https://example.com/watch?v=1',
+                    'Example OG Video',
+                    'OG description',
+                    'video.other',
+                    'https://example.com/watch?v=1',
+                    'https://img.example.com/og.jpg',
+                    'Example Site',
+                    0,
+                    NULL,
+                    '2026-02-22 00:00:00',
+                    '2026-02-22 00:00:00'
+                );
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES (
+                    1,
+                    1,
+                    NULL,
+                    'og_meta',
+                    CAST('{"captured_at":"2026-02-22T00:00:30Z","selected":{"title":"Example OG Video"}}' AS BLOB),
+                    'application/json',
+                    90,
+                    '2026-02-22 00:00:31'
+                );
+            "#,
+        ))
+        .await;
+
+        let show = server.get("/hyperlinks/1").await;
+        show.assert_status_ok();
+        let body = show.text();
+        assert!(body.contains("<h2>Example OG Video</h2>"));
+        assert!(body.contains("<h4 class=\"font-bold\">Open Graph</h4>"));
+    }
+
+    #[tokio::test]
+    async fn show_prefers_open_graph_block_over_oembed_block_when_both_exist() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (
+                    id,
+                    title,
+                    url,
+                    raw_url,
+                    og_title,
+                    og_description,
+                    og_type,
+                    og_url,
+                    og_image_url,
+                    og_site_name,
+                    clicks_count,
+                    last_clicked_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    1,
+                    'https://example.com/watch?v=1',
+                    'https://example.com/watch?v=1',
+                    'https://example.com/watch?v=1',
+                    'Example OG Video',
+                    'OG description',
+                    'video.other',
+                    'https://example.com/watch?v=1',
+                    'https://img.example.com/og.jpg',
+                    'Example Site',
+                    0,
+                    NULL,
+                    '2026-02-22 00:00:00',
+                    '2026-02-22 00:00:00'
+                );
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (
+                        1,
+                        1,
+                        NULL,
+                        'og_meta',
+                        CAST('{"captured_at":"2026-02-22T00:00:30Z","selected":{"title":"Example OG Video","description":"OG description"}}' AS BLOB),
+                        'application/json',
+                        120,
+                        '2026-02-22 00:00:31'
+                    ),
+                    (
+                        2,
+                        1,
+                        NULL,
+                        'oembed_meta',
+                        CAST('{"captured_at":"2026-02-22T00:00:30Z","selected":{"title":"Example oEmbed Video","type":"video","provider_name":"VideoHost"}}' AS BLOB),
+                        'application/json',
+                        140,
+                        '2026-02-22 00:00:31'
+                    );
+            "#,
+        ))
+        .await;
+
+        let show = server.get("/hyperlinks/1").await;
+        show.assert_status_ok();
+        let body = show.text();
+        assert!(body.contains("<h4 class=\"font-bold\">Open Graph</h4>"));
+        assert!(body.contains("View full Open Graph JSON"));
+        assert!(!body.contains("<h4 class=\"font-bold\">oEmbed</h4>"));
+        assert!(!body.contains("View full oEmbed JSON"));
+    }
+
+    #[tokio::test]
     async fn index_failed_status_shows_failed_badge() {
         let server = new_server_with_seed(Some(
             r#"
@@ -1597,6 +1931,20 @@ mod tests {
             "attachment; filename=\"hyperlink-1-pdf_source.pdf\"",
         );
         assert_eq!(pdf_download.text(), "%PDF-1.5\n%");
+
+        let inline = server
+            .get("/hyperlinks/1/artifacts/readable_text/inline")
+            .await;
+        inline.assert_status_ok();
+        inline.assert_header("content-type", "text/markdown; charset=utf-8");
+        assert_eq!(inline.text(), "second preview");
+
+        let pdf_inline = server
+            .get("/hyperlinks/1/artifacts/pdf_source/inline")
+            .await;
+        pdf_inline.assert_status_ok();
+        pdf_inline.assert_header("content-type", "application/pdf");
+        assert_eq!(pdf_inline.text(), "%PDF-1.5\n%");
 
         server
             .get("/hyperlinks/1/artifacts/snapshot_warc")
