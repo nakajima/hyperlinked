@@ -107,4 +107,20 @@
       <% } %>
     </ul>
   <% } %>
+
+  <% if self.total_pages > 1 { %>
+    <nav class="flex flex-row items-center gap-[0.4rem] text-sm" aria-label="Hyperlinks pagination">
+      <% if let Some(prev_href) = self.prev_page_href.as_ref() { %>
+        <a href="<%= prev_href %>">Previous</a>
+      <% } else { %>
+        <span class="text-tertiary">Previous</span>
+      <% } %>
+      <span class="text-tertiary">Page <%= self.page %> of <%= self.total_pages %></span>
+      <% if let Some(next_href) = self.next_page_href.as_ref() { %>
+        <a href="<%= next_href %>">Next</a>
+      <% } else { %>
+        <span class="text-tertiary">Next</span>
+      <% } %>
+    </nav>
+  <% } %>
 </section>

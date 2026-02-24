@@ -5,6 +5,7 @@ mod flash;
 pub mod graphql;
 mod html_layout;
 mod hyperlink_fetcher;
+mod mdns;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod views;
@@ -16,9 +17,10 @@ use tower_http::services::ServeDir;
 use tracing::instrument;
 
 pub mod hyperlinks;
+pub use mdns::MdnsOptions;
 
 #[instrument(level = tracing::Level::TRACE)]
-pub async fn start(host: &str, port: &str) -> Result<(), String> {
+pub async fn start(host: &str, port: &str, mdns_options: MdnsOptions) -> Result<(), String> {
     let connection = crate::db::connection::init()
         .await
         .map_err(|err| format!("failed to initialize database connection: {err}"))?;
@@ -46,6 +48,34 @@ pub async fn start(host: &str, port: &str) -> Result<(), String> {
         .nest_service("/assets", ServeDir::new(assets_dir))
         .with_state(state);
     let addr = [host, port].join(":");
+
+    let _mdns_advertisement = if mdns_options.enabled {
+        match port.parse::<u16>() {
+            Ok(parsed_port) => match mdns::MdnsAdvertisement::start(&mdns_options, parsed_port) {
+                Ok(advertisement) => {
+                    if advertisement.is_some() {
+                        tracing::info!(
+                            "mDNS advertised as {} ({}) on port {}",
+                            mdns_options.service_name,
+                            mdns_options.service_type,
+                            parsed_port
+                        );
+                    }
+                    advertisement
+                }
+                Err(err) => {
+                    tracing::warn!("mDNS advertisement disabled: {err}");
+                    None
+                }
+            },
+            Err(err) => {
+                tracing::warn!("mDNS advertisement disabled due to invalid port `{port}`: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     tracing::info!("starting server at {}", addr);
 

@@ -25,7 +25,11 @@ enum PathAction {
     RebuildAndRestart,
 }
 
-pub async fn run_dev(host: String, port: String) -> Result<(), String> {
+pub async fn run_dev(
+    host: String,
+    port: String,
+    mdns_options: crate::server::MdnsOptions,
+) -> Result<(), String> {
     println!("starting dev watcher");
     let restart_marker_path = dev_reload_marker::default_marker_path();
     clear_restart_marker(&restart_marker_path);
@@ -35,7 +39,7 @@ pub async fn run_dev(host: String, port: String) -> Result<(), String> {
         return Err(err);
     }
 
-    let mut child = match spawn_server_process(&host, &port, &restart_marker_path) {
+    let mut child = match spawn_server_process(&host, &port, &restart_marker_path, &mdns_options) {
         Ok(child) => child,
         Err(err) => {
             mark_restart_failed(&restart_marker_path, RestartPhase::Startup, &err);
@@ -130,8 +134,12 @@ pub async fn run_dev(host: String, port: String) -> Result<(), String> {
                                         return Err(err);
                                     }
                                     child =
-                                        match spawn_server_process(&host, &port, &restart_marker_path)
-                                        {
+                                        match spawn_server_process(
+                                            &host,
+                                            &port,
+                                            &restart_marker_path,
+                                            &mdns_options,
+                                        ) {
                                             Ok(child) => child,
                                             Err(err) => {
                                                 mark_restart_failed(
@@ -163,7 +171,12 @@ pub async fn run_dev(host: String, port: String) -> Result<(), String> {
                                 mark_restart_failed(&restart_marker_path, RestartPhase::Restart, &err);
                                 return Err(err);
                             }
-                            child = match spawn_server_process(&host, &port, &restart_marker_path) {
+                            child = match spawn_server_process(
+                                &host,
+                                &port,
+                                &restart_marker_path,
+                                &mdns_options,
+                            ) {
                                 Ok(child) => child,
                                 Err(err) => {
                                     mark_restart_failed(
@@ -307,14 +320,30 @@ fn build_server_binary() -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_server_process(host: &str, port: &str, marker_path: &Path) -> Result<Child, String> {
+fn spawn_server_process(
+    host: &str,
+    port: &str,
+    marker_path: &Path,
+    mdns_options: &crate::server::MdnsOptions,
+) -> Result<Child, String> {
     let executable = server_executable_path();
+    let mdns_enabled = if mdns_options.enabled {
+        "true"
+    } else {
+        "false"
+    };
     Command::new(&executable)
         .arg("serve")
         .arg("--host")
         .arg(host)
         .arg("--port")
         .arg(port)
+        .arg("--mdns-enabled")
+        .arg(mdns_enabled)
+        .arg("--mdns-service-name")
+        .arg(mdns_options.service_name.as_str())
+        .arg("--mdns-service-type")
+        .arg(mdns_options.service_type.as_str())
         .env(dev_reload_marker::DEV_MODE_ENV, "1")
         .env(dev_reload_marker::RESTART_MARKER_ENV, marker_path)
         .current_dir(manifest_dir())

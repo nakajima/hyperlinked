@@ -914,6 +914,10 @@ struct HyperlinksIndexTemplate<'a> {
     query_input: &'a str,
     ignored_tokens: &'a [String],
     free_text: &'a str,
+    page: u64,
+    total_pages: u64,
+    prev_page_href: Option<String>,
+    next_page_href: Option<String>,
 }
 
 impl<'a> HyperlinksIndexTemplate<'a> {
@@ -1029,6 +1033,17 @@ impl<'a> HyperlinksIndexTemplate<'a> {
 }
 
 fn render_index(results: &HyperlinkFetchResults) -> Result<String, sailfish::RenderError> {
+    let prev_page_href = if results.page > 1 {
+        Some(hyperlinks_index_href(&results.raw_q, results.page - 1))
+    } else {
+        None
+    };
+    let next_page_href = if results.page < results.total_pages {
+        Some(hyperlinks_index_href(&results.raw_q, results.page + 1))
+    } else {
+        None
+    };
+
     HyperlinksIndexTemplate {
         links: &results.links,
         latest_jobs: &results.latest_jobs,
@@ -1039,8 +1054,25 @@ fn render_index(results: &HyperlinkFetchResults) -> Result<String, sailfish::Ren
         query_input: &results.raw_q,
         ignored_tokens: &results.ignored_tokens,
         free_text: &results.free_text,
+        page: results.page,
+        total_pages: results.total_pages,
+        prev_page_href,
+        next_page_href,
     }
     .render()
+}
+
+#[derive(Serialize)]
+struct HyperlinksIndexHrefQuery<'a> {
+    #[serde(skip_serializing_if = "str::is_empty")]
+    q: &'a str,
+    page: u64,
+}
+
+fn hyperlinks_index_href(raw_q: &str, page: u64) -> String {
+    let query = serde_urlencoded::to_string(HyperlinksIndexHrefQuery { q: raw_q, page })
+        .unwrap_or_else(|_| format!("page={page}"));
+    format!("{HYPERLINKS_PATH}?{query}")
 }
 
 #[derive(Template)]
@@ -1640,6 +1672,23 @@ mod tests {
         for needle in needles {
             assert!(body.contains(needle), "missing expected snippet: {needle}");
         }
+    }
+
+    fn seed_hyperlinks_insert_sql(count: usize) -> String {
+        let mut sql = String::from(
+            "INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at) VALUES ",
+        );
+        for id in 1..=count {
+            if id > 1 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&format!(
+                "({}, 'Link {}', 'https://example.com/{}', 'https://example.com/{}', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00')",
+                id, id, id, id
+            ));
+        }
+        sql.push(';');
+        sql
     }
 
     async fn create_json_hyperlink(
@@ -2807,5 +2856,58 @@ mod tests {
         assert_eq!(response.items.len(), 2);
         assert_eq!(response.items[0].title, "Older");
         assert_eq!(response.items[1].title, "Newer");
+    }
+
+    #[tokio::test]
+    async fn index_json_paginates_100_per_page() {
+        let seed_sql = seed_hyperlinks_insert_sql(205);
+        let server = new_server_with_seed(Some(seed_sql.as_str())).await;
+
+        let page_1 = list_json_index(&server, None).await;
+        assert_eq!(page_1.items.len(), 100);
+        assert_eq!(page_1.items[0].id, 205);
+        assert_eq!(page_1.items[99].id, 106);
+
+        let page_2 = list_json_index(&server, Some("page=2")).await;
+        assert_eq!(page_2.items.len(), 100);
+        assert_eq!(page_2.items[0].id, 105);
+        assert_eq!(page_2.items[99].id, 6);
+
+        let page_3 = list_json_index(&server, Some("page=3")).await;
+        assert_eq!(page_3.items.len(), 5);
+        assert_eq!(page_3.items[0].id, 5);
+        assert_eq!(page_3.items[4].id, 1);
+
+        let clamped = list_json_index(&server, Some("page=99")).await;
+        assert_eq!(clamped.items.len(), 5);
+        assert_eq!(clamped.items[0].id, 5);
+        assert_eq!(clamped.items[4].id, 1);
+    }
+
+    #[tokio::test]
+    async fn index_html_renders_pagination_links_and_preserves_query() {
+        let seed_sql = seed_hyperlinks_insert_sql(101);
+        let server = new_server_with_seed(Some(seed_sql.as_str())).await;
+
+        let first_page = server.get("/hyperlinks?q=link").await;
+        first_page.assert_status_ok();
+        let first_body = first_page.text();
+        assert!(first_body.contains("Page 1 of 2"));
+        assert!(first_body.contains("/hyperlinks?q=link&amp;page=2"));
+        assert!(first_body.contains("Details"));
+
+        let second_page = server.get("/hyperlinks?q=link&page=2").await;
+        second_page.assert_status_ok();
+        let second_body = second_page.text();
+        assert!(second_body.contains("Page 2 of 2"));
+        assert!(second_body.contains("/hyperlinks?q=link&amp;page=1"));
+        assert!(second_body.contains("/hyperlinks/1\">Details"));
+        assert!(!second_body.contains("/hyperlinks/101\">Details"));
+
+        let clamped_page = server.get("/hyperlinks?q=link&page=99").await;
+        clamped_page.assert_status_ok();
+        let clamped_body = clamped_page.text();
+        assert!(clamped_body.contains("Page 2 of 2"));
+        assert!(clamped_body.contains("/hyperlinks?q=link&amp;page=1"));
     }
 }

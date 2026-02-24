@@ -18,6 +18,18 @@ enum Commands {
 
         #[arg(long, env = "PORT", default_value = "8765")]
         port: String,
+
+        #[arg(long, default_value_t = true)]
+        mdns_enabled: bool,
+
+        #[arg(long)]
+        mdns_service_name: Option<String>,
+
+        #[arg(
+            long,
+            default_value = hyperlinked::server::MdnsOptions::default_service_type()
+        )]
+        mdns_service_type: String,
     },
     Dev {
         #[arg(long, default_value = "0.0.0.0")]
@@ -25,6 +37,18 @@ enum Commands {
 
         #[arg(long, env = "PORT", default_value = "8765")]
         port: String,
+
+        #[arg(long, default_value_t = true)]
+        mdns_enabled: bool,
+
+        #[arg(long)]
+        mdns_service_name: Option<String>,
+
+        #[arg(
+            long,
+            default_value = hyperlinked::server::MdnsOptions::default_service_type()
+        )]
+        mdns_service_type: String,
     },
     ImportLinkwarden {
         input: PathBuf,
@@ -67,17 +91,43 @@ async fn main() {
 
 async fn run() -> Result<i32, String> {
     match Cli::parse().command {
-        Commands::Serve { host, port } => {
-            hyperlinked::server::start(&host, &port).await?;
+        Commands::Serve {
+            host,
+            port,
+            mdns_enabled,
+            mdns_service_name,
+            mdns_service_type,
+        } => {
+            let mdns_options =
+                build_mdns_options(mdns_enabled, mdns_service_name, mdns_service_type);
+            hyperlinked::server::start(&host, &port, mdns_options).await?;
             Ok(0)
         }
-        Commands::Dev { host, port } => {
-            hyperlinked::dev_reload::run_dev(host, port).await?;
+        Commands::Dev {
+            host,
+            port,
+            mdns_enabled,
+            mdns_service_name,
+            mdns_service_type,
+        } => {
+            let mdns_options =
+                build_mdns_options(mdns_enabled, mdns_service_name, mdns_service_type);
+            hyperlinked::dev_reload::run_dev(host, port, mdns_options).await?;
             Ok(0)
         }
         Commands::ImportLinkwarden { input } => run_linkwarden_import(input).await,
         Commands::ArtifactsBackfill { batch_size } => run_artifacts_backfill(batch_size).await,
     }
+}
+
+fn build_mdns_options(
+    enabled: bool,
+    service_name: Option<String>,
+    service_type: String,
+) -> hyperlinked::server::MdnsOptions {
+    let service_name =
+        service_name.unwrap_or_else(hyperlinked::server::MdnsOptions::default_service_name);
+    hyperlinked::server::MdnsOptions::new(enabled, service_name, service_type)
 }
 
 async fn run_linkwarden_import(input: PathBuf) -> Result<i32, String> {

@@ -1,7 +1,4 @@
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-};
+use std::collections::{HashMap, HashSet};
 
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, Statement, Value,
@@ -12,7 +9,7 @@ use crate::{
     entity::{
         hyperlink,
         hyperlink_artifact::{self, HyperlinkArtifactKind},
-        hyperlink_processing_job::{self, HyperlinkProcessingJobState},
+        hyperlink_processing_job,
     },
     model::{
         hyperlink::ROOT_DISCOVERY_DEPTH, hyperlink_artifact as hyperlink_artifact_model,
@@ -23,6 +20,7 @@ use crate::{
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct HyperlinkFetchQuery {
     pub q: Option<String>,
+    pub page: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +34,8 @@ pub struct HyperlinkFetchResults {
     pub ignored_tokens: Vec<String>,
     pub free_text: String,
     pub raw_q: String,
+    pub page: u64,
+    pub total_pages: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -95,6 +95,8 @@ pub struct HyperlinkFetcher<'a> {
     query: HyperlinkFetchQuery,
 }
 
+const INDEX_PER_PAGE: u64 = 100;
+
 impl<'a> HyperlinkFetcher<'a> {
     pub fn new(connection: &'a DatabaseConnection, query: HyperlinkFetchQuery) -> Self {
         Self { connection, query }
@@ -105,56 +107,28 @@ impl<'a> HyperlinkFetcher<'a> {
         let search_terms = parse_search_terms(&parsed.free_text);
         let has_free_text = !search_terms.is_empty();
         let effective_order = parsed.parsed_query.effective_order(has_free_text);
+        let requested_page = resolve_page(self.query.page);
+        let page_slice = fetch_hyperlink_page_slice(
+            self.connection,
+            &parsed.parsed_query,
+            &search_terms,
+            effective_order,
+            requested_page,
+            INDEX_PER_PAGE,
+        )
+        .await?;
 
-        let mut links_query = hyperlink::Entity::find();
-        match parsed.parsed_query.effective_scope() {
-            ScopeSelection::RootOnly => {
-                links_query =
-                    links_query.filter(hyperlink::Column::DiscoveryDepth.eq(ROOT_DISCOVERY_DEPTH));
-            }
-            ScopeSelection::DiscoveredOnly => {
-                links_query =
-                    links_query.filter(hyperlink::Column::DiscoveryDepth.ne(ROOT_DISCOVERY_DEPTH));
-            }
-            ScopeSelection::All => {}
-        }
-
-        let mut links = links_query.all(self.connection).await?;
-        let relevance_scores = if has_free_text {
-            let mut scores = fts_relevance_scores(self.connection, &search_terms).await?;
-            let readable_text_ids = hyperlinks_with_readable_text(self.connection).await?;
-            add_title_url_fallback_matches(&mut scores, &readable_text_ids, &links, &search_terms);
-            links.retain(|link| scores.contains_key(&link.id));
-            Some(scores)
-        } else {
-            None
-        };
-
+        let links = load_hyperlinks_by_ids(self.connection, &page_slice.hyperlink_ids).await?;
         let hyperlink_ids = links.iter().map(|link| link.id).collect::<Vec<_>>();
-        let mut latest_jobs =
+        let latest_jobs =
             hyperlink_job_model::latest_for_hyperlinks(self.connection, &hyperlink_ids).await?;
 
-        let type_selection = parsed.parsed_query.effective_type();
-        links.retain(|link| matches_type(type_selection, &link.url));
-
-        let status_selection = parsed.parsed_query.effective_status();
-        links.retain(|link| {
-            matches_status(
-                &status_selection,
-                latest_jobs.get(&link.id).map(|job| &job.state),
-            )
-        });
-
-        sort_links(&mut links, effective_order, relevance_scores.as_ref());
-
-        let match_snippets = if has_free_text {
+        let match_snippets = if !search_terms.is_empty() {
             build_match_snippets(self.connection, &links, &search_terms).await?
         } else {
             HashMap::new()
         };
 
-        let shown_ids = links.iter().map(|link| link.id).collect::<HashSet<_>>();
-        latest_jobs.retain(|hyperlink_id, _| shown_ids.contains(hyperlink_id));
         let shown_hyperlink_ids = links.iter().map(|link| link.id).collect::<Vec<_>>();
         let thumbnail_artifacts = hyperlink_artifact_model::latest_for_hyperlinks_kind(
             self.connection,
@@ -179,8 +153,312 @@ impl<'a> HyperlinkFetcher<'a> {
             ignored_tokens: parsed.ignored_tokens,
             free_text: parsed.free_text,
             raw_q: parsed.raw_q,
+            page: page_slice.page,
+            total_pages: page_slice.total_pages,
         })
     }
+}
+
+fn resolve_page(page: Option<u64>) -> u64 {
+    page.unwrap_or(1).max(1)
+}
+
+fn total_pages(total_rows: u64, per_page: u64) -> u64 {
+    if total_rows == 0 {
+        return 1;
+    }
+
+    total_rows.div_ceil(per_page.max(1))
+}
+
+fn page_offset(page: u64, per_page: u64) -> u64 {
+    page.saturating_sub(1).saturating_mul(per_page.max(1))
+}
+
+struct HyperlinkPageSlice {
+    hyperlink_ids: Vec<i32>,
+    page: u64,
+    total_pages: u64,
+}
+
+struct HyperlinkSqlParts {
+    with_clause: String,
+    joins_sql: String,
+    where_sql: String,
+    order_sql: String,
+    values: Vec<Value>,
+}
+
+async fn fetch_hyperlink_page_slice(
+    connection: &DatabaseConnection,
+    parsed_query: &ParsedHyperlinkQuery,
+    search_terms: &[SearchTerm],
+    order: OrderToken,
+    requested_page: u64,
+    per_page: u64,
+) -> Result<HyperlinkPageSlice, sea_orm::DbErr> {
+    let sql_parts = build_hyperlink_sql_parts(parsed_query, search_terms, order);
+    let backend = connection.get_database_backend();
+    let select_prefix = if sql_parts.with_clause.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", sql_parts.with_clause)
+    };
+
+    let count_sql = format!(
+        r#"
+        {select_prefix}
+        SELECT COUNT(*) AS total_items
+        FROM hyperlink h
+        {joins}
+        WHERE {where_sql}
+        "#,
+        joins = sql_parts.joins_sql,
+        where_sql = sql_parts.where_sql,
+    );
+    let count_row = connection
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            count_sql,
+            sql_parts.values.clone(),
+        ))
+        .await?;
+    let total_items = count_row
+        .as_ref()
+        .and_then(|row| row.try_get::<i64>("", "total_items").ok())
+        .and_then(|count| u64::try_from(count).ok())
+        .unwrap_or_default();
+
+    let total_pages = total_pages(total_items, per_page);
+    let page = requested_page.min(total_pages.max(1));
+    let offset = page_offset(page, per_page);
+
+    let page_sql = format!(
+        r#"
+        {select_prefix}
+        SELECT h.id AS hyperlink_id
+        FROM hyperlink h
+        {joins}
+        WHERE {where_sql}
+        ORDER BY {order_sql}
+        LIMIT ? OFFSET ?
+        "#,
+        joins = sql_parts.joins_sql,
+        where_sql = sql_parts.where_sql,
+        order_sql = sql_parts.order_sql,
+    );
+    let mut page_values = sql_parts.values.clone();
+    page_values.push(i64::try_from(per_page).unwrap_or(i64::MAX).into());
+    page_values.push(i64::try_from(offset).unwrap_or(i64::MAX).into());
+    let page_rows = connection
+        .query_all(Statement::from_sql_and_values(
+            backend,
+            page_sql,
+            page_values,
+        ))
+        .await?;
+
+    let mut hyperlink_ids = Vec::with_capacity(page_rows.len());
+    for row in page_rows {
+        hyperlink_ids.push(row.try_get("", "hyperlink_id")?);
+    }
+
+    Ok(HyperlinkPageSlice {
+        hyperlink_ids,
+        page,
+        total_pages,
+    })
+}
+
+fn build_hyperlink_sql_parts(
+    parsed_query: &ParsedHyperlinkQuery,
+    search_terms: &[SearchTerm],
+    order: OrderToken,
+) -> HyperlinkSqlParts {
+    let mut values = Vec::new();
+    let mut joins = Vec::new();
+    let mut filters = Vec::new();
+
+    let has_free_text = !search_terms.is_empty();
+    let with_clause = if has_free_text {
+        let match_query = build_fts_match_query(search_terms).unwrap_or_default();
+        values.push(match_query.into());
+        r#"
+        WITH fts_matches AS (
+            SELECT rowid AS hyperlink_id, bm25(hyperlink_search_fts) AS score
+            FROM hyperlink_search_fts
+            WHERE hyperlink_search_fts MATCH ?
+        )
+        "#
+        .to_string()
+    } else {
+        String::new()
+    };
+
+    let status_selection = parsed_query.effective_status();
+    if !matches!(status_selection, StatusSelection::All) {
+        joins.push(
+            r#"
+            LEFT JOIN hyperlink_processing_job lpj
+                ON lpj.id = (
+                    SELECT j.id
+                    FROM hyperlink_processing_job j
+                    WHERE j.hyperlink_id = h.id
+                    ORDER BY j.created_at DESC, j.id DESC
+                    LIMIT 1
+                )
+            "#
+            .to_string(),
+        );
+    }
+
+    if has_free_text {
+        joins.push("LEFT JOIN fts_matches fts ON fts.hyperlink_id = h.id".to_string());
+        joins.push("LEFT JOIN hyperlink_search_doc sd ON sd.hyperlink_id = h.id".to_string());
+        let fallback_sql = build_title_url_fallback_sql(search_terms, &mut values);
+        filters.push(format!(
+            "(fts.hyperlink_id IS NOT NULL OR (COALESCE(TRIM(sd.readable_text), '') = '' AND {fallback_sql}))"
+        ));
+    }
+
+    match parsed_query.effective_scope() {
+        ScopeSelection::RootOnly => {
+            filters.push(format!("h.discovery_depth = {}", ROOT_DISCOVERY_DEPTH));
+        }
+        ScopeSelection::DiscoveredOnly => {
+            filters.push(format!("h.discovery_depth <> {}", ROOT_DISCOVERY_DEPTH));
+        }
+        ScopeSelection::All => {}
+    }
+
+    let is_pdf_expr =
+        "(lower(h.url) LIKE '%.pdf' OR lower(h.url) LIKE '%.pdf?%' OR lower(h.url) LIKE '%.pdf#%')";
+    match parsed_query.effective_type() {
+        TypeSelection::All => {}
+        TypeSelection::PdfOnly => filters.push(is_pdf_expr.to_string()),
+        TypeSelection::NonPdfOnly => filters.push(format!("NOT {is_pdf_expr}")),
+    }
+
+    if let StatusSelection::Selected(statuses) = status_selection {
+        let mut status_terms = Vec::new();
+        if statuses.contains(&StatusToken::Idle) {
+            status_terms.push("lpj.id IS NULL".to_string());
+        }
+        if statuses.contains(&StatusToken::Processing) {
+            status_terms.push("(lpj.state = 'queued' OR lpj.state = 'running')".to_string());
+        }
+        if statuses.contains(&StatusToken::Failed) {
+            status_terms.push("lpj.state = 'failed'".to_string());
+        }
+        if statuses.contains(&StatusToken::Succeeded) {
+            status_terms.push("lpj.state = 'succeeded'".to_string());
+        }
+        if !status_terms.is_empty() {
+            filters.push(format!("({})", status_terms.join(" OR ")));
+        }
+    }
+
+    let where_sql = if filters.is_empty() {
+        "1 = 1".to_string()
+    } else {
+        filters.join(" AND ")
+    };
+
+    let order_sql = match order {
+        OrderToken::Newest => "h.created_at DESC, h.id DESC".to_string(),
+        OrderToken::Oldest => "h.created_at ASC, h.id ASC".to_string(),
+        OrderToken::MostClicked => "h.clicks_count DESC, h.created_at DESC, h.id DESC".to_string(),
+        OrderToken::RecentlyClicked => {
+            "(h.last_clicked_at IS NULL) ASC, h.last_clicked_at DESC, h.created_at DESC, h.id DESC"
+                .to_string()
+        }
+        OrderToken::Random => "random()".to_string(),
+        OrderToken::Relevance if has_free_text => {
+            format!(
+                "COALESCE(fts.score, {FALLBACK_RELEVANCE_SCORE}) ASC, h.created_at DESC, h.id DESC"
+            )
+        }
+        OrderToken::Relevance => "h.created_at DESC, h.id DESC".to_string(),
+    };
+
+    HyperlinkSqlParts {
+        with_clause,
+        joins_sql: joins.join("\n"),
+        where_sql,
+        order_sql,
+        values,
+    }
+}
+
+fn build_title_url_fallback_sql(search_terms: &[SearchTerm], values: &mut Vec<Value>) -> String {
+    if search_terms.is_empty() {
+        return "1 = 1".to_string();
+    }
+
+    let mut term_sql = Vec::with_capacity(search_terms.len());
+    for term in search_terms {
+        if term.exact {
+            let title_sql =
+                build_exact_word_match_sql("lower(h.title)", term.value.as_str(), values);
+            let url_sql = build_exact_word_match_sql("lower(h.url)", term.value.as_str(), values);
+            term_sql.push(format!("(({title_sql}) OR ({url_sql}))"));
+        } else {
+            let pattern = format!("%{}%", escape_like(term.value.as_str()));
+            values.push(pattern.clone().into());
+            values.push(pattern.into());
+            term_sql.push(
+                "(lower(h.title) LIKE ? ESCAPE '\\' OR lower(h.url) LIKE ? ESCAPE '\\')"
+                    .to_string(),
+            );
+        }
+    }
+    term_sql.join(" AND ")
+}
+
+fn build_exact_word_match_sql(column_sql: &str, value: &str, values: &mut Vec<Value>) -> String {
+    let around = format!("*[^0-9a-z]{value}[^0-9a-z]*");
+    let prefix = format!("{value}[^0-9a-z]*");
+    let suffix = format!("*[^0-9a-z]{value}");
+
+    values.push(value.to_string().into());
+    values.push(around.into());
+    values.push(prefix.into());
+    values.push(suffix.into());
+
+    format!("{column_sql} = ? OR {column_sql} GLOB ? OR {column_sql} GLOB ? OR {column_sql} GLOB ?")
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+async fn load_hyperlinks_by_ids(
+    connection: &DatabaseConnection,
+    hyperlink_ids: &[i32],
+) -> Result<Vec<hyperlink::Model>, sea_orm::DbErr> {
+    if hyperlink_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let links = hyperlink::Entity::find()
+        .filter(hyperlink::Column::Id.is_in(hyperlink_ids.to_vec()))
+        .all(connection)
+        .await?;
+
+    let mut by_id = links
+        .into_iter()
+        .map(|link| (link.id, link))
+        .collect::<HashMap<_, _>>();
+    let mut ordered = Vec::with_capacity(hyperlink_ids.len());
+    for hyperlink_id in hyperlink_ids {
+        if let Some(link) = by_id.remove(hyperlink_id) {
+            ordered.push(link);
+        }
+    }
+    Ok(ordered)
 }
 
 #[derive(Clone, Copy)]
@@ -244,37 +522,6 @@ impl ParsedHyperlinkQuery {
             None if has_free_text => OrderToken::Relevance,
             None => OrderToken::Newest,
         }
-    }
-}
-
-fn matches_type(selection: TypeSelection, hyperlink_url: &str) -> bool {
-    let is_pdf = url_path_looks_pdf(hyperlink_url);
-    match selection {
-        TypeSelection::All => true,
-        TypeSelection::PdfOnly => is_pdf,
-        TypeSelection::NonPdfOnly => !is_pdf,
-    }
-}
-
-fn matches_status(
-    selection: &StatusSelection,
-    latest_job_state: Option<&HyperlinkProcessingJobState>,
-) -> bool {
-    let status = status_from_latest_job(latest_job_state);
-    match selection {
-        StatusSelection::All => true,
-        StatusSelection::Selected(selected) => selected.contains(&status),
-    }
-}
-
-fn status_from_latest_job(latest_job_state: Option<&HyperlinkProcessingJobState>) -> StatusToken {
-    match latest_job_state {
-        None => StatusToken::Idle,
-        Some(HyperlinkProcessingJobState::Queued | HyperlinkProcessingJobState::Running) => {
-            StatusToken::Processing
-        }
-        Some(HyperlinkProcessingJobState::Failed) => StatusToken::Failed,
-        Some(HyperlinkProcessingJobState::Succeeded) => StatusToken::Succeeded,
     }
 }
 
@@ -360,112 +607,6 @@ fn normalize_exact_search_term(fragment: &str) -> Option<String> {
     } else {
         Some(normalized)
     }
-}
-
-async fn fts_relevance_scores(
-    connection: &DatabaseConnection,
-    search_terms: &[SearchTerm],
-) -> Result<HashMap<i32, f64>, sea_orm::DbErr> {
-    let Some(match_query) = build_fts_match_query(search_terms) else {
-        return Ok(HashMap::new());
-    };
-
-    let backend = connection.get_database_backend();
-    let rows = connection
-        .query_all(Statement::from_sql_and_values(
-            backend,
-            r#"
-            SELECT
-                rowid AS hyperlink_id,
-                bm25(hyperlink_search_fts) AS score
-            FROM hyperlink_search_fts
-            WHERE hyperlink_search_fts MATCH ?
-            "#
-            .to_string(),
-            vec![Value::from(match_query)],
-        ))
-        .await?;
-
-    let mut scores = HashMap::with_capacity(rows.len());
-    for row in rows {
-        let hyperlink_id: i32 = row.try_get("", "hyperlink_id")?;
-        let score: f64 = row.try_get("", "score")?;
-        scores.insert(hyperlink_id, score);
-    }
-
-    Ok(scores)
-}
-
-async fn hyperlinks_with_readable_text(
-    connection: &DatabaseConnection,
-) -> Result<HashSet<i32>, sea_orm::DbErr> {
-    let backend = connection.get_database_backend();
-    let rows = connection
-        .query_all(Statement::from_string(
-            backend,
-            r#"
-            SELECT hyperlink_id
-            FROM hyperlink_search_doc
-            WHERE LENGTH(TRIM(readable_text)) > 0
-            "#
-            .to_string(),
-        ))
-        .await?;
-
-    let mut hyperlink_ids = HashSet::with_capacity(rows.len());
-    for row in rows {
-        let hyperlink_id: i32 = row.try_get("", "hyperlink_id")?;
-        hyperlink_ids.insert(hyperlink_id);
-    }
-
-    Ok(hyperlink_ids)
-}
-
-fn add_title_url_fallback_matches(
-    relevance_scores: &mut HashMap<i32, f64>,
-    readable_text_ids: &HashSet<i32>,
-    links: &[hyperlink::Model],
-    search_terms: &[SearchTerm],
-) {
-    for link in links {
-        if relevance_scores.contains_key(&link.id) || readable_text_ids.contains(&link.id) {
-            continue;
-        }
-
-        if matches_title_url_terms(link, search_terms) {
-            relevance_scores.insert(link.id, FALLBACK_RELEVANCE_SCORE);
-        }
-    }
-}
-
-fn matches_title_url_terms(link: &hyperlink::Model, search_terms: &[SearchTerm]) -> bool {
-    let title = link.title.to_ascii_lowercase();
-    let url = link.url.to_ascii_lowercase();
-    search_terms
-        .iter()
-        .all(|term| matches_search_term(&title, term) || matches_search_term(&url, term))
-}
-
-fn matches_search_term(value: &str, term: &SearchTerm) -> bool {
-    if term.exact {
-        contains_exact_match_ascii(value, &term.value)
-    } else {
-        value.contains(&term.value)
-    }
-}
-
-fn contains_exact_match_ascii(value: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-
-    for (start, _) in value.match_indices(needle) {
-        let end = start + needle.len();
-        if is_word_boundary_range_ascii(value, start, end) {
-            return true;
-        }
-    }
-    false
 }
 
 fn is_word_boundary_range_ascii(value: &str, start: usize, end: usize) -> bool {
@@ -842,103 +983,6 @@ fn escape_html(value: &str) -> String {
     output
 }
 
-fn sort_links(
-    links: &mut [hyperlink::Model],
-    order: OrderToken,
-    relevance_scores: Option<&HashMap<i32, f64>>,
-) {
-    match order {
-        OrderToken::Newest => links.sort_by(sort_newest),
-        OrderToken::Oldest => links.sort_by(sort_oldest),
-        OrderToken::MostClicked => links.sort_by(sort_most_clicked),
-        OrderToken::RecentlyClicked => links.sort_by(sort_recently_clicked),
-        OrderToken::Random => {
-            let seed = random_seed();
-            links.sort_by_key(|link| random_sort_key(seed, link.id));
-        }
-        OrderToken::Relevance => links.sort_by(|a, b| sort_relevance(a, b, relevance_scores)),
-    }
-}
-
-fn sort_relevance(
-    a: &hyperlink::Model,
-    b: &hyperlink::Model,
-    relevance_scores: Option<&HashMap<i32, f64>>,
-) -> Ordering {
-    let a_score = relevance_scores
-        .and_then(|scores| scores.get(&a.id))
-        .copied();
-    let b_score = relevance_scores
-        .and_then(|scores| scores.get(&b.id))
-        .copied();
-
-    match (a_score, b_score) {
-        (Some(a_score), Some(b_score)) => a_score
-            .partial_cmp(&b_score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| b.created_at.cmp(&a.created_at)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => sort_newest(a, b),
-    }
-    .then_with(|| b.id.cmp(&a.id))
-}
-
-fn sort_newest(a: &hyperlink::Model, b: &hyperlink::Model) -> Ordering {
-    b.created_at
-        .cmp(&a.created_at)
-        .then_with(|| b.id.cmp(&a.id))
-}
-
-fn sort_oldest(a: &hyperlink::Model, b: &hyperlink::Model) -> Ordering {
-    a.created_at
-        .cmp(&b.created_at)
-        .then_with(|| a.id.cmp(&b.id))
-}
-
-fn sort_most_clicked(a: &hyperlink::Model, b: &hyperlink::Model) -> Ordering {
-    b.clicks_count
-        .cmp(&a.clicks_count)
-        .then_with(|| b.created_at.cmp(&a.created_at))
-        .then_with(|| b.id.cmp(&a.id))
-}
-
-fn sort_recently_clicked(a: &hyperlink::Model, b: &hyperlink::Model) -> Ordering {
-    match (&a.last_clicked_at, &b.last_clicked_at) {
-        (Some(a_last), Some(b_last)) => b_last
-            .cmp(a_last)
-            .then_with(|| b.created_at.cmp(&a.created_at)),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => b.created_at.cmp(&a.created_at),
-    }
-    .then_with(|| b.id.cmp(&a.id))
-}
-
-fn random_seed() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or_default()
-}
-
-fn random_sort_key(seed: u64, hyperlink_id: i32) -> u64 {
-    splitmix64(seed ^ (hyperlink_id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
-}
-
-fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    value ^ (value >> 31)
-}
-
-fn url_path_looks_pdf(url: &str) -> bool {
-    url.split(['?', '#'])
-        .next()
-        .is_some_and(|prefix| prefix.to_ascii_lowercase().ends_with(".pdf"))
-}
-
 struct ParseQueryOutput {
     parsed_query: ParsedHyperlinkQuery,
     ignored_tokens: Vec<String>,
@@ -1126,12 +1170,6 @@ mod tests {
 
         parsed.scopes.push(ScopeToken::Root);
         assert!(matches!(parsed.effective_scope(), ScopeSelection::All));
-    }
-
-    #[test]
-    fn matches_status_maps_missing_latest_job_to_idle() {
-        let selection = StatusSelection::Selected([StatusToken::Idle].into_iter().collect());
-        assert!(matches_status(&selection, None));
     }
 
     #[test]
