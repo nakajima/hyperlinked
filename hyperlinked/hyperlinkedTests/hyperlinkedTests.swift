@@ -6,7 +6,10 @@
 //
 
 import Testing
+import Foundation
+@testable import hyperlinked
 
+@MainActor
 struct hyperlinkedTests {
 
     @Test
@@ -41,6 +44,50 @@ struct hyperlinkedTests {
         #expect(decoded.id == 42)
         #expect(decoded.rawURL == "https://example.com/?utm_source=test")
         #expect(decoded.processingState == "idle")
+    }
+
+    @Test
+    func listQueryDefaultsToRootScope() {
+        let query = HyperlinksListQueryBuilder.build(
+            queryText: "",
+            showDiscoveredLinks: false,
+            orderOverrideRawValue: nil
+        )
+        #expect(query == "scope:root")
+    }
+
+    @Test
+    func listQueryUsesAllScopeWhenShowingDiscovered() {
+        let query = HyperlinksListQueryBuilder.build(
+            queryText: "",
+            showDiscoveredLinks: true,
+            orderOverrideRawValue: nil
+        )
+        #expect(query == "scope:all")
+    }
+
+    @Test
+    func listQueryIncludesTrimmedFreeTextAndOrderOverride() {
+        let query = HyperlinksListQueryBuilder.build(
+            queryText: "  rust links ",
+            showDiscoveredLinks: false,
+            orderOverrideRawValue: "most-clicked"
+        )
+        #expect(query == "scope:root rust links order:most-clicked")
+    }
+
+    @Test
+    func listQueryEmitsSingleScopeToken() {
+        let query = HyperlinksListQueryBuilder.build(
+            queryText: "swift",
+            showDiscoveredLinks: true,
+            orderOverrideRawValue: "oldest"
+        )
+        let scopeTokens = query
+            .split(separator: " ")
+            .map(String.init)
+            .filter { $0.hasPrefix("scope:") }
+        #expect(scopeTokens == ["scope:all"])
     }
 
 }

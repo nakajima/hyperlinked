@@ -78,19 +78,12 @@ struct HyperlinksListView: View {
         )
     }
 
-    private var queryString: String? {
-        var tokens: [String] = []
-        if hasFreeText {
-            tokens.append(trimmedQueryText)
-        }
-        if let orderOverride {
-            tokens.append("order:\(orderOverride.rawValue)")
-        }
-        if showDiscoveredLinks {
-            tokens.append("with:discovered")
-        }
-        let query = tokens.joined(separator: " ")
-        return query.isEmpty ? nil : query
+    private var queryString: String {
+        HyperlinksListQueryBuilder.build(
+            queryText: queryText,
+            showDiscoveredLinks: showDiscoveredLinks,
+            orderOverrideRawValue: orderOverride?.rawValue
+        )
     }
 
     private var listRows: [ListRow] {
@@ -407,6 +400,29 @@ struct HyperlinksListView: View {
         }
         .padding(.vertical, 4)
         .opacity(0.78)
+    }
+}
+
+enum HyperlinksListQueryBuilder {
+    static func build(
+        queryText: String,
+        showDiscoveredLinks: Bool,
+        orderOverrideRawValue: String?
+    ) -> String {
+        var tokens = [showDiscoveredLinks ? "scope:all" : "scope:root"]
+        let trimmedQuery = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedQuery.isEmpty {
+            tokens.append(trimmedQuery)
+        }
+
+        if let orderOverrideRawValue {
+            let trimmedOrder = orderOverrideRawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedOrder.isEmpty {
+                tokens.append("order:\(trimmedOrder)")
+            }
+        }
+
+        return tokens.joined(separator: " ")
     }
 }
 
