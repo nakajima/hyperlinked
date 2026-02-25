@@ -1,10 +1,12 @@
 import SwiftUI
+import UIKit
 
 struct HyperlinksListView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var hyperlinks: [Hyperlink] = []
+    @State private var pendingOutboxItems: [ShareOutboxItemRecord] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var activeSheet: ActiveSheet?
@@ -21,6 +23,20 @@ struct HyperlinksListView: View {
         case settings
 
         var id: String { rawValue }
+    }
+
+    private enum ListRow: Identifiable {
+        case pending(ShareOutboxItemRecord)
+        case hyperlink(Hyperlink)
+
+        var id: String {
+            switch self {
+            case .pending(let item):
+                return "pending-\(item.id)"
+            case .hyperlink(let hyperlink):
+                return "hyperlink-\(hyperlink.id)"
+            }
+        }
     }
 
     private var trimmedQueryText: String {
@@ -77,6 +93,10 @@ struct HyperlinksListView: View {
         return query.isEmpty ? nil : query
     }
 
+    private var listRows: [ListRow] {
+        pendingOutboxItems.map(ListRow.pending) + hyperlinks.map(ListRow.hyperlink)
+    }
+
     var body: some View {
         NavigationStack {
             listContent
@@ -126,6 +146,9 @@ struct HyperlinksListView: View {
         .task(id: appModel.selectedServerURL?.absoluteString) {
             await loadHyperlinks()
         }
+        .task(id: appModel.selectedServerURL?.absoluteString) {
+            await retryPendingOutboxLoop()
+        }
         .refreshable {
             await loadHyperlinks()
         }
@@ -146,6 +169,13 @@ struct HyperlinksListView: View {
         .onChange(of: orderOverrideRawValue) { _ in
             scheduleFilterReload()
         }
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
+        ) { _ in
+            Task {
+                await loadHyperlinks()
+            }
+        }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .add:
@@ -155,10 +185,18 @@ struct HyperlinksListView: View {
                 }
                 .environmentObject(appModel)
             case .settings:
-                ServerSettingsView {
-                    activeSheet = nil
-                    appModel.openServerSetup()
-                }
+                ServerSettingsView(
+                    pendingUploadsCount: pendingOutboxItems.count,
+                    onChangeServer: {
+                        activeSheet = nil
+                        appModel.openServerSetup()
+                    },
+                    onRetryPendingUploads: {
+                        Task {
+                            await loadHyperlinks()
+                        }
+                    }
+                )
                 .environmentObject(appModel)
             }
         }
@@ -166,7 +204,7 @@ struct HyperlinksListView: View {
 
     private var listContent: some View {
         List {
-            if isLoading && hyperlinks.isEmpty {
+            if isLoading && hyperlinks.isEmpty && pendingOutboxItems.isEmpty {
                 Section {
                     HStack {
                         Spacer()
@@ -176,7 +214,7 @@ struct HyperlinksListView: View {
                     .padding(.vertical, 24)
                     .listRowSeparator(.hidden)
                 }
-            } else if let errorMessage, hyperlinks.isEmpty {
+            } else if let errorMessage, hyperlinks.isEmpty && pendingOutboxItems.isEmpty {
                 Section {
                     VStack(spacing: 12) {
                         Image(systemName: "wifi.slash")
@@ -200,7 +238,7 @@ struct HyperlinksListView: View {
                     .padding(.vertical, 24)
                     .listRowSeparator(.hidden)
                 }
-            } else if hyperlinks.isEmpty {
+            } else if hyperlinks.isEmpty && pendingOutboxItems.isEmpty {
                 Section {
                     VStack(spacing: 12) {
                         Image(systemName: "link.badge.plus")
@@ -222,30 +260,35 @@ struct HyperlinksListView: View {
                 }
             } else {
                 Section {
-                    ForEach(hyperlinks) { hyperlink in
-                        NavigationLink(
-                            destination: HyperlinkDetailView(hyperlinkID: hyperlink.id, fallback: hyperlink)
-                        ) {
-                            HStack(alignment: .top, spacing: 12) {
-                                HyperlinkThumbnailView(hyperlink: hyperlink, colorScheme: colorScheme)
+                    ForEach(listRows) { row in
+                        switch row {
+                        case .pending(let pendingItem):
+                            pendingOutboxRow(pendingItem)
+                        case .hyperlink(let hyperlink):
+                            NavigationLink(
+                                destination: HyperlinkDetailView(hyperlinkID: hyperlink.id, fallback: hyperlink)
+                            ) {
+                                HStack(alignment: .top, spacing: 12) {
+                                    HyperlinkThumbnailView(hyperlink: hyperlink, colorScheme: colorScheme)
 
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(hyperlink.title)
-                                        .font(.headline)
-                                        .lineLimit(2)
-                                    Text(hyperlink.url)
-                                        .font(.footnote)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(hyperlink.title)
+                                            .font(.headline)
+                                            .lineLimit(2)
+                                        Text(hyperlink.url)
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                        HStack(spacing: 12) {
+                                            Text(hyperlink.processingState.capitalized)
+                                            Text("\(hyperlink.clicksCount) clicks")
+                                        }
+                                        .font(.caption)
                                         .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                    HStack(spacing: 12) {
-                                        Text(hyperlink.processingState.capitalized)
-                                        Text("\(hyperlink.clicksCount) clicks")
                                     }
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
                                 }
+                                .padding(.vertical, 4)
                             }
-                            .padding(.vertical, 4)
                         }
                     }
                 }
@@ -268,6 +311,7 @@ struct HyperlinksListView: View {
 
     private func loadHyperlinks() async {
         pendingFilterTask?.cancel()
+        await refreshPendingOutboxItems()
 
         guard let client = appModel.apiClient else {
             hyperlinks = []
@@ -279,6 +323,8 @@ struct HyperlinksListView: View {
         defer { isLoading = false }
 
         do {
+            await retryPendingOutbox(using: client)
+            await refreshPendingOutboxItems()
             hyperlinks = try await client.listHyperlinks(q: queryString)
             errorMessage = nil
         } catch is CancellationError {
@@ -288,6 +334,79 @@ struct HyperlinksListView: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func retryPendingOutboxLoop() async {
+        while !Task.isCancelled {
+            guard let client = appModel.apiClient else {
+                return
+            }
+            await retryPendingOutbox(using: client)
+            await refreshPendingOutboxItems()
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+        }
+    }
+
+    private func retryPendingOutbox(using client: APIClient) async {
+        guard let store = try? ShareOutboxStore.openShared(appGroupID: AppModel.appGroupID) else {
+            return
+        }
+        let coordinator = OutboxDeliveryCoordinator(store: store, client: client)
+        _ = await coordinator.drainDueItems(limit: 20)
+    }
+
+    private func refreshPendingOutboxItems() async {
+        guard let store = try? ShareOutboxStore.openShared(appGroupID: AppModel.appGroupID) else {
+            pendingOutboxItems = []
+            return
+        }
+        if let items = try? store.pendingItems(limit: 200) {
+            pendingOutboxItems = items
+        } else {
+            pendingOutboxItems = []
+        }
+    }
+
+    @ViewBuilder
+    private func pendingOutboxRow(_ item: ShareOutboxItemRecord) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.18))
+                .frame(width: 96, height: 64)
+                .overlay {
+                    Image(systemName: "tray.and.arrow.up")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.secondary)
+                }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? item.url : item.title)
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text(item.url)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                HStack(spacing: 12) {
+                    Text("Pending upload")
+                    if item.attemptCount > 0 {
+                        Text("Retries \(item.attemptCount)")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                if let lastError = item.lastError,
+                   !lastError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(lastError)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .padding(.vertical, 4)
+        .opacity(0.78)
     }
 }
 

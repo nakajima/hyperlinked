@@ -3,15 +3,22 @@ import Combine
 
 @MainActor
 final class AppModel: ObservableObject {
+    static let appGroupID = "group.fm.folder.hyperlinked"
+    static let selectedServerURLKey = "selected_server_base_url"
+
     @Published var selectedServerURL: URL?
     @Published var shouldShowServerSetup: Bool
 
     private let defaults: UserDefaults
-    private let selectedServerURLKey = "selected_server_base_url"
+    private let sharedDefaults: UserDefaults?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        if let raw = defaults.string(forKey: selectedServerURLKey),
+        self.sharedDefaults = UserDefaults(suiteName: Self.appGroupID)
+
+        let resolvedDefaults = sharedDefaults ?? defaults
+
+        if let raw = resolvedDefaults.string(forKey: Self.selectedServerURLKey),
            let parsed = AppModel.normalizedServerURL(from: raw) {
             selectedServerURL = parsed
             shouldShowServerSetup = false
@@ -31,7 +38,8 @@ final class AppModel: ObservableObject {
     func saveServerURL(_ url: URL) {
         let normalized = url.absoluteString.trimmingCharacters(in: .whitespacesAndNewlines)
         selectedServerURL = URL(string: normalized)
-        defaults.set(normalized, forKey: selectedServerURLKey)
+        sharedDefaults?.set(normalized, forKey: Self.selectedServerURLKey)
+        defaults.set(normalized, forKey: Self.selectedServerURLKey)
         shouldShowServerSetup = false
     }
 
@@ -44,7 +52,8 @@ final class AppModel: ObservableObject {
     }
 
     func resetServerSelection() {
-        defaults.removeObject(forKey: selectedServerURLKey)
+        sharedDefaults?.removeObject(forKey: Self.selectedServerURLKey)
+        defaults.removeObject(forKey: Self.selectedServerURLKey)
         selectedServerURL = nil
         shouldShowServerSetup = true
     }

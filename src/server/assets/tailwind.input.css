@@ -527,9 +527,3 @@ picture {
       opacity 150ms ease-out;
   }
 }
-
-@media (width >= 40rem) {
-  .header-nav-menu > nav {
-    display: flex;
-  }
-}

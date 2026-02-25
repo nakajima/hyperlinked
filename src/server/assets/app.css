@@ -226,6 +226,9 @@
 .p-0 {
   padding: calc(var(--spacing) * 0);
 }
+.p-3 {
+  padding: calc(var(--spacing) * 3);
+}
 .px-3 {
   padding-inline: calc(var(--spacing) * 3);
 }
@@ -835,11 +838,6 @@ picture {
   }
   .inline-reveal-slot[data-entering="true"] > button {
     transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1), opacity 150ms ease-out;
-  }
-}
-@media (width >= 40rem) {
-  .header-nav-menu > nav {
-    display: flex;
   }
 }
 @property --tw-border-style {

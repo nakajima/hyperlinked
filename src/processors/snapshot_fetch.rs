@@ -34,6 +34,7 @@ const RETRY_JITTER_MAX_MS: u64 = 125;
 const DEFAULT_SNAPSHOT_CONTENT_TIMEOUT_SECS: u64 = 20;
 const DEFAULT_SNAPSHOT_CONTENT_RENDER_WAIT_MS: u64 = 5000;
 const DEFAULT_SCREENSHOT_TIMEOUT_SECS: u64 = 20;
+const CHROMIUM_PATH_ENV: &str = "CHROMIUM_PATH";
 const DEFAULT_SCREENSHOT_DESKTOP_VIEWPORT: Viewport = Viewport {
     width: 1366,
     height: 4096,
@@ -880,14 +881,18 @@ fn screenshot_temp_path() -> PathBuf {
 }
 
 fn screenshot_chromium_path() -> String {
-    std::env::var("SCREENSHOT_CHROMIUM_PATH").unwrap_or_else(|_| "chromium".to_string())
+    chromium_path()
 }
 
 fn snapshot_content_chromium_path() -> String {
-    std::env::var("SNAPSHOT_CONTENT_CHROMIUM_PATH")
+    chromium_path()
+}
+
+fn chromium_path() -> String {
+    std::env::var(CHROMIUM_PATH_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(screenshot_chromium_path)
+        .unwrap_or_else(|| "chromium".to_string())
 }
 
 fn snapshot_content_timeout() -> Duration {

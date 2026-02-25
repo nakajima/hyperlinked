@@ -14,6 +14,7 @@ struct BaseLayoutTemplate<'a> {
     dev_restart_alert: Option<String>,
     notice_flash: Option<String>,
     alert_flash: Option<String>,
+    show_admin_warning_badge: bool,
 }
 
 pub(crate) fn page(
@@ -31,6 +32,23 @@ fn page_with_dev_restart_alert(
     flash: &mut Flash,
     dev_restart_alert: Option<String>,
 ) -> Result<Html<String>, RenderError> {
+    let show_admin_warning_badge = super::chromium_diagnostics::current().has_missing_binary();
+    page_with_flags(
+        title,
+        body_html,
+        flash,
+        dev_restart_alert,
+        show_admin_warning_badge,
+    )
+}
+
+fn page_with_flags(
+    title: &str,
+    body_html: &str,
+    flash: &mut Flash,
+    dev_restart_alert: Option<String>,
+    show_admin_warning_badge: bool,
+) -> Result<Html<String>, RenderError> {
     let notice_flash = flash.render_flash(FlashName::Notice);
     let alert_flash = flash.render_flash(FlashName::Alert);
     BaseLayoutTemplate {
@@ -40,6 +58,7 @@ fn page_with_dev_restart_alert(
         dev_restart_alert,
         notice_flash,
         alert_flash,
+        show_admin_warning_badge,
     }
     .render_once()
     .map(Html)
@@ -75,9 +94,27 @@ mod tests {
     }
 
     #[test]
+    fn renders_admin_warning_badge_when_requested() {
+        let mut flash = Flash::default();
+        let html = page_with_flags("Title", "<p>Body</p>", &mut flash, None, true)
+            .expect("layout should render")
+            .0;
+        assert!(html.contains("data-admin-warning-badge"));
+    }
+
+    #[test]
+    fn omits_admin_warning_badge_when_not_requested() {
+        let mut flash = Flash::default();
+        let html = page_with_flags("Title", "<p>Body</p>", &mut flash, None, false)
+            .expect("layout should render")
+            .0;
+        assert!(!html.contains("data-admin-warning-badge"));
+    }
+
+    #[test]
     fn queue_nav_points_to_admin_jobs_with_pending_badge_placeholder() {
         let mut flash = Flash::default();
-        let html = page_with_dev_restart_alert("Title", "<p>Body</p>", &mut flash, None)
+        let html = page_with_flags("Title", "<p>Body</p>", &mut flash, None, false)
             .expect("layout should render")
             .0;
         assert!(html.contains("href=\"/admin/jobs\""));

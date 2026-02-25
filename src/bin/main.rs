@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, prelude::*};
 use tracing_tree::HierarchicalLayer;
@@ -19,7 +19,7 @@ enum Commands {
         #[arg(long, env = "PORT", default_value = "8765")]
         port: String,
 
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
         mdns_enabled: bool,
 
         #[arg(long)]
@@ -38,7 +38,7 @@ enum Commands {
         #[arg(long, env = "PORT", default_value = "8765")]
         port: String,
 
-        #[arg(long, default_value_t = true)]
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
         mdns_enabled: bool,
 
         #[arg(long)]

@@ -4,7 +4,9 @@ struct ServerSettingsView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.dismiss) private var dismiss
 
+    let pendingUploadsCount: Int
     let onChangeServer: () -> Void
+    let onRetryPendingUploads: () -> Void
 
     var body: some View {
         NavigationStack {
@@ -17,6 +19,19 @@ struct ServerSettingsView: View {
                         Text("No server selected.")
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                Section("Pending Uploads") {
+                    HStack {
+                        Text("Queued Links")
+                        Spacer()
+                        Text("\(pendingUploadsCount)")
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("Retry Pending Uploads") {
+                        onRetryPendingUploads()
+                    }
+                    .disabled(pendingUploadsCount == 0)
                 }
 
                 Section("Actions") {

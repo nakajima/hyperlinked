@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod admin_jobs;
+mod chromium_diagnostics;
 pub mod context;
 mod flash;
 pub mod graphql;

@@ -31,6 +31,7 @@ use crate::{
         hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
     },
     server::{
+        chromium_diagnostics::ChromiumDiagnostics,
         context::Context,
         flash::{Flash, FlashName, redirect_with_flash},
     },
@@ -187,10 +188,11 @@ async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
             );
         }
     };
+    let chromium = super::chromium_diagnostics::current();
 
     views::render_html_page_with_flash(
         "Admin",
-        render_index(&plan.summary, &stats),
+        render_index(&plan.summary, &stats, &chromium),
         Flash::from_headers(&headers),
     )
 }
@@ -1049,11 +1051,13 @@ struct AdminIndexTemplate<'a> {
     summary: &'a MissingArtifactsSummary,
     stats: &'a AdminDatasetStats,
     has_missing_artifacts_to_process: bool,
+    chromium: &'a ChromiumDiagnostics,
 }
 
 fn render_index(
     summary: &MissingArtifactsSummary,
     stats: &AdminDatasetStats,
+    chromium: &ChromiumDiagnostics,
 ) -> Result<String, sailfish::RenderError> {
     AdminIndexTemplate {
         summary,
@@ -1061,6 +1065,7 @@ fn render_index(
         has_missing_artifacts_to_process: summary.snapshot_will_queue > 0
             || summary.og_will_queue > 0
             || summary.readability_will_queue > 0,
+        chromium,
     }
     .render()
 }
@@ -1079,6 +1084,35 @@ mod tests {
 
     use super::*;
     use crate::server::test_support;
+
+    #[test]
+    fn render_index_shows_chromium_setup_when_missing() {
+        let summary = MissingArtifactsSummary::default();
+        let stats = AdminDatasetStats::default();
+        let chromium = ChromiumDiagnostics {
+            chromium_path: "chromium".to_string(),
+            chromium_resolved_path: None,
+            chromium_found: false,
+        };
+
+        let html = render_index(&summary, &stats, &chromium).expect("admin template should render");
+        assert!(html.contains("Screenshot browser setup required"));
+        assert!(html.contains("CHROMIUM_PATH"));
+    }
+
+    #[test]
+    fn render_index_hides_chromium_setup_when_available() {
+        let summary = MissingArtifactsSummary::default();
+        let stats = AdminDatasetStats::default();
+        let chromium = ChromiumDiagnostics {
+            chromium_path: "/usr/bin/chromium".to_string(),
+            chromium_resolved_path: Some("/usr/bin/chromium".to_string()),
+            chromium_found: true,
+        };
+
+        let html = render_index(&summary, &stats, &chromium).expect("admin template should render");
+        assert!(!html.contains("Screenshot browser setup required"));
+    }
 
     async fn new_server(seed_sql: &str) -> (axum_test::TestServer, sea_orm::DatabaseConnection) {
         let connection = test_support::new_memory_connection().await;
@@ -1163,7 +1197,8 @@ mod tests {
         let page = server.get("/admin").await;
         page.assert_status_ok();
         let body = page.text();
-        assert!(body.contains("Process all missing artifacts"));
+        assert!(body.contains("Process all artifacts"));
+        assert!(body.contains("data-confirm=\"Process all artifacts?"));
         assert!(body.contains("Missing source"));
         assert!(body.contains("Missing Open Graph"));
         assert!(body.contains("Missing readability"));
@@ -1216,9 +1251,7 @@ mod tests {
         let page = server.get("/admin").await;
         page.assert_status_ok();
         let body = page.text();
-        assert!(body.contains(
-            "<input type=\"submit\" value=\"Process all missing artifacts\" disabled />"
-        ));
+        assert!(body.contains("<button type=\"submit\" disabled>Process all artifacts</button>"));
     }
 
     #[tokio::test]

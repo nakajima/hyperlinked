@@ -5,10 +5,27 @@
     <p class="text-sm">Maintenance operations for the processing pipeline.</p>
   </article>
 
-  <section class="flex flex-col gap-3">
+  <% if self.chromium.has_missing_binary() { %>
+    <section class="flex flex-col gap-3 rounded-[0.4rem] border border-invalid bg-form-control px-3 py-3" aria-labelledby="chrome-setup-heading">
+      <h3 id="chrome-setup-heading" class="text-alert">Screenshot browser setup required</h3>
+      <p class="text-sm">
+        Chromium/Chrome was not found, so screenshot capture jobs will fail until this is fixed.
+      </p>
+      <p class="text-sm">
+        Chromium binary:
+        <code><%= self.chromium.chromium_path %></code>
+        <% if self.chromium.chromium_found { %>(found at <code><%= self.chromium.chromium_resolved_path.as_deref().unwrap_or("") %></code>)<% } else { %>(not found)<% } %>
+      </p>
+      <p class="text-sm">Set this and restart the server:</p>
+      <pre class="overflow-x-auto rounded-[0.4rem] border border-form-control bg-tertiary p-3 text-sm leading-5"><code>export CHROMIUM_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"</code></pre>
+      <p class="text-sm">After restarting, reprocess links that are missing screenshots.</p>
+    </section>
+  <% } %>
+
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
     <h3>Process all missing artifacts</h3>
-    <div class="flex flex-col gap-[0.4rem]">
-      <div aria-label="Missing artifacts summary">
+    <div class="flex flex-col gap-3">
+      <div class="overflow-x-auto" aria-label="Missing artifacts summary">
         <table>
           <thead>
             <tr>
@@ -44,30 +61,29 @@
       <form
         action="/admin/process-missing-artifacts"
         method="post"
-        data-confirm="Queue snapshot/og/readability jobs for all hyperlinks missing required artifacts?"
+        class="flex flex-row flex-wrap items-center gap-[0.4rem]"
+        data-confirm="Process all artifacts? This will queue snapshot, Open Graph, and readability jobs for every link missing required artifacts."
       >
-        <input type="submit" value="Process all missing artifacts"<% if !self.has_missing_artifacts_to_process { %> disabled<% } %> />
+        <button type="submit"<% if !self.has_missing_artifacts_to_process { %> disabled<% } %>>Process all artifacts</button>
       </form>
     </div>
   </section>
 
-  <section class="flex flex-col gap-3">
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
     <h3>Import / Export</h3>
-    <div class="flex flex-col gap-[0.4rem] rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
-      <p class="text-sm text-tertiary">
-        Download a full ZIP backup (including artifacts) or restore from a previously exported ZIP.
-      </p>
-      <p>
-        <a href="/admin/export">Download backup ZIP</a>
-      </p>
-      <form action="/admin/import" method="post" enctype="multipart/form-data" class="flex flex-col gap-[0.4rem]">
-        <label for="admin-import-archive">Import backup ZIP</label>
-        <input id="admin-import-archive" name="archive" type="file" accept=".zip,application/zip" required />
-        <div>
-          <button type="submit">Import backup ZIP</button>
-        </div>
-      </form>
-    </div>
+    <p class="text-sm text-tertiary">
+      Download a full ZIP backup (including artifacts) or restore from a previously exported ZIP.
+    </p>
+    <p>
+      <a href="/admin/export">Download backup ZIP</a>
+    </p>
+    <form action="/admin/import" method="post" enctype="multipart/form-data" class="flex flex-col gap-[0.4rem]">
+      <label for="admin-import-archive">Import backup ZIP</label>
+      <input id="admin-import-archive" name="archive" type="file" accept=".zip,application/zip" required />
+      <div>
+        <button type="submit">Import backup ZIP</button>
+      </div>
+    </form>
   </section>
 
   <details class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
@@ -75,28 +91,30 @@
 
     <section class="flex flex-col gap-[0.4rem]">
       <h4>Dataset stats</h4>
-      <table aria-label="Dataset stats">
-        <thead>
-          <tr>
-            <th>Total links</th>
-            <th>Root links</th>
-            <th>Discovered links</th>
-            <th>Total artifacts</th>
-            <th>Total jobs</th>
-            <th>Active jobs</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><%= self.stats.total_hyperlinks %></td>
-            <td><%= self.stats.root_hyperlinks %></td>
-            <td><%= self.stats.discovered_hyperlinks %></td>
-            <td><%= self.stats.total_artifacts %></td>
-            <td><%= self.stats.total_processing_jobs %></td>
-            <td><%= self.stats.active_processing_jobs %></td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="overflow-x-auto">
+        <table aria-label="Dataset stats">
+          <thead>
+            <tr>
+              <th>Total links</th>
+              <th>Root links</th>
+              <th>Discovered links</th>
+              <th>Total artifacts</th>
+              <th>Total jobs</th>
+              <th>Active jobs</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><%= self.stats.total_hyperlinks %></td>
+              <td><%= self.stats.root_hyperlinks %></td>
+              <td><%= self.stats.discovered_hyperlinks %></td>
+              <td><%= self.stats.total_artifacts %></td>
+              <td><%= self.stats.total_processing_jobs %></td>
+              <td><%= self.stats.active_processing_jobs %></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <section class="flex flex-col gap-[0.4rem]">
