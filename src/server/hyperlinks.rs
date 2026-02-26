@@ -18,7 +18,7 @@ use crate::{
         hyperlink_artifact::{self, HyperlinkArtifactKind},
         hyperlink_processing_job,
     },
-    model::hyperlink::HyperlinkInput,
+    model::{hyperlink::HyperlinkInput, hyperlink_title},
     server::{
         context::Context,
         flash::{Flash, FlashName, redirect_with_flash},
@@ -727,11 +727,8 @@ async fn delete_with_kind(
     kind: ResponseKind,
     request_headers: Option<&HeaderMap>,
 ) -> Response {
-    match hyperlink::Entity::delete_by_id(id)
-        .exec(&state.connection)
-        .await
-    {
-        Ok(result) if result.rows_affected == 0 => hyperlink_not_found(kind, id),
+    match crate::model::hyperlink::delete_by_id_with_tombstone(&state.connection, id).await {
+        Ok(false) => hyperlink_not_found(kind, id),
         Ok(_) => match kind {
             ResponseKind::Text => {
                 if let Some(headers) = request_headers {
@@ -808,7 +805,11 @@ fn to_response(
 ) -> HyperlinkResponse {
     HyperlinkResponse {
         id: model.id,
-        title: model.title.clone(),
+        title: normalize_link_title_for_display(
+            model.title.as_str(),
+            model.url.as_str(),
+            model.raw_url.as_str(),
+        ),
         url: model.url.clone(),
         raw_url: model.raw_url.clone(),
         clicks_count: model.clicks_count,
@@ -1010,7 +1011,11 @@ impl<'a> HyperlinksIndexTemplate<'a> {
     }
 
     fn link_display_title(&self, link: &hyperlink::Model) -> String {
-        normalize_link_title_for_display(link.title.as_str())
+        normalize_link_title_for_display(
+            link.title.as_str(),
+            link.url.as_str(),
+            link.raw_url.as_str(),
+        )
     }
 
     fn thumbnail_inline_path(&self, hyperlink_id: i32) -> Option<String> {
@@ -1104,7 +1109,11 @@ impl<'a> HyperlinksShowTemplate<'a> {
     }
 
     fn link_display_title(&self, link: &hyperlink::Model) -> String {
-        normalize_link_title_for_display(link.title.as_str())
+        normalize_link_title_for_display(
+            link.title.as_str(),
+            link.url.as_str(),
+            link.raw_url.as_str(),
+        )
     }
 
     fn processing_state(&self) -> &'static str {
@@ -1329,12 +1338,17 @@ fn normalize_display_text(value: &str) -> String {
     collapse_whitespace(decoded.trim())
 }
 
-fn normalize_link_title_for_display(title: &str) -> String {
+fn normalize_link_title_for_display(title: &str, url: &str, raw_url: &str) -> String {
     let normalized = normalize_display_text(title);
     if normalized.is_empty() {
-        title.to_string()
-    } else {
+        return title.to_string();
+    }
+
+    let cleaned = hyperlink_title::strip_site_affixes(normalized.as_str(), url, raw_url);
+    if cleaned.is_empty() {
         normalized
+    } else {
+        cleaned
     }
 }
 
@@ -1412,11 +1426,19 @@ fn select_show_display_title(link: &hyperlink::Model, og_summary: Option<&OgSumm
                 candidate_title,
             )
         {
-            return candidate_title.to_string();
+            return normalize_link_title_for_display(
+                candidate_title,
+                link.url.as_str(),
+                link.raw_url.as_str(),
+            );
         }
     }
 
-    normalize_link_title_for_display(link.title.as_str())
+    normalize_link_title_for_display(
+        link.title.as_str(),
+        link.url.as_str(),
+        link.raw_url.as_str(),
+    )
 }
 
 fn metadata_title_candidate_is_usable(candidate: &str) -> bool {
@@ -1654,6 +1676,7 @@ mod tests {
         let app = Router::<Context>::new().merge(links()).with_state(Context {
             connection,
             processing_queue: None,
+            backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
         });
         TestServer::new(app).expect("test server should initialize")
     }
@@ -2909,5 +2932,37 @@ mod tests {
         let clamped_body = clamped_page.text();
         assert!(clamped_body.contains("Page 2 of 2"));
         assert!(clamped_body.contains("/hyperlinks?q=link&amp;page=1"));
+    }
+
+    #[tokio::test]
+    async fn index_json_cleans_site_suffix_titles() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'Understanding Rust Lifetimes | Example.com', 'https://example.com/rust/lifetimes', 'https://example.com/rust/lifetimes', 0, 0, NULL, '2026-02-25 00:00:00', '2026-02-25 00:00:00');
+            "#,
+        ))
+        .await;
+
+        let response = list_json_index(&server, None).await;
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].title, "Understanding Rust Lifetimes");
+    }
+
+    #[tokio::test]
+    async fn index_json_preserves_non_site_dash_titles() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'Rust - The Book', 'https://doc.rust-lang.org/book', 'https://doc.rust-lang.org/book', 0, 0, NULL, '2026-02-25 00:00:00', '2026-02-25 00:00:00');
+            "#,
+        ))
+        .await;
+
+        let response = list_json_index(&server, None).await;
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].title, "Rust - The Book");
     }
 }

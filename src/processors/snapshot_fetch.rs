@@ -13,6 +13,7 @@ use crate::{
     entity::{hyperlink, hyperlink_artifact::HyperlinkArtifactKind},
     model::hyperlink_artifact,
     processors::processor::{ProcessingError, Processor},
+    server::font_diagnostics::{self, ScreenshotFontDiagnostics},
 };
 
 const MAX_HTML_BYTES: usize = 5 * 1024 * 1024;
@@ -164,12 +165,14 @@ impl Processor for SnapshotFetcher {
                         }
 
                         if !capture.warnings.is_empty() {
+                            let font_diagnostics = current_screenshot_font_diagnostics();
                             let payload = serde_json::to_vec_pretty(&ScreenshotFailureArtifact {
                                 source_url: source_url.clone(),
                                 failed_at: now_utc().to_string(),
                                 errors: capture.warnings,
                                 chromium_path: screenshot_chromium_path(),
                                 timeout_secs: screenshot_timeout().as_secs(),
+                                font_diagnostics,
                             })
                             .unwrap_or_else(|encode_error| {
                                 format!(
@@ -191,12 +194,14 @@ impl Processor for SnapshotFetcher {
                         }
                     }
                     Err(error) => {
+                        let font_diagnostics = current_screenshot_font_diagnostics();
                         let payload = serde_json::to_vec_pretty(&ScreenshotFailureArtifact {
                             source_url: source_url.clone(),
                             failed_at: now_utc().to_string(),
                             errors: vec![error],
                             chromium_path: screenshot_chromium_path(),
                             timeout_secs: screenshot_timeout().as_secs(),
+                            font_diagnostics,
                         })
                         .unwrap_or_else(|encode_error| {
                             format!(
@@ -322,6 +327,8 @@ struct ScreenshotFailureArtifact {
     errors: Vec<String>,
     chromium_path: String,
     timeout_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    font_diagnostics: Option<ScreenshotFontDiagnostics>,
 }
 
 #[derive(Clone, Copy)]
@@ -955,6 +962,10 @@ fn screenshot_dark_mode_enabled() -> bool {
     env_bool("SCREENSHOT_DARK_MODE_ENABLED", true)
 }
 
+fn current_screenshot_font_diagnostics() -> Option<ScreenshotFontDiagnostics> {
+    font_diagnostics::current().screenshot_artifact_context()
+}
+
 fn parse_viewport_env(key: &str, default: Viewport) -> Viewport {
     let Some(raw) = std::env::var(key).ok() else {
         return default;
@@ -1549,5 +1560,25 @@ mod tests {
         <html><body><article>hello world</article></body></html>
         "#;
         assert!(!looks_like_pdf_viewer_dom(html.as_bytes()));
+    }
+
+    #[test]
+    fn screenshot_failure_artifact_serializes_font_diagnostics() {
+        let artifact = ScreenshotFailureArtifact {
+            source_url: "https://example.com".to_string(),
+            failed_at: "2026-02-26T00:00:00Z".to_string(),
+            errors: vec!["screenshot failed".to_string()],
+            chromium_path: "chromium".to_string(),
+            timeout_secs: 20,
+            font_diagnostics: Some(ScreenshotFontDiagnostics {
+                fontconfig_found: false,
+                required_families: vec!["Noto Sans".to_string()],
+                missing_families: vec!["Noto Sans".to_string()],
+                resolved_matches: vec![],
+            }),
+        };
+
+        let value = serde_json::to_value(&artifact).expect("artifact should serialize");
+        assert!(value.get("font_diagnostics").is_some());
     }
 }

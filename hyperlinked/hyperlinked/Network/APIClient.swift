@@ -50,6 +50,20 @@ struct APIClient {
         return payload.hyperlinks.nodes.map { $0.toHyperlink() }
     }
 
+    func fetchUpdatedHyperlinks(updatedAt: String) async throws -> UpdatedHyperlinksBatch {
+        let normalizedUpdatedAt = updatedAt
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedUpdatedAt.isEmpty else {
+            throw APIClientError.decodingFailed("updatedAt must not be empty.")
+        }
+
+        let payload: GraphQLUpdatedHyperlinksRootPayload = try await sendGraphQL(
+            query: Self.updatedHyperlinksQuery,
+            variables: ["updatedAt": normalizedUpdatedAt]
+        )
+        return payload.updatedHyperlinks.toBatch()
+    }
+
     func fetchHyperlink(id: Int) async throws -> Hyperlink {
         let payload: GraphQLHyperlinksPayload = try await sendGraphQL(
             query: Self.hyperlinkByIDQuery(id: id)
@@ -192,6 +206,22 @@ struct APIClient {
     }
     """
 
+    private static let updatedHyperlinksQuery = """
+    query UpdatedHyperlinks($updatedAt: String!) {
+      updatedHyperlinks(updatedAt: $updatedAt) {
+        serverUpdatedAt
+        changes {
+          id
+          changeType
+          updatedAt
+          hyperlink {
+    \(hyperlinkFields)
+          }
+        }
+      }
+    }
+    """
+
     private static func hyperlinkByIDQuery(id: Int) -> String {
         """
         query HyperlinkDetail {
@@ -206,6 +236,23 @@ struct APIClient {
         }
         """
     }
+}
+
+struct UpdatedHyperlinksBatch {
+    let serverUpdatedAt: String
+    let changes: [UpdatedHyperlinkChange]
+}
+
+struct UpdatedHyperlinkChange {
+    enum ChangeType: String, Decodable {
+        case updated = "UPDATED"
+        case deleted = "DELETED"
+    }
+
+    let id: Int
+    let changeType: ChangeType
+    let updatedAt: String
+    let hyperlink: Hyperlink?
 }
 
 private struct GraphQLRequestPayload: Encodable {
@@ -224,6 +271,38 @@ private struct GraphQLErrorPayload: Decodable {
 
 private struct GraphQLHyperlinksPayload: Decodable {
     let hyperlinks: GraphQLHyperlinksConnectionPayload
+}
+
+private struct GraphQLUpdatedHyperlinksRootPayload: Decodable {
+    let updatedHyperlinks: GraphQLUpdatedHyperlinksPayload
+}
+
+private struct GraphQLUpdatedHyperlinksPayload: Decodable {
+    let serverUpdatedAt: String
+    let changes: [GraphQLUpdatedHyperlinkChangePayload]
+
+    func toBatch() -> UpdatedHyperlinksBatch {
+        UpdatedHyperlinksBatch(
+            serverUpdatedAt: serverUpdatedAt,
+            changes: changes.map { $0.toChange() }
+        )
+    }
+}
+
+private struct GraphQLUpdatedHyperlinkChangePayload: Decodable {
+    let id: Int
+    let changeType: UpdatedHyperlinkChange.ChangeType
+    let updatedAt: String
+    let hyperlink: GraphQLHyperlinkNodePayload?
+
+    func toChange() -> UpdatedHyperlinkChange {
+        UpdatedHyperlinkChange(
+            id: id,
+            changeType: changeType,
+            updatedAt: updatedAt,
+            hyperlink: hyperlink?.toHyperlink()
+        )
+    }
 }
 
 private struct GraphQLHyperlinksConnectionPayload: Decodable {

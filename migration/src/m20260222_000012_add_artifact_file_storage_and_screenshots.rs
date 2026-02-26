@@ -84,7 +84,11 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(HyperlinkArtifact::Table)
-                    .add_column(ColumnDef::new(HyperlinkArtifact::StoragePath).string().null())
+                    .add_column(
+                        ColumnDef::new(HyperlinkArtifact::StoragePath)
+                            .string()
+                            .null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -93,7 +97,11 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(HyperlinkArtifact::Table)
-                    .add_column(ColumnDef::new(HyperlinkArtifact::StorageBackend).string().null())
+                    .add_column(
+                        ColumnDef::new(HyperlinkArtifact::StorageBackend)
+                            .string()
+                            .null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -102,7 +110,11 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(HyperlinkArtifact::Table)
-                    .add_column(ColumnDef::new(HyperlinkArtifact::ChecksumSha256).string().null())
+                    .add_column(
+                        ColumnDef::new(HyperlinkArtifact::ChecksumSha256)
+                            .string()
+                            .null(),
+                    )
                     .to_owned(),
             )
             .await?;

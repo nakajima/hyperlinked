@@ -89,7 +89,7 @@ final class ShareOutboxStore {
 
     func enqueue(url: String, title: String, now: Date = Date()) throws -> ShareOutboxItemRecord {
         let timestamp = now.timeIntervalSince1970
-        var item = ShareOutboxItemRecord(
+        let item = ShareOutboxItemRecord(
             id: UUID().uuidString,
             url: url,
             title: title,

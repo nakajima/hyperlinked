@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{Query, RawForm, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
     routing,
 };
 use sailfish::Template;
@@ -37,7 +37,6 @@ const MAX_LIMIT: u64 = 200;
 pub fn routes() -> Router<Context> {
     Router::new()
         .route("/admin/jobs", routing::get(index))
-        .route("/admin/jobs/pending-count", routing::get(pending_count))
         .route(
             "/admin/jobs/recover-orphans",
             routing::post(recover_orphans),
@@ -153,11 +152,11 @@ struct AdminJobsTemplate<'a> {
     next_page_href: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct PendingCountResponse {
-    pending: i64,
-    queued: i64,
-    processing: i64,
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub(crate) struct QueuePendingCounts {
+    pub(crate) pending: i64,
+    pub(crate) queued: i64,
+    pub(crate) processing: i64,
 }
 
 #[derive(Debug, Default)]
@@ -166,11 +165,6 @@ struct OrphanRecoverySummary {
     marked_failed: usize,
     requeued: usize,
     requeue_errors: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
 }
 
 async fn index(
@@ -239,24 +233,6 @@ async fn index(
         ),
         Flash::from_headers(&headers),
     )
-}
-
-async fn pending_count(State(state): State<Context>) -> Response {
-    match fetch_queue_stats(&state.connection).await {
-        Ok(stats) => Json(PendingCountResponse {
-            pending: stats.queued + stats.processing,
-            queued: stats.queued,
-            processing: stats.processing,
-        })
-        .into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("failed to load pending queue count: {err}"),
-            }),
-        )
-            .into_response(),
-    }
 }
 
 async fn recover_orphans(State(state): State<Context>, headers: HeaderMap) -> Response {
@@ -431,6 +407,17 @@ async fn fetch_queue_stats(connection: &DatabaseConnection) -> Result<QueueStats
         completed: try_get_by_index::<i64>(&row, 3)?,
         failed: try_get_by_index::<i64>(&row, 4)?,
         cleared: try_get_by_index::<i64>(&row, 5)?,
+    })
+}
+
+pub(crate) async fn fetch_pending_queue_counts(
+    connection: &DatabaseConnection,
+) -> Result<QueuePendingCounts, DbErr> {
+    let stats = fetch_queue_stats(connection).await?;
+    Ok(QueuePendingCounts {
+        pending: stats.queued + stats.processing,
+        queued: stats.queued,
+        processing: stats.processing,
     })
 }
 
@@ -882,6 +869,7 @@ mod tests {
             .with_state(Context {
                 connection: connection.clone(),
                 processing_queue: None,
+                backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
             });
 
         (
@@ -1338,8 +1326,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_count_includes_only_processing_task_queued_and_processing() {
-        let (server, connection) = new_server("").await;
+    async fn fetch_pending_queue_counts_includes_only_processing_task_queued_and_processing() {
+        let (_, connection) = new_server("").await;
 
         insert_queue_job(
             &connection,
@@ -1378,9 +1366,9 @@ mod tests {
         )
         .await;
 
-        let response = server.get("/admin/jobs/pending-count").await;
-        response.assert_status_ok();
-        let payload: PendingCountResponse = response.json();
+        let payload = fetch_pending_queue_counts(&connection)
+            .await
+            .expect("queue pending counts should load");
 
         assert_eq!(payload.pending, 2);
         assert_eq!(payload.queued, 1);

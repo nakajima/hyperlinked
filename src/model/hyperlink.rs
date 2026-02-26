@@ -1,7 +1,8 @@
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, TransactionTrait,
     entity::prelude::{DateTime, DateTimeUtc},
     sea_query::Expr,
 };
@@ -35,6 +36,13 @@ pub struct NormalizedHyperlinkInput {
 pub enum UpsertResult {
     Inserted,
     Updated,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TitleBackfillReport {
+    pub scanned: usize,
+    pub updated: usize,
+    pub unchanged: usize,
 }
 
 pub async fn validate_and_normalize(
@@ -126,6 +134,18 @@ pub async fn find_by_url(
         .filter(hyperlink::Column::Url.eq(url.to_string()))
         .order_by_asc(hyperlink::Column::Id)
         .one(connection)
+        .await
+}
+
+pub async fn list_updated_after(
+    connection: &impl ConnectionTrait,
+    updated_after: DateTime,
+) -> Result<Vec<hyperlink::Model>, sea_orm::DbErr> {
+    hyperlink::Entity::find()
+        .filter(hyperlink::Column::UpdatedAt.gt(updated_after))
+        .order_by_asc(hyperlink::Column::UpdatedAt)
+        .order_by_asc(hyperlink::Column::Id)
+        .all(connection)
         .await
 }
 
@@ -253,6 +273,77 @@ pub async fn increment_click_count_by_id(
     hyperlink::Entity::find_by_id(id).one(connection).await
 }
 
+pub async fn delete_by_id_with_tombstone(
+    connection: &DatabaseConnection,
+    id: i32,
+) -> Result<bool, sea_orm::DbErr> {
+    if hyperlink::Entity::find_by_id(id)
+        .one(connection)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+
+    let deleted_at = now_utc();
+    let txn = connection.begin().await?;
+    crate::model::hyperlink_tombstone::upsert(&txn, id, deleted_at).await?;
+    let deleted = hyperlink::Entity::delete_by_id(id).exec(&txn).await?;
+
+    if deleted.rows_affected == 0 {
+        txn.rollback().await?;
+        return Ok(false);
+    }
+
+    txn.commit().await?;
+    Ok(true)
+}
+
+pub async fn backfill_clean_titles(
+    connection: &DatabaseConnection,
+    batch_size: u64,
+) -> Result<TitleBackfillReport, sea_orm::DbErr> {
+    let mut report = TitleBackfillReport::default();
+    let mut last_id = 0i32;
+    let batch_size = batch_size.clamp(1, 10_000);
+
+    loop {
+        let rows = hyperlink::Entity::find()
+            .filter(hyperlink::Column::Id.gt(last_id))
+            .order_by_asc(hyperlink::Column::Id)
+            .limit(batch_size)
+            .all(connection)
+            .await?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        for row in rows {
+            last_id = row.id;
+            report.scanned += 1;
+
+            let cleaned_title = crate::model::hyperlink_title::strip_site_affixes(
+                row.title.as_str(),
+                row.url.as_str(),
+                row.raw_url.as_str(),
+            );
+            if cleaned_title == row.title {
+                report.unchanged += 1;
+                continue;
+            }
+
+            let mut active_model: hyperlink::ActiveModel = row.into();
+            active_model.title = Set(cleaned_title);
+            active_model.updated_at = Set(now_utc());
+            active_model.update(connection).await?;
+            report.updated += 1;
+        }
+    }
+
+    Ok(report)
+}
+
 async fn enqueue_processing_if_enabled(
     connection: &DatabaseConnection,
     processing_queue: Option<&ProcessingQueueSender>,
@@ -267,4 +358,46 @@ async fn enqueue_processing_if_enabled(
 
 fn now_utc() -> DateTime {
     DateTimeUtc::from(std::time::SystemTime::now()).naive_utc()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{entity::hyperlink_tombstone, server::test_support};
+
+    #[tokio::test]
+    async fn delete_by_id_with_tombstone_marks_deletion_once() {
+        let connection = test_support::new_memory_connection().await;
+        test_support::initialize_hyperlinks_schema(&connection).await;
+        test_support::execute_sql(
+            &connection,
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Example', 'https://example.com', 'https://example.com', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+            "#,
+        )
+        .await;
+
+        let deleted = delete_by_id_with_tombstone(&connection, 1)
+            .await
+            .expect("delete should succeed");
+        assert!(deleted);
+
+        let link = hyperlink::Entity::find_by_id(1)
+            .one(&connection)
+            .await
+            .expect("select hyperlink should work");
+        assert!(link.is_none());
+
+        let tombstone = hyperlink_tombstone::Entity::find_by_id(1)
+            .one(&connection)
+            .await
+            .expect("select tombstone should work");
+        assert!(tombstone.is_some(), "expected tombstone row");
+
+        let deleted_again = delete_by_id_with_tombstone(&connection, 1)
+            .await
+            .expect("second delete should succeed");
+        assert!(!deleted_again);
+    }
 }

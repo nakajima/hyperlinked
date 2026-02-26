@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::net::lookup_host;
 
 use crate::entity::hyperlink;
+use crate::model::hyperlink_title;
 use crate::processors::processor::{ProcessingError, Processor};
 
 pub struct TitleFetcher {}
@@ -22,7 +23,12 @@ impl Processor for TitleFetcher {
             .await
             .map_err(ProcessingError::FetchError)?
         {
-            hyperlink.title = Set(title);
+            let cleaned_title = hyperlink_title::strip_site_affixes(
+                title.as_str(),
+                hyperlink.url.as_ref(),
+                hyperlink.raw_url.as_ref(),
+            );
+            hyperlink.title = Set(cleaned_title);
         }
         Ok(())
     }

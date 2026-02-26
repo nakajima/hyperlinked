@@ -1,11 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::{Cursor, Read, Write},
-    path::{Component, Path},
+    io::{Cursor, ErrorKind, Read, Seek, Write},
+    path::{Component, Path, PathBuf},
 };
 
 use axum::{
-    Router,
+    Json, Router,
+    body::Body,
     extract::{Multipart, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
@@ -13,10 +14,11 @@ use axum::{
 };
 use sailfish::Template;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr,
+    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Statement,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio_util::io::ReaderStream;
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 
 use crate::{
@@ -31,14 +33,19 @@ use crate::{
         hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
     },
     server::{
+        admin_backup::{
+            BackupCompletionSummary, BackupDownloadError, BackupProgress, BackupProgressStage,
+            BackupStatusResponse,
+        },
         chromium_diagnostics::ChromiumDiagnostics,
         context::Context,
         flash::{Flash, FlashName, redirect_with_flash},
+        font_diagnostics::FontDiagnostics,
     },
     storage::artifacts as artifact_storage,
 };
 
-use super::views;
+use super::{admin_jobs::fetch_pending_queue_counts, views};
 
 const BACKUP_VERSION: u32 = 1;
 const BACKUP_MANIFEST_PATH: &str = "manifest.json";
@@ -46,11 +53,20 @@ const BACKUP_HYPERLINKS_PATH: &str = "hyperlinks.json";
 const BACKUP_RELATIONS_PATH: &str = "relations.json";
 const BACKUP_ARTIFACTS_PATH: &str = "artifacts.json";
 const BACKUP_ARTIFACTS_DIR: &str = "artifacts";
+const BACKUP_ARTIFACT_READ_CONCURRENCY: usize = 4;
+const BACKUP_DEFLATE_LEVEL_BEST: i32 = 9;
 
 pub fn routes() -> Router<Context> {
     Router::new()
         .route("/admin", routing::get(index))
-        .route("/admin/export", routing::get(export_hyperlinks))
+        .route("/admin/status", routing::get(status))
+        .route("/admin/export", routing::get(download_backup_export))
+        .route(
+            "/admin/export/download",
+            routing::get(download_backup_export),
+        )
+        .route("/admin/export/start", routing::post(start_backup_export))
+        .route("/admin/export/cancel", routing::post(cancel_backup_export))
         .route("/admin/import", routing::post(import_hyperlinks))
         .route(
             "/admin/process-missing-artifacts",
@@ -94,7 +110,7 @@ struct MissingArtifactsPlan {
     readability_hyperlink_ids: Vec<i32>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct AdminDatasetStats {
     total_hyperlinks: usize,
     root_hyperlinks: usize,
@@ -102,6 +118,48 @@ struct AdminDatasetStats {
     total_artifacts: usize,
     total_processing_jobs: usize,
     active_processing_jobs: usize,
+    db_size_total_bytes: u64,
+    db_size_main_bytes: u64,
+    db_size_wal_bytes: u64,
+    db_size_shm_bytes: u64,
+    saved_artifacts_size_bytes: i64,
+    saved_artifacts_count: i64,
+    discovered_artifacts_size_bytes: i64,
+    discovered_artifacts_count: i64,
+    artifact_storage_by_kind: Vec<ArtifactStorageByKind>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ArtifactStorageByKind {
+    kind: String,
+    saved_size_bytes: i64,
+    saved_artifact_count: i64,
+    discovered_size_bytes: i64,
+    discovered_artifact_count: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ArtifactStorageBreakdown {
+    by_kind: Vec<ArtifactStorageByKind>,
+    saved_total_bytes: i64,
+    saved_total_count: i64,
+    discovered_total_bytes: i64,
+    discovered_total_count: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SqliteDiskStats {
+    main_bytes: u64,
+    wal_bytes: u64,
+    shm_bytes: u64,
+}
+
+impl SqliteDiskStats {
+    fn total_bytes(&self) -> u64 {
+        self.main_bytes
+            .saturating_add(self.wal_bytes)
+            .saturating_add(self.shm_bytes)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -168,6 +226,23 @@ struct AdminBackupArchive {
     artifact_payloads: HashMap<i32, Vec<u8>>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AdminStatusResponse {
+    queue: crate::server::admin_jobs::QueuePendingCounts,
+    backup: BackupStatusResponse,
+    server_time: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdminApiError {
+    error: String,
+}
+
+#[derive(Clone, Debug)]
+struct BuiltBackupZip {
+    summary: BackupCompletionSummary,
+}
+
 async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
     let plan = match build_missing_artifacts_plan(&state.connection).await {
         Ok(plan) => plan,
@@ -189,36 +264,123 @@ async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
         }
     };
     let chromium = super::chromium_diagnostics::current();
+    let fonts = super::font_diagnostics::current();
 
     views::render_html_page_with_flash(
         "Admin",
-        render_index(&plan.summary, &stats, &chromium),
+        render_index(&plan.summary, &stats, &chromium, &fonts),
         Flash::from_headers(&headers),
     )
 }
 
-async fn export_hyperlinks(State(state): State<Context>) -> Response {
-    let payload = match build_backup_zip(&state.connection).await {
-        Ok(payload) => payload,
-        Err(message) => {
-            return response_error(
+async fn status(State(state): State<Context>) -> Response {
+    let queue = match fetch_pending_queue_counts(&state.connection).await {
+        Ok(queue) => queue,
+        Err(err) => {
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to build backup zip: {message}"),
-            );
+                Json(AdminApiError {
+                    error: format!("failed to load queue status: {err}"),
+                }),
+            )
+                .into_response();
         }
     };
 
-    (
-        [
-            (header::CONTENT_TYPE, "application/zip".to_string()),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"hyperlinked-backup.zip\"".to_string(),
-            ),
-        ],
-        payload,
+    Json(AdminStatusResponse {
+        queue,
+        backup: state.backup_exports.snapshot(),
+        server_time: format_datetime(&now_utc()),
+    })
+    .into_response()
+}
+
+async fn start_backup_export(State(state): State<Context>) -> Response {
+    let backup_manager = state.backup_exports.clone();
+    let backup_manager_for_job = backup_manager.clone();
+    let connection = state.connection.clone();
+
+    let started = backup_manager.start_job(move |job_id, output_path| {
+        let backup_manager = backup_manager_for_job.clone();
+        tokio::spawn(async move {
+            let result = build_backup_zip(&connection, &output_path, |progress| {
+                backup_manager.update_progress(job_id, progress)
+            })
+            .await;
+            match result {
+                Ok(archive) => {
+                    backup_manager.mark_ready(job_id, archive.summary);
+                }
+                Err(message) => {
+                    backup_manager.mark_failed(job_id, message);
+                }
+            }
+        })
+    });
+
+    let status = if started.started {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    (status, Json(started.status)).into_response()
+}
+
+async fn cancel_backup_export(State(state): State<Context>, headers: HeaderMap) -> Response {
+    let canceled = state.backup_exports.cancel_running();
+    if canceled {
+        return redirect_with_flash(&headers, "/admin", FlashName::Notice, "Backup canceled.");
+    }
+    redirect_with_flash(
+        &headers,
+        "/admin",
+        FlashName::Notice,
+        "No backup in progress.",
     )
-        .into_response()
+}
+
+async fn download_backup_export(State(state): State<Context>) -> Response {
+    match state.backup_exports.download_file_path() {
+        Ok(path) => {
+            let file = match tokio::fs::File::open(&path).await {
+                Ok(file) => file,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(AdminApiError {
+                            error: format!("failed to open backup file for download: {error}"),
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, "application/zip".to_string()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"hyperlinked-backup.zip\"".to_string(),
+                    ),
+                ],
+                Body::from_stream(ReaderStream::new(file)),
+            )
+                .into_response()
+        }
+        Err(BackupDownloadError::NotReady) => (
+            StatusCode::CONFLICT,
+            Json(AdminApiError {
+                error: "backup is not ready yet".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(BackupDownloadError::MissingPayload) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AdminApiError {
+                error: "backup payload is unavailable".to_string(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn import_hyperlinks(
@@ -299,115 +461,223 @@ async fn process_missing_artifacts(State(state): State<Context>, headers: Header
     )
 }
 
-async fn build_backup_zip(connection: &DatabaseConnection) -> Result<Vec<u8>, String> {
-    let hyperlinks = hyperlink::Entity::find()
-        .order_by_asc(hyperlink::Column::Id)
-        .all(connection)
-        .await
-        .map_err(|err| format!("failed to load hyperlinks: {err}"))?;
-    let relations = hyperlink_relation::Entity::find()
-        .order_by_asc(hyperlink_relation::Column::Id)
-        .all(connection)
-        .await
-        .map_err(|err| format!("failed to load hyperlink relations: {err}"))?;
-    let artifacts = hyperlink_artifact::Entity::find()
-        .order_by_asc(hyperlink_artifact::Column::Id)
-        .all(connection)
-        .await
-        .map_err(|err| format!("failed to load hyperlink artifacts: {err}"))?;
-
-    let hyperlink_rows = hyperlinks
-        .into_iter()
-        .map(|model| HyperlinkBackupRow {
-            id: model.id,
-            title: model.title,
-            url: model.url,
-            raw_url: model.raw_url,
-            og_title: model.og_title,
-            og_description: model.og_description,
-            og_type: model.og_type,
-            og_url: model.og_url,
-            og_image_url: model.og_image_url,
-            og_site_name: model.og_site_name,
-            discovery_depth: model.discovery_depth,
-            clicks_count: model.clicks_count,
-            last_clicked_at: model.last_clicked_at.as_ref().map(format_datetime),
-            created_at: format_datetime(&model.created_at),
-            updated_at: format_datetime(&model.updated_at),
-        })
-        .collect::<Vec<_>>();
-
-    let relation_rows = relations
-        .into_iter()
-        .map(|model| HyperlinkRelationBackupRow {
-            id: model.id,
-            parent_hyperlink_id: model.parent_hyperlink_id,
-            child_hyperlink_id: model.child_hyperlink_id,
-            created_at: format_datetime(&model.created_at),
-        })
-        .collect::<Vec<_>>();
-
-    let manifest = BackupManifest {
-        version: BACKUP_VERSION,
-        exported_at: format_datetime(&now_utc()),
-        hyperlinks: hyperlink_rows.len(),
-        relations: relation_rows.len(),
-        artifacts: artifacts.len(),
-    };
-
-    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    write_zip_json_file(&mut writer, BACKUP_MANIFEST_PATH, &manifest)?;
-    write_zip_json_file(&mut writer, BACKUP_HYPERLINKS_PATH, &hyperlink_rows)?;
-    write_zip_json_file(&mut writer, BACKUP_RELATIONS_PATH, &relation_rows)?;
-
-    let mut artifact_rows = Vec::with_capacity(artifacts.len());
-    for artifact in artifacts {
-        let payload = hyperlink_artifact_model::load_payload(&artifact)
-            .await
-            .map_err(|err| format!("failed to load payload for artifact {}: {err}", artifact.id))?;
-        let payload_path = format!("{BACKUP_ARTIFACTS_DIR}/{}.bin", artifact.id);
-        write_zip_binary_file(&mut writer, &payload_path, &payload)?;
-
-        artifact_rows.push(HyperlinkArtifactBackupRow {
-            id: artifact.id,
-            hyperlink_id: artifact.hyperlink_id,
-            kind: artifact.kind,
-            content_type: artifact.content_type,
-            size_bytes: artifact.size_bytes,
-            created_at: format_datetime(&artifact.created_at),
-            job_id: artifact.job_id,
-            checksum_sha256: artifact.checksum_sha256,
-            payload_path,
+async fn build_backup_zip<F>(
+    connection: &DatabaseConnection,
+    output_path: &Path,
+    mut report_progress: F,
+) -> Result<BuiltBackupZip, String>
+where
+    F: FnMut(BackupProgress),
+{
+    let build_result = async {
+        report_progress(BackupProgress {
+            stage: BackupProgressStage::LoadingRecords,
+            artifacts_done: 0,
+            artifacts_total: 0,
         });
-    }
-    write_zip_json_file(&mut writer, BACKUP_ARTIFACTS_PATH, &artifact_rows)?;
 
-    let cursor = writer
-        .finish()
-        .map_err(|err| format!("failed to finalize zip archive: {err}"))?;
-    Ok(cursor.into_inner())
+        let hyperlinks = hyperlink::Entity::find()
+            .order_by_asc(hyperlink::Column::Id)
+            .all(connection)
+            .await
+            .map_err(|err| format!("failed to load hyperlinks: {err}"))?;
+        let relations = hyperlink_relation::Entity::find()
+            .order_by_asc(hyperlink_relation::Column::Id)
+            .all(connection)
+            .await
+            .map_err(|err| format!("failed to load hyperlink relations: {err}"))?;
+        let artifacts = hyperlink_artifact::Entity::find()
+            .order_by_asc(hyperlink_artifact::Column::Id)
+            .all(connection)
+            .await
+            .map_err(|err| format!("failed to load hyperlink artifacts: {err}"))?;
+
+        let hyperlink_rows = hyperlinks
+            .into_iter()
+            .map(|model| HyperlinkBackupRow {
+                id: model.id,
+                title: model.title,
+                url: model.url,
+                raw_url: model.raw_url,
+                og_title: model.og_title,
+                og_description: model.og_description,
+                og_type: model.og_type,
+                og_url: model.og_url,
+                og_image_url: model.og_image_url,
+                og_site_name: model.og_site_name,
+                discovery_depth: model.discovery_depth,
+                clicks_count: model.clicks_count,
+                last_clicked_at: model.last_clicked_at.as_ref().map(format_datetime),
+                created_at: format_datetime(&model.created_at),
+                updated_at: format_datetime(&model.updated_at),
+            })
+            .collect::<Vec<_>>();
+
+        let relation_rows = relations
+            .into_iter()
+            .map(|model| HyperlinkRelationBackupRow {
+                id: model.id,
+                parent_hyperlink_id: model.parent_hyperlink_id,
+                child_hyperlink_id: model.child_hyperlink_id,
+                created_at: format_datetime(&model.created_at),
+            })
+            .collect::<Vec<_>>();
+
+        let manifest = BackupManifest {
+            version: BACKUP_VERSION,
+            exported_at: format_datetime(&now_utc()),
+            hyperlinks: hyperlink_rows.len(),
+            relations: relation_rows.len(),
+            artifacts: artifacts.len(),
+        };
+
+        let output_file = std::fs::File::create(output_path)
+            .map_err(|err| format!("failed to create backup output file: {err}"))?;
+        let mut writer = ZipWriter::new(output_file);
+        write_zip_json_file(&mut writer, BACKUP_MANIFEST_PATH, &manifest)?;
+        write_zip_json_file(&mut writer, BACKUP_HYPERLINKS_PATH, &hyperlink_rows)?;
+        write_zip_json_file(&mut writer, BACKUP_RELATIONS_PATH, &relation_rows)?;
+
+        let artifacts_total = artifacts.len();
+        report_progress(BackupProgress {
+            stage: BackupProgressStage::PackingArtifacts,
+            artifacts_done: 0,
+            artifacts_total,
+        });
+
+        let mut artifact_rows = Vec::with_capacity(artifacts_total);
+        let mut payload_tasks = tokio::task::JoinSet::new();
+        let mut next_submit_index = 0usize;
+        let mut next_write_index = 0usize;
+        let mut ready_payloads = HashMap::<usize, (hyperlink_artifact::Model, Vec<u8>)>::new();
+
+        while next_submit_index < artifacts_total
+            && payload_tasks.len() < BACKUP_ARTIFACT_READ_CONCURRENCY
+        {
+            let task_index = next_submit_index;
+            let artifact = artifacts[task_index].clone();
+            payload_tasks.spawn(async move {
+                let artifact_id = artifact.id;
+                let payload = hyperlink_artifact_model::load_payload(&artifact)
+                    .await
+                    .map_err(|err| {
+                        format!("failed to load payload for artifact {artifact_id}: {err}")
+                    })?;
+                Ok::<_, String>((task_index, artifact, payload))
+            });
+            next_submit_index += 1;
+        }
+
+        while let Some(joined) = payload_tasks.join_next().await {
+            let (task_index, artifact, payload) =
+                joined.map_err(|err| format!("artifact payload task failed: {err}"))??;
+            ready_payloads.insert(task_index, (artifact, payload));
+
+            while let Some((artifact, payload)) = ready_payloads.remove(&next_write_index) {
+                let payload_path = format!("{BACKUP_ARTIFACTS_DIR}/{}.bin", artifact.id);
+                write_zip_binary_file_with_compression(
+                    &mut writer,
+                    &payload_path,
+                    &payload,
+                    CompressionMethod::Deflated,
+                )?;
+
+                artifact_rows.push(HyperlinkArtifactBackupRow {
+                    id: artifact.id,
+                    hyperlink_id: artifact.hyperlink_id,
+                    kind: artifact.kind,
+                    content_type: artifact.content_type,
+                    size_bytes: artifact.size_bytes,
+                    created_at: format_datetime(&artifact.created_at),
+                    job_id: artifact.job_id,
+                    checksum_sha256: artifact.checksum_sha256,
+                    payload_path,
+                });
+
+                next_write_index += 1;
+                report_progress(BackupProgress {
+                    stage: BackupProgressStage::PackingArtifacts,
+                    artifacts_done: artifact_rows.len(),
+                    artifacts_total,
+                });
+            }
+
+            while next_submit_index < artifacts_total
+                && payload_tasks.len() < BACKUP_ARTIFACT_READ_CONCURRENCY
+            {
+                let task_index = next_submit_index;
+                let artifact = artifacts[task_index].clone();
+                payload_tasks.spawn(async move {
+                    let artifact_id = artifact.id;
+                    let payload = hyperlink_artifact_model::load_payload(&artifact)
+                        .await
+                        .map_err(|err| {
+                            format!("failed to load payload for artifact {artifact_id}: {err}")
+                        })?;
+                    Ok::<_, String>((task_index, artifact, payload))
+                });
+                next_submit_index += 1;
+            }
+        }
+        write_zip_json_file(&mut writer, BACKUP_ARTIFACTS_PATH, &artifact_rows)?;
+
+        report_progress(BackupProgress {
+            stage: BackupProgressStage::Finalizing,
+            artifacts_done: artifact_rows.len(),
+            artifacts_total,
+        });
+
+        writer
+            .finish()
+            .map_err(|err| format!("failed to finalize zip archive: {err}"))?;
+
+        Ok(BuiltBackupZip {
+            summary: BackupCompletionSummary {
+                hyperlinks: hyperlink_rows.len(),
+                relations: relation_rows.len(),
+                artifacts: artifact_rows.len(),
+            },
+        })
+    }
+    .await;
+
+    if build_result.is_err() {
+        if let Err(error) = tokio::fs::remove_file(output_path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %output_path.display(),
+                error = %error,
+                "failed to clean up incomplete backup archive"
+            );
+        }
+    }
+
+    build_result
 }
 
-fn write_zip_json_file<T: Serialize>(
-    writer: &mut ZipWriter<Cursor<Vec<u8>>>,
+fn write_zip_json_file<T: Serialize, W: Write + Seek>(
+    writer: &mut ZipWriter<W>,
     path: &str,
     value: &T,
 ) -> Result<(), String> {
     let payload = serde_json::to_vec_pretty(value)
         .map_err(|err| format!("failed to encode {path}: {err}"))?;
-    write_zip_binary_file(writer, path, &payload)
+    write_zip_binary_file_with_compression(writer, path, &payload, CompressionMethod::Deflated)
 }
 
-fn write_zip_binary_file(
-    writer: &mut ZipWriter<Cursor<Vec<u8>>>,
+fn write_zip_binary_file_with_compression<W: Write + Seek>(
+    writer: &mut ZipWriter<W>,
     path: &str,
     payload: &[u8],
+    compression: CompressionMethod,
 ) -> Result<(), String> {
+    let mut file_options = FileOptions::default().compression_method(compression);
+    if compression == CompressionMethod::Deflated {
+        file_options = file_options.compression_level(Some(BACKUP_DEFLATE_LEVEL_BEST));
+    }
     writer
-        .start_file(
-            path,
-            FileOptions::default().compression_method(CompressionMethod::Deflated),
-        )
+        .start_file(path, file_options)
         .map_err(|err| format!("failed to create {path} in zip archive: {err}"))?;
     writer
         .write_all(payload)
@@ -1034,6 +1304,8 @@ async fn build_dataset_stats(
         ]))
         .count(connection)
         .await? as usize;
+    let sqlite_disk_stats = load_sqlite_disk_stats(connection).await?;
+    let artifact_storage_breakdown = load_artifact_storage_breakdown(connection).await?;
 
     Ok(AdminDatasetStats {
         total_hyperlinks,
@@ -1042,7 +1314,128 @@ async fn build_dataset_stats(
         total_artifacts,
         total_processing_jobs,
         active_processing_jobs,
+        db_size_total_bytes: sqlite_disk_stats.total_bytes(),
+        db_size_main_bytes: sqlite_disk_stats.main_bytes,
+        db_size_wal_bytes: sqlite_disk_stats.wal_bytes,
+        db_size_shm_bytes: sqlite_disk_stats.shm_bytes,
+        saved_artifacts_size_bytes: artifact_storage_breakdown.saved_total_bytes,
+        saved_artifacts_count: artifact_storage_breakdown.saved_total_count,
+        discovered_artifacts_size_bytes: artifact_storage_breakdown.discovered_total_bytes,
+        discovered_artifacts_count: artifact_storage_breakdown.discovered_total_count,
+        artifact_storage_by_kind: artifact_storage_breakdown.by_kind,
     })
+}
+
+async fn load_artifact_storage_breakdown(
+    connection: &DatabaseConnection,
+) -> Result<ArtifactStorageBreakdown, DbErr> {
+    let backend = connection.get_database_backend();
+    let rows = connection
+        .query_all(Statement::from_string(
+            backend,
+            r#"
+                SELECT
+                    a.kind AS kind,
+                    COALESCE(SUM(CASE WHEN h.discovery_depth = 0 THEN a.size_bytes ELSE 0 END), 0) AS saved_size_bytes,
+                    COALESCE(SUM(CASE WHEN h.discovery_depth = 0 THEN 1 ELSE 0 END), 0) AS saved_artifact_count,
+                    COALESCE(SUM(CASE WHEN h.discovery_depth > 0 THEN a.size_bytes ELSE 0 END), 0) AS discovered_size_bytes,
+                    COALESCE(SUM(CASE WHEN h.discovery_depth > 0 THEN 1 ELSE 0 END), 0) AS discovered_artifact_count
+                FROM hyperlink_artifact a
+                INNER JOIN hyperlink h
+                    ON h.id = a.hyperlink_id
+                GROUP BY a.kind
+                ORDER BY (saved_size_bytes + discovered_size_bytes) DESC, a.kind ASC
+            "#
+            .to_string(),
+        ))
+        .await?;
+
+    let mut breakdown = ArtifactStorageBreakdown::default();
+    for row in rows {
+        let kind: String = row.try_get("", "kind")?;
+        let saved_size_bytes: i64 = row.try_get("", "saved_size_bytes")?;
+        let saved_artifact_count: i64 = row.try_get("", "saved_artifact_count")?;
+        let discovered_size_bytes: i64 = row.try_get("", "discovered_size_bytes")?;
+        let discovered_artifact_count: i64 = row.try_get("", "discovered_artifact_count")?;
+
+        let saved_size_bytes = saved_size_bytes.max(0);
+        let saved_artifact_count = saved_artifact_count.max(0);
+        let discovered_size_bytes = discovered_size_bytes.max(0);
+        let discovered_artifact_count = discovered_artifact_count.max(0);
+
+        breakdown.saved_total_bytes = breakdown.saved_total_bytes.saturating_add(saved_size_bytes);
+        breakdown.saved_total_count = breakdown
+            .saved_total_count
+            .saturating_add(saved_artifact_count);
+        breakdown.discovered_total_bytes = breakdown
+            .discovered_total_bytes
+            .saturating_add(discovered_size_bytes);
+        breakdown.discovered_total_count = breakdown
+            .discovered_total_count
+            .saturating_add(discovered_artifact_count);
+        breakdown.by_kind.push(ArtifactStorageByKind {
+            kind,
+            saved_size_bytes,
+            saved_artifact_count,
+            discovered_size_bytes,
+            discovered_artifact_count,
+        });
+    }
+
+    Ok(breakdown)
+}
+
+async fn load_sqlite_disk_stats(connection: &DatabaseConnection) -> Result<SqliteDiskStats, DbErr> {
+    let backend = connection.get_database_backend();
+    let rows = connection
+        .query_all(Statement::from_string(
+            backend,
+            "PRAGMA database_list".to_string(),
+        ))
+        .await?;
+    let main_file_path = rows.into_iter().find_map(|row| {
+        let name: String = row.try_get("", "name").ok()?;
+        if name != "main" {
+            return None;
+        }
+        row.try_get::<String>("", "file").ok()
+    });
+    let Some(main_file_path) = main_file_path else {
+        return Ok(SqliteDiskStats::default());
+    };
+    if main_file_path.trim().is_empty() {
+        return Ok(SqliteDiskStats::default());
+    }
+
+    sqlite_disk_stats_from_main_path(Path::new(&main_file_path))
+}
+
+fn sqlite_disk_stats_from_main_path(main_path: &Path) -> Result<SqliteDiskStats, DbErr> {
+    let wal_path = append_path_suffix(main_path, "-wal");
+    let shm_path = append_path_suffix(main_path, "-shm");
+
+    Ok(SqliteDiskStats {
+        main_bytes: file_size_bytes(main_path)?,
+        wal_bytes: file_size_bytes(&wal_path)?,
+        shm_bytes: file_size_bytes(&shm_path)?,
+    })
+}
+
+fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut path_text = path.as_os_str().to_string_lossy().to_string();
+    path_text.push_str(suffix);
+    PathBuf::from(path_text)
+}
+
+fn file_size_bytes(path: &Path) -> Result<u64, DbErr> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(DbErr::Custom(format!(
+            "failed to read file metadata for {}: {err}",
+            path.display()
+        ))),
+    }
 }
 
 #[derive(Template)]
@@ -1052,12 +1445,32 @@ struct AdminIndexTemplate<'a> {
     stats: &'a AdminDatasetStats,
     has_missing_artifacts_to_process: bool,
     chromium: &'a ChromiumDiagnostics,
+    fonts: &'a FontDiagnostics,
+}
+
+impl AdminIndexTemplate<'_> {
+    fn format_u64_bytes(&self, bytes: u64) -> String {
+        format_bytes(bytes)
+    }
+
+    fn format_i64_bytes(&self, bytes: i64) -> String {
+        format_bytes(bytes.max(0) as u64)
+    }
+
+    fn format_average_i64_bytes(&self, total_bytes: i64, count: i64) -> String {
+        if count <= 0 {
+            return "-".to_string();
+        }
+        let average_bytes = total_bytes.max(0) as f64 / count as f64;
+        format_bytes_f64(average_bytes)
+    }
 }
 
 fn render_index(
     summary: &MissingArtifactsSummary,
     stats: &AdminDatasetStats,
     chromium: &ChromiumDiagnostics,
+    fonts: &FontDiagnostics,
 ) -> Result<String, sailfish::RenderError> {
     AdminIndexTemplate {
         summary,
@@ -1066,6 +1479,7 @@ fn render_index(
             || summary.og_will_queue > 0
             || summary.readability_will_queue > 0,
         chromium,
+        fonts,
     }
     .render()
 }
@@ -1074,12 +1488,40 @@ fn response_error(status: StatusCode, message: impl Into<String>) -> Response {
     views::render_error_page(status, message, "/admin", "Back to admin")
 }
 
+fn format_bytes(bytes: u64) -> String {
+    format_bytes_f64(bytes as f64)
+}
+
+fn format_bytes_f64(bytes_f64: f64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    const TB: f64 = GB * 1024.0;
+
+    if bytes_f64 < KB {
+        return format!("{}B", bytes_f64 as u64);
+    }
+    if bytes_f64 < MB {
+        return format!("{:.1}KB", bytes_f64 / KB);
+    }
+    if bytes_f64 < GB {
+        return format!("{:.1}MB", bytes_f64 / MB);
+    }
+    if bytes_f64 < TB {
+        return format!("{:.1}GB", bytes_f64 / GB);
+    }
+    format!("{:.1}TB", bytes_f64 / TB)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::Router;
     use axum_test::multipart::{MultipartForm, Part};
     use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder};
-    use std::io::Cursor;
+    use std::{
+        io::Cursor,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
     use zip::ZipArchive;
 
     use super::*;
@@ -1094,8 +1536,10 @@ mod tests {
             chromium_resolved_path: None,
             chromium_found: false,
         };
+        let fonts = FontDiagnostics::default();
 
-        let html = render_index(&summary, &stats, &chromium).expect("admin template should render");
+        let html = render_index(&summary, &stats, &chromium, &fonts)
+            .expect("admin template should render");
         assert!(html.contains("Screenshot browser setup required"));
         assert!(html.contains("CHROMIUM_PATH"));
     }
@@ -1109,14 +1553,53 @@ mod tests {
             chromium_resolved_path: Some("/usr/bin/chromium".to_string()),
             chromium_found: true,
         };
+        let fonts = FontDiagnostics::default();
 
-        let html = render_index(&summary, &stats, &chromium).expect("admin template should render");
+        let html = render_index(&summary, &stats, &chromium, &fonts)
+            .expect("admin template should render");
         assert!(!html.contains("Screenshot browser setup required"));
+    }
+
+    #[test]
+    fn render_index_shows_font_setup_when_missing_fonts_detected() {
+        let summary = MissingArtifactsSummary::default();
+        let stats = AdminDatasetStats::default();
+        let chromium = ChromiumDiagnostics {
+            chromium_path: "/usr/bin/chromium".to_string(),
+            chromium_resolved_path: Some("/usr/bin/chromium".to_string()),
+            chromium_found: true,
+        };
+        let fonts = FontDiagnostics {
+            checks_enabled: true,
+            applicable: true,
+            platform: "linux".to_string(),
+            fontconfig_found: true,
+            required_families: vec![
+                "Noto Sans".to_string(),
+                "Noto Serif".to_string(),
+                "Noto Sans Mono".to_string(),
+                "Noto Color Emoji".to_string(),
+            ],
+            missing_families: vec!["Noto Color Emoji".to_string()],
+            resolved_matches: Vec::new(),
+            install_hint: Some(
+                "apt install -y fontconfig fonts-noto fonts-noto-cjk fonts-noto-color-emoji"
+                    .to_string(),
+            ),
+            fontconfig_error: None,
+        };
+
+        let html = render_index(&summary, &stats, &chromium, &fonts)
+            .expect("admin template should render");
+        assert!(html.contains("Screenshot font setup recommended"));
+        assert!(html.contains("Noto Color Emoji"));
+        assert!(html.contains("fontconfig"));
     }
 
     async fn new_server(seed_sql: &str) -> (axum_test::TestServer, sea_orm::DatabaseConnection) {
         let connection = test_support::new_memory_connection().await;
         test_support::initialize_hyperlinks_schema(&connection).await;
+        test_support::initialize_queue_jobs_schema(&connection).await;
         test_support::execute_sql(&connection, seed_sql).await;
 
         let app = Router::<Context>::new()
@@ -1124,11 +1607,27 @@ mod tests {
             .with_state(Context {
                 connection: connection.clone(),
                 processing_queue: None,
+                backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
             });
         (
             axum_test::TestServer::new(app).expect("test server should initialize"),
             connection,
         )
+    }
+
+    async fn wait_for_backup_ready(server: &axum_test::TestServer) -> AdminStatusResponse {
+        for _ in 0..200 {
+            let status = server.get("/admin/status").await;
+            status.assert_status_ok();
+            let payload: AdminStatusResponse = status.json();
+            if payload.backup.state == "ready" {
+                return payload;
+            }
+            assert_ne!(payload.backup.state, "failed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        panic!("timed out waiting for backup export to become ready");
     }
 
     #[tokio::test]
@@ -1205,6 +1704,10 @@ mod tests {
         assert!(body.contains("Snapshot to queue"));
         assert!(body.contains("Open Graph to queue"));
         assert!(body.contains("Readability to queue"));
+        assert!(body.contains("data-admin-backup"));
+        assert!(body.contains("data-admin-backup-create"));
+        assert!(body.contains("data-admin-backup-cancel"));
+        assert!(body.contains("data-admin-backup-download"));
     }
 
     #[tokio::test]
@@ -1285,6 +1788,90 @@ mod tests {
         assert!(body.contains("Root links"));
         assert!(body.contains("Discovered links"));
         assert!(body.contains("Active jobs"));
+        assert!(body.contains("Storage utilization"));
+        assert!(body.contains("DB size"));
+        assert!(body.contains("Saved artifacts size"));
+        assert!(body.contains("Discovered artifacts size"));
+        assert!(body.contains("avg"));
+        assert!(body.contains("Artifact storage by type"));
+        assert!(body.contains("snapshot_warc"));
+    }
+
+    #[tokio::test]
+    async fn build_dataset_stats_splits_artifact_size_bytes_and_sorts_kinds_by_total_desc() {
+        let (_, connection) = new_server(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'Root', 'https://example.com/root', 'https://example.com/root', 0, 0, NULL, '2026-02-21 00:00:00', '2026-02-21 00:00:00'),
+                    (2, 'Discovered', 'https://example.com/discovered', 'https://example.com/discovered', 1, 0, NULL, '2026-02-21 00:00:00', '2026-02-21 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (1, 1, NULL, 'snapshot_warc', X'00', 'application/warc', 10, '2026-02-21 00:01:00'),
+                    (2, 2, NULL, 'snapshot_warc', X'00', 'application/warc', 15, '2026-02-21 00:01:00'),
+                    (3, 1, NULL, 'og_meta', X'7B7D', 'application/json', 20, '2026-02-21 00:01:00'),
+                    (4, 2, NULL, 'og_meta', X'7B7D', 'application/json', 25, '2026-02-21 00:01:00');
+            "#,
+        )
+        .await;
+
+        let stats = build_dataset_stats(&connection)
+            .await
+            .expect("dataset stats should load");
+
+        assert_eq!(stats.saved_artifacts_size_bytes, 30);
+        assert_eq!(stats.saved_artifacts_count, 2);
+        assert_eq!(stats.discovered_artifacts_size_bytes, 40);
+        assert_eq!(stats.discovered_artifacts_count, 2);
+        assert_eq!(stats.db_size_total_bytes, 0);
+        assert_eq!(stats.artifact_storage_by_kind.len(), 2);
+        assert_eq!(stats.artifact_storage_by_kind[0].kind, "og_meta");
+        assert_eq!(stats.artifact_storage_by_kind[0].saved_size_bytes, 20);
+        assert_eq!(stats.artifact_storage_by_kind[0].saved_artifact_count, 1);
+        assert_eq!(stats.artifact_storage_by_kind[0].discovered_size_bytes, 25);
+        assert_eq!(
+            stats.artifact_storage_by_kind[0].discovered_artifact_count,
+            1
+        );
+        assert_eq!(stats.artifact_storage_by_kind[1].kind, "snapshot_warc");
+        assert_eq!(stats.artifact_storage_by_kind[1].saved_size_bytes, 10);
+        assert_eq!(stats.artifact_storage_by_kind[1].saved_artifact_count, 1);
+        assert_eq!(stats.artifact_storage_by_kind[1].discovered_size_bytes, 15);
+        assert_eq!(
+            stats.artifact_storage_by_kind[1].discovered_artifact_count,
+            1
+        );
+    }
+
+    #[test]
+    fn sqlite_disk_stats_from_main_path_counts_main_wal_and_shm() {
+        let uniq = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let main_path = std::env::temp_dir().join(format!(
+            "hyperlinked-admin-disk-stats-{}-{}.db",
+            std::process::id(),
+            uniq
+        ));
+        let wal_path = append_path_suffix(&main_path, "-wal");
+        let shm_path = append_path_suffix(&main_path, "-shm");
+
+        std::fs::write(&main_path, vec![0u8; 11]).expect("main db file should be created");
+        std::fs::write(&wal_path, vec![0u8; 7]).expect("wal file should be created");
+        std::fs::write(&shm_path, vec![0u8; 3]).expect("shm file should be created");
+
+        let stats = sqlite_disk_stats_from_main_path(&main_path)
+            .expect("disk stats should load from filesystem");
+
+        assert_eq!(stats.main_bytes, 11);
+        assert_eq!(stats.wal_bytes, 7);
+        assert_eq!(stats.shm_bytes, 3);
+        assert_eq!(stats.total_bytes(), 21);
+
+        let _ = std::fs::remove_file(&main_path);
+        let _ = std::fs::remove_file(&wal_path);
+        let _ = std::fs::remove_file(&shm_path);
     }
 
     #[tokio::test]
@@ -1305,7 +1892,20 @@ mod tests {
         )
         .await;
 
-        let export = server.get("/admin/export").await;
+        let not_ready = server.get("/admin/export/download").await;
+        not_ready.assert_status(StatusCode::CONFLICT);
+
+        let start = server.post("/admin/export/start").await;
+        start.assert_status(StatusCode::ACCEPTED);
+
+        let status_payload = wait_for_backup_ready(&server).await;
+        assert_eq!(status_payload.backup.state, "ready");
+        assert!(status_payload.backup.download_ready);
+        assert_eq!(status_payload.backup.hyperlinks, Some(2));
+        assert_eq!(status_payload.backup.relations, Some(1));
+        assert_eq!(status_payload.backup.artifacts, Some(1));
+
+        let export = server.get("/admin/export/download").await;
         export.assert_status_ok();
         export.assert_header("content-type", "application/zip");
         export.assert_header(
@@ -1315,6 +1915,18 @@ mod tests {
 
         let mut archive = ZipArchive::new(Cursor::new(export.as_bytes().to_vec()))
             .expect("export should be a valid zip archive");
+        let manifest_entry = archive
+            .by_name(BACKUP_MANIFEST_PATH)
+            .expect("manifest should exist");
+        assert_eq!(manifest_entry.compression(), CompressionMethod::Deflated);
+        drop(manifest_entry);
+
+        let artifact_entry = archive
+            .by_name("artifacts/9.bin")
+            .expect("artifact payload should exist");
+        assert_eq!(artifact_entry.compression(), CompressionMethod::Deflated);
+        drop(artifact_entry);
+
         let manifest: BackupManifest =
             read_zip_json_file(&mut archive, BACKUP_MANIFEST_PATH).expect("manifest should parse");
         assert_eq!(manifest.version, BACKUP_VERSION);
@@ -1349,6 +1961,52 @@ mod tests {
         let payload = read_zip_binary_file(&mut archive, "artifacts/9.bin")
             .expect("artifact payload should exist");
         assert_eq!(payload, vec![0x89, 0x50, 0x4E, 0x47]);
+
+        let alias_export = server.get("/admin/export").await;
+        alias_export.assert_status_ok();
+        alias_export.assert_header("content-type", "application/zip");
+    }
+
+    #[tokio::test]
+    async fn admin_status_reports_queue_and_backup_state() {
+        let (server, _) = new_server("").await;
+
+        let status = server.get("/admin/status").await;
+        status.assert_status_ok();
+        let payload: AdminStatusResponse = status.json();
+
+        assert_eq!(payload.queue.pending, 0);
+        assert_eq!(payload.queue.queued, 0);
+        assert_eq!(payload.queue.processing, 0);
+        assert_eq!(payload.backup.state, "idle");
+        assert!(!payload.backup.download_ready);
+        assert!(!payload.server_time.is_empty());
+    }
+
+    #[tokio::test]
+    async fn admin_backup_cancel_stops_running_export() {
+        let (server, _) = new_server(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'Cancel me', 'https://example.com/one', 'https://example.com/one', 0, 0, NULL, '2026-02-21 00:00:00', '2026-02-21 00:00:00');
+            "#,
+        )
+        .await;
+
+        let start = server.post("/admin/export/start").await;
+        assert!(
+            start.status_code() == StatusCode::ACCEPTED || start.status_code() == StatusCode::OK
+        );
+
+        let cancel = server.post("/admin/export/cancel").await;
+        cancel.assert_status_see_other();
+        cancel.assert_header("location", "/admin");
+
+        let status = server.get("/admin/status").await;
+        status.assert_status_ok();
+        let payload: AdminStatusResponse = status.json();
+        assert_ne!(payload.backup.state, "running");
     }
 
     #[tokio::test]
@@ -1423,8 +2081,13 @@ mod tests {
             .expect("hyperlinks should write");
         write_zip_json_file(&mut writer, BACKUP_RELATIONS_PATH, &relations)
             .expect("relations should write");
-        write_zip_binary_file(&mut writer, "artifacts/33.bin", &[0x89, 0x50, 0x4E, 0x47])
-            .expect("artifact payload should write");
+        write_zip_binary_file_with_compression(
+            &mut writer,
+            "artifacts/33.bin",
+            &[0x89, 0x50, 0x4E, 0x47],
+            CompressionMethod::Deflated,
+        )
+        .expect("artifact payload should write");
         write_zip_json_file(&mut writer, BACKUP_ARTIFACTS_PATH, &artifacts)
             .expect("artifacts should write");
         let archive_payload = writer

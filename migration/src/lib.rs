@@ -15,6 +15,8 @@ mod m20260222_000012_add_artifact_file_storage_and_screenshots;
 mod m20260222_000013_add_hyperlink_processing_job_active_unique_guard;
 mod m20260222_000014_add_hyperlink_og_fields;
 mod m20260224_000015_add_hyperlink_index_pagination_indexes;
+mod m20260226_000016_add_hyperlink_tombstones;
+mod m20260226_000017_add_hyperlink_artifact_size_index;
 
 pub struct Migrator;
 
@@ -37,6 +39,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260222_000013_add_hyperlink_processing_job_active_unique_guard::Migration),
             Box::new(m20260222_000014_add_hyperlink_og_fields::Migration),
             Box::new(m20260224_000015_add_hyperlink_index_pagination_indexes::Migration),
+            Box::new(m20260226_000016_add_hyperlink_tombstones::Migration),
+            Box::new(m20260226_000017_add_hyperlink_artifact_size_index::Migration),
         ]
     }
 }

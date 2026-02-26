@@ -133,7 +133,7 @@ struct HyperlinksListView: View {
                 text: $queryText,
                 isPresented: $isSearchPresented,
                 placement: .navigationBarDrawer(displayMode: .automatic),
-                prompt: "Search for something. Or enter a link to add."
+                prompt: "Enter a search query"
             )
         }
         .task(id: appModel.selectedServerURL?.absoluteString) {
@@ -150,16 +150,16 @@ struct HyperlinksListView: View {
                 await loadHyperlinks()
             }
         }
-        .onChange(of: queryText) { _ in
+        .onChange(of: queryText) {
             if !hasFreeText, orderOverride == .relevance {
                 orderOverrideRawValue = ""
             }
             scheduleFilterReload()
         }
-        .onChange(of: showDiscoveredLinks) { _ in
+        .onChange(of: showDiscoveredLinks) {
             scheduleFilterReload()
         }
-        .onChange(of: orderOverrideRawValue) { _ in
+        .onChange(of: orderOverrideRawValue) {
             scheduleFilterReload()
         }
         .onReceive(

@@ -43,6 +43,7 @@ pub struct ParsedHyperlinkQuery {
     pub statuses: Vec<StatusToken>,
     pub scopes: Vec<ScopeToken>,
     pub types: Vec<TypeToken>,
+    pub clicks: Vec<ClickToken>,
     pub orders: Vec<OrderToken>,
 }
 
@@ -72,6 +73,12 @@ pub enum TypeToken {
     Pdf,
     #[serde(rename = "non-pdf")]
     NonPdf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum ClickToken {
+    #[serde(rename = "unclicked")]
+    Unclicked,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -339,6 +346,13 @@ fn build_hyperlink_sql_parts(
         TypeSelection::NonPdfOnly => filters.push(format!("NOT {is_pdf_expr}")),
     }
 
+    if matches!(
+        parsed_query.effective_clicks(),
+        ClickSelection::UnclickedOnly
+    ) {
+        filters.push("h.clicks_count = 0".to_string());
+    }
+
     if let StatusSelection::Selected(statuses) = status_selection {
         let mut status_terms = Vec::new();
         if statuses.contains(&StatusToken::Idle) {
@@ -475,6 +489,12 @@ enum TypeSelection {
     NonPdfOnly,
 }
 
+#[derive(Clone, Copy)]
+enum ClickSelection {
+    All,
+    UnclickedOnly,
+}
+
 #[derive(Clone)]
 enum StatusSelection {
     All,
@@ -505,6 +525,14 @@ impl ParsedHyperlinkQuery {
             TypeSelection::PdfOnly
         } else {
             TypeSelection::NonPdfOnly
+        }
+    }
+
+    fn effective_clicks(&self) -> ClickSelection {
+        if self.clicks.contains(&ClickToken::Unclicked) {
+            ClickSelection::UnclickedOnly
+        } else {
+            ClickSelection::All
         }
     }
 
@@ -1022,6 +1050,9 @@ fn parse_query(raw_q: Option<&str>) -> ParseQueryOutput {
             "type" => parse_type_token(&value)
                 .map(|link_type| push_unique(&mut parsed_query.types, link_type))
                 .is_some(),
+            "clicks" => parse_click_token(&value)
+                .map(|clicks| push_unique(&mut parsed_query.clicks, clicks))
+                .is_some(),
             "order" => parse_order_token(&value)
                 .map(|order| parsed_query.orders.push(order))
                 .is_some(),
@@ -1091,6 +1122,13 @@ fn parse_type_token(value: &str) -> Option<TypeToken> {
     }
 }
 
+fn parse_click_token(value: &str) -> Option<ClickToken> {
+    match value {
+        "unclicked" | "zero" | "none" => Some(ClickToken::Unclicked),
+        _ => None,
+    }
+}
+
 fn parse_order_token(value: &str) -> Option<OrderToken> {
     match value {
         "newest" | "new" => Some(OrderToken::Newest),
@@ -1124,16 +1162,17 @@ mod tests {
     #[test]
     fn parse_query_collects_tokens_free_text_and_ignored_tokens() {
         let parsed = parse_query(Some(
-            "status:failed order:random kind:all is:pdf gibberish nonsense:123",
+            "status:failed order:random kind:all is:pdf clicks:unclicked gibberish nonsense:123",
         ));
         assert_eq!(
             parsed.raw_q,
-            "status:failed order:random kind:all is:pdf gibberish nonsense:123"
+            "status:failed order:random kind:all is:pdf clicks:unclicked gibberish nonsense:123"
         );
         assert_eq!(parsed.parsed_query.statuses, vec![StatusToken::Failed]);
         assert_eq!(parsed.parsed_query.orders, vec![OrderToken::Random]);
         assert_eq!(parsed.parsed_query.scopes, vec![ScopeToken::All]);
         assert_eq!(parsed.parsed_query.types, vec![TypeToken::Pdf]);
+        assert_eq!(parsed.parsed_query.clicks, vec![ClickToken::Unclicked]);
         assert_eq!(parsed.free_text, "gibberish");
         assert_eq!(parsed.ignored_tokens, vec!["nonsense:123".to_string()]);
     }
@@ -1155,6 +1194,35 @@ mod tests {
     fn parse_query_rejects_unknown_with_tokens() {
         let parsed = parse_query(Some("with:unknown"));
         assert_eq!(parsed.ignored_tokens, vec!["with:unknown".to_string()]);
+    }
+
+    #[test]
+    fn parse_query_supports_clicks_unclicked() {
+        let parsed = parse_query(Some("clicks:unclicked"));
+        assert_eq!(parsed.parsed_query.clicks, vec![ClickToken::Unclicked]);
+    }
+
+    #[test]
+    fn parse_query_rejects_unknown_click_tokens() {
+        let parsed = parse_query(Some("clicks:popular"));
+        assert_eq!(parsed.parsed_query.clicks, Vec::<ClickToken>::new());
+        assert_eq!(parsed.ignored_tokens, vec!["clicks:popular".to_string()]);
+    }
+
+    #[test]
+    fn build_hyperlink_sql_parts_applies_unclicked_filter() {
+        let mut parsed = ParsedHyperlinkQuery::default();
+        parsed.clicks.push(ClickToken::Unclicked);
+
+        let sql_parts = build_hyperlink_sql_parts(&parsed, &[], OrderToken::Newest);
+        assert!(sql_parts.where_sql.contains("h.clicks_count = 0"));
+    }
+
+    #[test]
+    fn build_hyperlink_sql_parts_skips_unclicked_filter_by_default() {
+        let parsed = ParsedHyperlinkQuery::default();
+        let sql_parts = build_hyperlink_sql_parts(&parsed, &[], OrderToken::Newest);
+        assert!(!sql_parts.where_sql.contains("h.clicks_count = 0"));
     }
 
     #[test]

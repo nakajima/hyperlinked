@@ -1,8 +1,10 @@
 pub mod admin;
+pub(crate) mod admin_backup;
 pub mod admin_jobs;
 mod chromium_diagnostics;
 pub mod context;
 mod flash;
+pub(crate) mod font_diagnostics;
 pub mod graphql;
 mod html_layout;
 mod hyperlink_fetcher;
@@ -37,6 +39,7 @@ pub async fn start(host: &str, port: &str, mdns_options: MdnsOptions) -> Result<
     let state = context::Context {
         connection,
         processing_queue: Some(processing_queue),
+        backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
     };
     let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/server/assets");
     let app = Router::<context::Context>::new()

@@ -7,23 +7,12 @@ use url::Url;
 const URL_UNIQUE_INDEX: &str = "idx_hyperlink_url_unique";
 
 const TRACKING_EXACT_PARAMS: &[&str] = &[
-    "fbclid",
-    "gclid",
-    "dclid",
-    "gbraid",
-    "wbraid",
-    "msclkid",
-    "mc_cid",
-    "mc_eid",
-    "igshid",
-    "yclid",
-    "_hsenc",
-    "_hsmi",
+    "fbclid", "gclid", "dclid", "gbraid", "wbraid", "msclkid", "mc_cid", "mc_eid", "igshid",
+    "yclid", "_hsenc", "_hsmi",
 ];
 const TRACKING_PREFIX_PARAMS: &[&str] = &["utm_"];
 const GLOBAL_SAFE_MEANINGFUL_PARAMS: &[&str] = &[
-    "q", "query", "search", "page", "p", "sort", "order", "lang", "locale", "id", "v", "t",
-    "list",
+    "q", "query", "search", "page", "p", "sort", "order", "lang", "locale", "id", "v", "t", "list",
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -540,7 +529,8 @@ fn should_keep_param(key: &str, strict_keep_mode: bool, host_rules: &[&HostRule]
 
     is_exact_param_match(key, GLOBAL_SAFE_MEANINGFUL_PARAMS)
         || host_rules.iter().any(|rule| {
-            is_exact_param_match(key, rule.keep_exact) || is_prefix_param_match(key, rule.keep_prefix)
+            is_exact_param_match(key, rule.keep_exact)
+                || is_prefix_param_match(key, rule.keep_prefix)
         })
 }
 

@@ -37,6 +37,7 @@ sqlx = { version = "0.8.6", default-features = false, features = [
   "sqlite",
 ] }
 tokio = { version = "1.49.0", features = ["full"] }
+tokio-util = { version = "0.7.16", features = ["io"] }
 tower-http = { version = "0.6.6", features = ["fs"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

@@ -5,6 +5,7 @@ use axum::{
     response::Html,
     routing::get,
 };
+use chrono::{DateTime as ChronoDateTime, SecondsFormat, Utc};
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
 };
@@ -13,8 +14,10 @@ use seaography::{
     OrderInputBuilder, PaginationInputBuilder, apply_memory_pagination, apply_order,
     apply_pagination, async_graphql,
     async_graphql::{
-        Request, Response, ServerError,
-        dynamic::{Field, FieldFuture, FieldValue, InputValue, Schema, SchemaError, TypeRef},
+        Name, Request, Response, ServerError,
+        dynamic::{
+            Enum, Field, FieldFuture, FieldValue, InputValue, Object, Schema, SchemaError, TypeRef,
+        },
         http::graphiql_source,
         parser::types::{DocumentOperations, OperationType},
     },
@@ -46,6 +49,47 @@ lazy_static::lazy_static! {
 
 #[derive(Clone, Debug)]
 struct GraphqlRequestBaseUrl(String);
+
+const UPDATED_HYPERLINKS_PAYLOAD_TYPE: &str = "UpdatedHyperlinksPayload";
+const UPDATED_HYPERLINK_CHANGE_TYPE: &str = "UpdatedHyperlinkChange";
+const HYPERLINK_CHANGE_TYPE_ENUM: &str = "HyperlinkChangeType";
+const FIELD_UPDATED_AT: &str = "updatedAt";
+
+#[derive(Clone, Debug)]
+struct UpdatedHyperlinksPayload {
+    server_updated_at: sea_orm::entity::prelude::DateTime,
+    changes: Vec<UpdatedHyperlinkChange>,
+}
+
+#[derive(Clone, Debug)]
+struct UpdatedHyperlinkChange {
+    id: i32,
+    change_type: HyperlinkChangeType,
+    updated_at: sea_orm::entity::prelude::DateTime,
+    hyperlink: Option<hyperlink::Model>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HyperlinkChangeType {
+    Updated,
+    Deleted,
+}
+
+impl HyperlinkChangeType {
+    fn graphql_name(self) -> &'static str {
+        match self {
+            Self::Updated => "UPDATED",
+            Self::Deleted => "DELETED",
+        }
+    }
+
+    fn sort_rank(self) -> i32 {
+        match self {
+            Self::Updated => 0,
+            Self::Deleted => 1,
+        }
+    }
+}
 
 macro_rules! register_read_only_entity {
     ($builder:ident, $module_path:ident) => {
@@ -104,6 +148,7 @@ fn schema(
     let hyperlinks_query_index = builder.queries.len();
     register_read_only_entity!(builder, hyperlink);
     register_hyperlinks_query_field(&mut builder, hyperlinks_query_index);
+    register_updated_hyperlinks_query_field(&mut builder);
     register_read_only_entity!(builder, hyperlink_processing_job);
     register_read_only_entity!(builder, hyperlink_artifact);
     register_hyperlink_sublinks_field(&mut builder);
@@ -209,6 +254,210 @@ fn register_hyperlinks_query_field(builder: &mut Builder, query_index: usize) {
     .argument(InputValue::new(FIELD_Q, TypeRef::named(TypeRef::STRING)));
 
     builder.queries[query_index] = hyperlinks_field;
+}
+
+fn register_updated_hyperlinks_query_field(builder: &mut Builder) {
+    let context = builder.context;
+    let entity_object_builder = EntityObjectBuilder { context };
+    let hyperlink_type_name = entity_object_builder.type_name::<hyperlink::Entity>();
+
+    builder.enumerations.push(
+        Enum::new(HYPERLINK_CHANGE_TYPE_ENUM)
+            .item("UPDATED")
+            .item("DELETED"),
+    );
+    builder.outputs.push(updated_hyperlinks_payload_object());
+    builder
+        .outputs
+        .push(updated_hyperlink_change_object(hyperlink_type_name));
+
+    let updated_hyperlinks_field = Field::new(
+        "updatedHyperlinks",
+        TypeRef::named_nn(UPDATED_HYPERLINKS_PAYLOAD_TYPE),
+        move |ctx| {
+            FieldFuture::new(async move {
+                let db = ctx.data::<DatabaseConnection>()?;
+                let updated_at_raw = ctx.args.try_get(FIELD_UPDATED_AT)?.string()?;
+                let updated_after =
+                    parse_updated_at_cursor(updated_at_raw).map_err(async_graphql::Error::new)?;
+                let payload = load_updated_hyperlinks_payload(db, updated_after).await?;
+                Ok(Some(FieldValue::owned_any(payload)))
+            })
+        },
+    )
+    .argument(InputValue::new(
+        FIELD_UPDATED_AT,
+        TypeRef::named_nn(TypeRef::STRING),
+    ));
+
+    builder.queries.push(updated_hyperlinks_field);
+}
+
+fn updated_hyperlinks_payload_object() -> Object {
+    Object::new(UPDATED_HYPERLINKS_PAYLOAD_TYPE)
+        .field(Field::new(
+            "serverUpdatedAt",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let payload = ctx
+                        .parent_value
+                        .try_downcast_ref::<UpdatedHyperlinksPayload>()?;
+                    Ok(Some(FieldValue::value(format_graphql_datetime(
+                        &payload.server_updated_at,
+                    ))))
+                })
+            },
+        ))
+        .field(Field::new(
+            "changes",
+            TypeRef::named_nn_list_nn(UPDATED_HYPERLINK_CHANGE_TYPE),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let payload = ctx
+                        .parent_value
+                        .try_downcast_ref::<UpdatedHyperlinksPayload>()?;
+                    let values = payload
+                        .changes
+                        .iter()
+                        .cloned()
+                        .map(FieldValue::owned_any)
+                        .collect::<Vec<_>>();
+                    Ok(Some(FieldValue::list(values)))
+                })
+            },
+        ))
+}
+
+fn updated_hyperlink_change_object(hyperlink_type_name: String) -> Object {
+    Object::new(UPDATED_HYPERLINK_CHANGE_TYPE)
+        .field(Field::new("id", TypeRef::named_nn(TypeRef::INT), |ctx| {
+            FieldFuture::new(async move {
+                let change = ctx
+                    .parent_value
+                    .try_downcast_ref::<UpdatedHyperlinkChange>()?;
+                Ok(Some(FieldValue::value(change.id)))
+            })
+        }))
+        .field(Field::new(
+            "changeType",
+            TypeRef::named_nn(HYPERLINK_CHANGE_TYPE_ENUM),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let change = ctx
+                        .parent_value
+                        .try_downcast_ref::<UpdatedHyperlinkChange>()?;
+                    Ok(Some(FieldValue::value(Name::new(
+                        change.change_type.graphql_name(),
+                    ))))
+                })
+            },
+        ))
+        .field(Field::new(
+            "updatedAt",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let change = ctx
+                        .parent_value
+                        .try_downcast_ref::<UpdatedHyperlinkChange>()?;
+                    Ok(Some(FieldValue::value(format_graphql_datetime(
+                        &change.updated_at,
+                    ))))
+                })
+            },
+        ))
+        .field(Field::new(
+            "hyperlink",
+            TypeRef::named(hyperlink_type_name),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let change = ctx
+                        .parent_value
+                        .try_downcast_ref::<UpdatedHyperlinkChange>()?;
+                    Ok(change
+                        .hyperlink
+                        .as_ref()
+                        .cloned()
+                        .map(FieldValue::owned_any))
+                })
+            },
+        ))
+}
+
+async fn load_updated_hyperlinks_payload(
+    connection: &DatabaseConnection,
+    updated_after: sea_orm::entity::prelude::DateTime,
+) -> Result<UpdatedHyperlinksPayload, sea_orm::DbErr> {
+    let updated_hyperlinks =
+        crate::model::hyperlink::list_updated_after(connection, updated_after).await?;
+    let deleted_hyperlinks =
+        crate::model::hyperlink_tombstone::list_updated_after(connection, updated_after).await?;
+
+    let mut changes = Vec::with_capacity(updated_hyperlinks.len() + deleted_hyperlinks.len());
+
+    changes.extend(
+        updated_hyperlinks
+            .into_iter()
+            .map(|model| UpdatedHyperlinkChange {
+                id: model.id,
+                change_type: HyperlinkChangeType::Updated,
+                updated_at: model.updated_at,
+                hyperlink: Some(model),
+            }),
+    );
+
+    changes.extend(
+        deleted_hyperlinks
+            .into_iter()
+            .map(|model| UpdatedHyperlinkChange {
+                id: model.hyperlink_id,
+                change_type: HyperlinkChangeType::Deleted,
+                updated_at: model.updated_at,
+                hyperlink: None,
+            }),
+    );
+
+    changes.sort_by(|left, right| {
+        left.updated_at
+            .cmp(&right.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| {
+                left.change_type
+                    .sort_rank()
+                    .cmp(&right.change_type.sort_rank())
+            })
+    });
+
+    let server_updated_at = changes
+        .last()
+        .map(|change| change.updated_at)
+        .unwrap_or_else(now_utc);
+
+    Ok(UpdatedHyperlinksPayload {
+        server_updated_at,
+        changes,
+    })
+}
+
+fn parse_updated_at_cursor(value: &str) -> Result<sea_orm::entity::prelude::DateTime, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("updatedAt must be RFC3339 timestamp".to_string());
+    }
+
+    ChronoDateTime::parse_from_rfc3339(trimmed)
+        .map(|parsed| parsed.with_timezone(&Utc).naive_utc())
+        .map_err(|_| "updatedAt must be RFC3339 timestamp".to_string())
+}
+
+fn format_graphql_datetime(value: &sea_orm::entity::prelude::DateTime) -> String {
+    ChronoDateTime::<Utc>::from_naive_utc_and_offset(*value, Utc)
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn now_utc() -> sea_orm::entity::prelude::DateTime {
+    sea_orm::entity::prelude::DateTimeUtc::from(std::time::SystemTime::now()).naive_utc()
 }
 
 fn register_hyperlink_sublinks_field(builder: &mut Builder) {
@@ -449,6 +698,8 @@ mod tests {
                        (2, 1, 1, 'pdf_source', x'25504446', 'application/pdf', 4, '2026-02-19 00:00:03');
                 INSERT INTO hyperlink_relation (id, parent_hyperlink_id, child_hyperlink_id, created_at)
                 VALUES (1, 1, 2, '2026-02-19 00:00:11');
+                INSERT INTO hyperlink_tombstone (hyperlink_id, updated_at)
+                VALUES (9, '2026-02-19 00:00:20');
             "#,
         )
         .await;
@@ -458,6 +709,7 @@ mod tests {
             .with_state(Context {
                 connection,
                 processing_queue: None,
+                backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
             });
 
         TestServer::new(app).expect("test server should initialize")
@@ -622,6 +874,82 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0]["id"], 1);
         assert_eq!(nodes[1]["id"], 2);
+    }
+
+    #[tokio::test]
+    async fn graphql_updated_hyperlinks_returns_updates_and_tombstones() {
+        let server = new_server().await;
+        let payload = run_graphql(
+            &server,
+            r#"
+            {
+              updatedHyperlinks(updatedAt: "2026-02-19T00:00:05Z") {
+                serverUpdatedAt
+                changes {
+                  id
+                  changeType
+                  updatedAt
+                  hyperlink { id title }
+                }
+              }
+            }
+            "#,
+        )
+        .await;
+
+        assert_eq!(
+            payload["data"]["updatedHyperlinks"]["serverUpdatedAt"],
+            "2026-02-19T00:00:20.000Z"
+        );
+
+        let changes = payload["data"]["updatedHyperlinks"]["changes"]
+            .as_array()
+            .expect("changes should be an array");
+        assert_eq!(changes.len(), 2);
+
+        assert_eq!(changes[0]["id"], 2);
+        assert_eq!(changes[0]["changeType"], "UPDATED");
+        assert_eq!(changes[0]["updatedAt"], "2026-02-19T00:00:10.000Z");
+        assert_eq!(changes[0]["hyperlink"]["id"], 2);
+        assert_eq!(changes[0]["hyperlink"]["title"], "Discovered Child");
+
+        assert_eq!(changes[1]["id"], 9);
+        assert_eq!(changes[1]["changeType"], "DELETED");
+        assert_eq!(changes[1]["updatedAt"], "2026-02-19T00:00:20.000Z");
+        assert!(changes[1]["hyperlink"].is_null());
+    }
+
+    #[tokio::test]
+    async fn graphql_updated_hyperlinks_rejects_invalid_updated_at() {
+        let server = new_server().await;
+        let payload = run_graphql(
+            &server,
+            r#"
+            {
+              updatedHyperlinks(updatedAt: "not-a-date") {
+                serverUpdatedAt
+              }
+            }
+            "#,
+        )
+        .await;
+
+        let errors = payload["errors"].as_array().expect("errors should exist");
+        assert!(
+            !errors.is_empty(),
+            "invalid updatedAt should return a graphql error"
+        );
+
+        let first_error_message = errors
+            .first()
+            .and_then(|item| item.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        assert!(
+            first_error_message.contains("updatedat must be rfc3339 timestamp"),
+            "expected validator error, got: {first_error_message}"
+        );
     }
 
     #[tokio::test]

@@ -68,6 +68,14 @@ const HYPERLINK_RELATION_TABLE_SQL: &str = r#"
 "#;
 
 #[cfg(test)]
+const HYPERLINK_TOMBSTONE_TABLE_SQL: &str = r#"
+    CREATE TABLE hyperlink_tombstone (
+        hyperlink_id integer NOT NULL PRIMARY KEY,
+        updated_at datetime_text NOT NULL
+    );
+"#;
+
+#[cfg(test)]
 const QUEUE_JOBS_TABLE_SQL: &str = r#"
     CREATE TABLE jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -214,6 +222,7 @@ pub(crate) async fn initialize_hyperlinks_schema(connection: &DatabaseConnection
     initialize_jobs_schema(connection).await;
     execute_sql(connection, HYPERLINK_ARTIFACT_TABLE_SQL).await;
     execute_sql(connection, HYPERLINK_RELATION_TABLE_SQL).await;
+    execute_sql(connection, HYPERLINK_TOMBSTONE_TABLE_SQL).await;
 }
 
 #[cfg(test)]

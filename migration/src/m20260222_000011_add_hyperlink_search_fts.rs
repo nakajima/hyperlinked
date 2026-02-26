@@ -156,12 +156,22 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let connection = manager.get_connection();
 
-        connection.execute_unprepared(CREATE_SEARCH_DOC_TABLE_SQL).await?;
-        connection.execute_unprepared(CREATE_SEARCH_FTS_TABLE_SQL).await?;
+        connection
+            .execute_unprepared(CREATE_SEARCH_DOC_TABLE_SQL)
+            .await?;
+        connection
+            .execute_unprepared(CREATE_SEARCH_FTS_TABLE_SQL)
+            .await?;
 
-        connection.execute_unprepared(CREATE_DOC_INSERT_TRIGGER_SQL).await?;
-        connection.execute_unprepared(CREATE_DOC_DELETE_TRIGGER_SQL).await?;
-        connection.execute_unprepared(CREATE_DOC_UPDATE_TRIGGER_SQL).await?;
+        connection
+            .execute_unprepared(CREATE_DOC_INSERT_TRIGGER_SQL)
+            .await?;
+        connection
+            .execute_unprepared(CREATE_DOC_DELETE_TRIGGER_SQL)
+            .await?;
+        connection
+            .execute_unprepared(CREATE_DOC_UPDATE_TRIGGER_SQL)
+            .await?;
         connection
             .execute_unprepared(CREATE_HYPERLINK_INSERT_TRIGGER_SQL)
             .await?;
@@ -172,7 +182,9 @@ impl MigrationTrait for Migration {
             .execute_unprepared(CREATE_READABLE_TEXT_INSERT_TRIGGER_SQL)
             .await?;
 
-        connection.execute_unprepared(BACKFILL_SEARCH_DOC_SQL).await?;
+        connection
+            .execute_unprepared(BACKFILL_SEARCH_DOC_SQL)
+            .await?;
         connection
             .execute_unprepared(BACKFILL_READABLE_TEXT_SQL)
             .await?;
@@ -201,8 +213,12 @@ impl MigrationTrait for Migration {
         connection
             .execute_unprepared(DROP_DOC_INSERT_TRIGGER_SQL)
             .await?;
-        connection.execute_unprepared(DROP_SEARCH_FTS_TABLE_SQL).await?;
-        connection.execute_unprepared(DROP_SEARCH_DOC_TABLE_SQL).await?;
+        connection
+            .execute_unprepared(DROP_SEARCH_FTS_TABLE_SQL)
+            .await?;
+        connection
+            .execute_unprepared(DROP_SEARCH_DOC_TABLE_SQL)
+            .await?;
 
         Ok(())
     }

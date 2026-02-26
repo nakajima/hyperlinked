@@ -506,35 +506,222 @@ function updateQueuePendingBadge(pending) {
   badge.textContent = String(pending);
 }
 
-async function refreshQueuePendingBadge() {
+const ADMIN_STATUS_EVENT = "admin:status";
+let adminStatusRequest = null;
+
+function dispatchAdminStatus(payload) {
+  window.dispatchEvent(
+    new CustomEvent(ADMIN_STATUS_EVENT, {
+      detail: payload,
+    }),
+  );
+}
+
+async function refreshAdminStatus() {
+  if (adminStatusRequest) {
+    return adminStatusRequest;
+  }
+
+  adminStatusRequest = (async () => {
+    try {
+      const response = await fetch("/admin/status", {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        return;
+      }
+
+      const data = await response.json();
+      dispatchAdminStatus(data);
+    } catch (_) {}
+  })();
+
   try {
-    const response = await fetch("/admin/jobs/pending-count", {
-      method: "GET",
-      credentials: "same-origin",
-      cache: "no-store",
-    });
-    if (!response.ok) {
+    await adminStatusRequest;
+  } finally {
+    adminStatusRequest = null;
+  }
+}
+
+function formatBackupStageLabel(stage) {
+  if (stage === "loading_records") {
+    return "Loading records";
+  }
+  if (stage === "packing_artifacts") {
+    return "Packing artifacts";
+  }
+  if (stage === "finalizing") {
+    return "Finalizing archive";
+  }
+  return "Working";
+}
+
+function initializeAdminBackupControls() {
+  const container = document.querySelector("[data-admin-backup]");
+  if (!(container instanceof HTMLElement)) {
+    return false;
+  }
+
+  const createButton = container.querySelector("[data-admin-backup-create]");
+  const cancelButton = container.querySelector("[data-admin-backup-cancel]");
+  const downloadLink = container.querySelector("[data-admin-backup-download]");
+  const statusText = container.querySelector("[data-admin-backup-status]");
+  const progressText = container.querySelector("[data-admin-backup-progress]");
+
+  if (
+    !(createButton instanceof HTMLButtonElement) ||
+    !(cancelButton instanceof HTMLButtonElement) ||
+    !(downloadLink instanceof HTMLAnchorElement) ||
+    !(statusText instanceof HTMLElement) ||
+    !(progressText instanceof HTMLElement)
+  ) {
+    return false;
+  }
+
+  let actionInFlight = false;
+  let latestBackup = null;
+
+  const applyBackupStatus = (backup) => {
+    latestBackup = backup;
+    const state = typeof backup?.state === "string" ? backup.state : "idle";
+    const isRunning = state === "running";
+    const hasDownload = backup?.download_ready === true;
+
+    createButton.disabled = actionInFlight || isRunning;
+    cancelButton.disabled = actionInFlight || !isRunning;
+    cancelButton.classList.toggle("hidden", !isRunning);
+    downloadLink.classList.toggle("hidden", !hasDownload);
+    downloadLink.setAttribute("href", "/admin/export/download");
+
+    if (state === "running") {
+      const stage = typeof backup?.stage === "string" ? backup.stage : "";
+      const artifactsDone = Number(backup?.artifacts_done);
+      const artifactsTotal = Number(backup?.artifacts_total);
+      const stageLabel = formatBackupStageLabel(stage);
+
+      statusText.textContent = "Creating backup ZIP...";
+      if (
+        Number.isFinite(artifactsDone) &&
+        Number.isFinite(artifactsTotal) &&
+        artifactsTotal > 0
+      ) {
+        progressText.textContent = `${stageLabel}: ${artifactsDone}/${artifactsTotal} artifacts`;
+      } else {
+        progressText.textContent = stageLabel;
+      }
+      progressText.classList.remove("hidden");
       return;
     }
 
-    const data = await response.json();
-    const pending = Number(data?.pending);
-    updateQueuePendingBadge(pending);
-  } catch (_) {}
+    progressText.classList.add("hidden");
+    progressText.textContent = "";
+
+    if (state === "ready") {
+      const hyperlinks = Number(backup?.hyperlinks);
+      const relations = Number(backup?.relations);
+      const artifacts = Number(backup?.artifacts);
+      if (
+        Number.isFinite(hyperlinks) &&
+        Number.isFinite(relations) &&
+        Number.isFinite(artifacts)
+      ) {
+        statusText.textContent = `Backup ready (${hyperlinks} links, ${relations} relations, ${artifacts} artifacts).`;
+      } else {
+        statusText.textContent = "Backup ready.";
+      }
+      return;
+    }
+
+    if (state === "failed") {
+      const error =
+        typeof backup?.error === "string" && backup.error.trim().length > 0
+          ? backup.error.trim()
+          : "unknown error";
+      statusText.textContent = hasDownload
+        ? `Backup failed: ${error}. Last completed backup is still available for download.`
+        : `Backup failed: ${error}`;
+      return;
+    }
+
+    if (state === "cancelled") {
+      statusText.textContent = hasDownload
+        ? "Backup cancelled. Last completed backup is still available for download."
+        : "Backup cancelled.";
+      return;
+    }
+
+    statusText.textContent = hasDownload
+      ? "Backup is idle. A backup ZIP is available for download."
+      : "Backup is idle.";
+  };
+
+  async function postCreateBackup() {
+    if (actionInFlight) {
+      return;
+    }
+
+    actionInFlight = true;
+    applyBackupStatus(latestBackup);
+    try {
+      await fetch("/admin/export/start", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+    } catch (_) {
+    } finally {
+      actionInFlight = false;
+      applyBackupStatus(latestBackup);
+      await refreshAdminStatus();
+    }
+  }
+
+  createButton.addEventListener("click", () => {
+    void postCreateBackup();
+  });
+
+  window.addEventListener(ADMIN_STATUS_EVENT, (event) => {
+    if (!(event instanceof CustomEvent)) {
+      return;
+    }
+    const backup = event.detail?.backup;
+    applyBackupStatus(backup);
+  });
+
+  applyBackupStatus(null);
+  return true;
 }
 
-if (document.querySelector("[data-queue-pending-badge]")) {
-  refreshQueuePendingBadge();
+function initializeAdminStatusPolling() {
+  const hasQueueBadge = document.querySelector("[data-queue-pending-badge]");
+  const hasBackupControls = initializeAdminBackupControls();
+
+  if (!hasQueueBadge && !hasBackupControls) {
+    return;
+  }
+
+  window.addEventListener(ADMIN_STATUS_EVENT, (event) => {
+    if (!(event instanceof CustomEvent)) {
+      return;
+    }
+    const pending = Number(event.detail?.queue?.pending);
+    updateQueuePendingBadge(pending);
+  });
+
+  void refreshAdminStatus();
   setInterval(() => {
     if (document.visibilityState !== "visible") {
       return;
     }
-    refreshQueuePendingBadge();
+    void refreshAdminStatus();
   }, 5000);
 
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
-      refreshQueuePendingBadge();
+      void refreshAdminStatus();
     }
   });
 }
+
+initializeAdminStatusPolling();

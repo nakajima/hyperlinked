@@ -4,8 +4,7 @@ const ROOT_LISTING_INDEX: &str = "idx_hyperlink_discovery_depth_created_at";
 const RELATION_PARENT_CREATED_AT_INDEX: &str =
     "idx_hyperlink_relation_parent_hyperlink_id_created_at";
 const RELATION_CHILD_INDEX: &str = "idx_hyperlink_relation_child_hyperlink_id";
-const RELATION_PARENT_CHILD_UNIQUE_INDEX: &str =
-    "idx_hyperlink_relation_parent_child_unique";
+const RELATION_PARENT_CHILD_UNIQUE_INDEX: &str = "idx_hyperlink_relation_parent_child_unique";
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
