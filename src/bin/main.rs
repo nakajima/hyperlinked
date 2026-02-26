@@ -1,4 +1,5 @@
 use clap::{ArgAction, Parser, Subcommand};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, prelude::*};
 use tracing_tree::HierarchicalLayer;
@@ -57,10 +58,15 @@ enum Commands {
         #[arg(long, default_value_t = 500)]
         batch_size: u64,
     },
+    WarcsCompressBackfill {
+        #[arg(long, default_value_t = 500)]
+        batch_size: u64,
+    },
     TitlesBackfill {
         #[arg(long, default_value_t = 500)]
         batch_size: u64,
     },
+    ReprocessAllSnapshots,
 }
 
 #[tokio::main]
@@ -121,7 +127,11 @@ async fn run() -> Result<i32, String> {
         }
         Commands::ImportLinkwarden { input } => run_linkwarden_import(input).await,
         Commands::ArtifactsBackfill { batch_size } => run_artifacts_backfill(batch_size).await,
+        Commands::WarcsCompressBackfill { batch_size } => {
+            run_warcs_compress_backfill(batch_size).await
+        }
         Commands::TitlesBackfill { batch_size } => run_titles_backfill(batch_size).await,
+        Commands::ReprocessAllSnapshots => run_reprocess_all_snapshots().await,
     }
 }
 
@@ -190,6 +200,26 @@ async fn run_artifacts_backfill(batch_size: u64) -> Result<i32, String> {
     Ok(0)
 }
 
+async fn run_warcs_compress_backfill(batch_size: u64) -> Result<i32, String> {
+    let connection = hyperlinked::db::connection::init()
+        .await
+        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+
+    let report = hyperlinked::model::hyperlink_artifact::backfill_snapshot_warc_payloads_to_gzip(
+        &connection,
+        batch_size,
+    )
+    .await
+    .map_err(|err| format!("warc compression backfill failed: {err}"))?;
+
+    println!(
+        "warc compression backfill: scanned={}, compressed={}, skipped_already_compressed={}, failed={}",
+        report.scanned, report.compressed, report.skipped_already_compressed, report.failed
+    );
+
+    Ok(0)
+}
+
 async fn run_titles_backfill(batch_size: u64) -> Result<i32, String> {
     let connection = hyperlinked::db::connection::init()
         .await
@@ -202,6 +232,78 @@ async fn run_titles_backfill(batch_size: u64) -> Result<i32, String> {
     println!(
         "title backfill: scanned={}, updated={}, unchanged={}",
         report.scanned, report.updated, report.unchanged
+    );
+
+    Ok(0)
+}
+
+async fn run_reprocess_all_snapshots() -> Result<i32, String> {
+    use hyperlinked::entity::{
+        hyperlink,
+        hyperlink_processing_job::{self, HyperlinkProcessingJobKind, HyperlinkProcessingJobState},
+    };
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+
+    let connection = hyperlinked::db::connection::init()
+        .await
+        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    let processing_queue = hyperlinked::queue::ProcessingQueue::connect(connection.clone())
+        .await
+        .map_err(|err| format!("failed to initialize processing queue: {err}"))?;
+
+    let hyperlink_ids = hyperlink::Entity::find()
+        .select_only()
+        .column(hyperlink::Column::Id)
+        .into_tuple::<i32>()
+        .all(&connection)
+        .await
+        .map_err(|err| format!("failed to load hyperlinks: {err}"))?;
+
+    let total_hyperlinks = hyperlink_ids.len();
+    if total_hyperlinks == 0 {
+        println!("snapshot reprocess: total_links=0 queued=0 skipped_active=0");
+        return Ok(0);
+    }
+
+    let active_snapshot_hyperlink_ids = hyperlink_processing_job::Entity::find()
+        .select_only()
+        .column(hyperlink_processing_job::Column::HyperlinkId)
+        .filter(hyperlink_processing_job::Column::HyperlinkId.is_in(hyperlink_ids.clone()))
+        .filter(hyperlink_processing_job::Column::Kind.eq(HyperlinkProcessingJobKind::Snapshot))
+        .filter(hyperlink_processing_job::Column::State.is_in([
+            HyperlinkProcessingJobState::Queued,
+            HyperlinkProcessingJobState::Running,
+        ]))
+        .into_tuple::<i32>()
+        .all(&connection)
+        .await
+        .map_err(|err| format!("failed to load active snapshot jobs: {err}"))?
+        .into_iter()
+        .collect::<HashSet<_>>();
+
+    let mut queued = 0usize;
+    let mut skipped_active = 0usize;
+    for hyperlink_id in hyperlink_ids {
+        if active_snapshot_hyperlink_ids.contains(&hyperlink_id) {
+            skipped_active += 1;
+            continue;
+        }
+
+        hyperlinked::model::hyperlink_processing_job::enqueue_for_hyperlink_kind(
+            &connection,
+            hyperlink_id,
+            HyperlinkProcessingJobKind::Snapshot,
+            Some(&processing_queue),
+        )
+        .await
+        .map_err(|err| {
+            format!("failed to enqueue snapshot job for hyperlink {hyperlink_id}: {err}")
+        })?;
+        queued += 1;
+    }
+
+    println!(
+        "snapshot reprocess: total_links={total_hyperlinks} queued={queued} skipped_active={skipped_active}"
     );
 
     Ok(0)

@@ -45,7 +45,10 @@ use crate::{
     storage::artifacts as artifact_storage,
 };
 
-use super::{admin_jobs::fetch_pending_queue_counts, views};
+use super::{
+    admin_jobs::{fetch_pending_queue_counts, set_all_queued_rows_cleared},
+    views,
+};
 
 const BACKUP_VERSION: u32 = 1;
 const BACKUP_MANIFEST_PATH: &str = "manifest.json";
@@ -68,6 +71,9 @@ pub fn routes() -> Router<Context> {
         .route("/admin/export/start", routing::post(start_backup_export))
         .route("/admin/export/cancel", routing::post(cancel_backup_export))
         .route("/admin/import", routing::post(import_hyperlinks))
+        .route("/admin/clear-queue", routing::post(clear_queue))
+        .route("/admin/pause-queue", routing::post(pause_queue))
+        .route("/admin/resume-queue", routing::post(resume_queue))
         .route(
             "/admin/process-missing-artifacts",
             routing::post(process_missing_artifacts),
@@ -458,6 +464,75 @@ async fn process_missing_artifacts(State(state): State<Context>, headers: Header
             "Queued {} snapshot job(s), {} og job(s), and {} readability job(s).",
             result.snapshot_queued, result.og_queued, result.readability_queued
         ),
+    )
+}
+
+async fn clear_queue(State(state): State<Context>, headers: HeaderMap) -> Response {
+    let cleared = match set_all_queued_rows_cleared(&state.connection).await {
+        Ok(cleared) => cleared,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to clear queued queue rows: {err}"),
+            );
+        }
+    };
+
+    redirect_with_flash(
+        &headers,
+        "/admin",
+        FlashName::Notice,
+        format!("Cleared {cleared} queued queue row(s)."),
+    )
+}
+
+async fn pause_queue(State(state): State<Context>, headers: HeaderMap) -> Response {
+    let Some(queue) = state.processing_queue.as_ref() else {
+        return redirect_with_flash(
+            &headers,
+            "/admin",
+            FlashName::Alert,
+            "Queue controls are unavailable in this environment.",
+        );
+    };
+
+    if let Err(err) = queue.shutdown_worker().await {
+        return response_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to pause queue workers: {err}"),
+        );
+    }
+
+    redirect_with_flash(
+        &headers,
+        "/admin",
+        FlashName::Notice,
+        "Queue workers paused.",
+    )
+}
+
+async fn resume_queue(State(state): State<Context>, headers: HeaderMap) -> Response {
+    let Some(queue) = state.processing_queue.as_ref() else {
+        return redirect_with_flash(
+            &headers,
+            "/admin",
+            FlashName::Alert,
+            "Queue controls are unavailable in this environment.",
+        );
+    };
+
+    if let Err(err) = queue.spawn_worker(state.connection.clone()).await {
+        return response_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to resume queue workers: {err}"),
+        );
+    }
+
+    redirect_with_flash(
+        &headers,
+        "/admin",
+        FlashName::Notice,
+        "Queue workers resumed.",
     )
 }
 
@@ -1517,7 +1592,10 @@ fn format_bytes_f64(bytes_f64: f64) -> String {
 mod tests {
     use axum::Router;
     use axum_test::multipart::{MultipartForm, Part};
-    use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder};
+    use sea_orm::{
+        ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter,
+        QueryOrder, Statement,
+    };
     use std::{
         io::Cursor,
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -1630,6 +1708,51 @@ mod tests {
         panic!("timed out waiting for backup export to become ready");
     }
 
+    async fn insert_queue_job(
+        connection: &sea_orm::DatabaseConnection,
+        id: i64,
+        status: &str,
+        payload: &str,
+    ) {
+        let statement = Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "INSERT INTO jobs (
+                id, job_type, payload, status, attempts, max_attempts, available_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                .to_string(),
+            vec![
+                id.into(),
+                std::any::type_name::<crate::queue::ProcessingTask>().into(),
+                payload.into(),
+                status.into(),
+                0.into(),
+                20.into(),
+                1.into(),
+                1.into(),
+                1.into(),
+            ],
+        );
+        connection
+            .execute(statement)
+            .await
+            .expect("queue row should insert");
+    }
+
+    async fn queue_status(connection: &sea_orm::DatabaseConnection, id: i64) -> String {
+        let statement = Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT status FROM jobs WHERE id = ?".to_string(),
+            vec![id.into()],
+        );
+        let row = connection
+            .query_one(statement)
+            .await
+            .expect("queue lookup should succeed")
+            .expect("queue row should exist");
+        row.try_get_by_index::<String>(0)
+            .expect("status should decode")
+    }
+
     #[tokio::test]
     async fn process_missing_artifacts_enqueues_snapshot_og_and_readability() {
         let (server, connection) = new_server(
@@ -1704,10 +1827,53 @@ mod tests {
         assert!(body.contains("Snapshot to queue"));
         assert!(body.contains("Open Graph to queue"));
         assert!(body.contains("Readability to queue"));
+        assert!(body.contains("Queue controls"));
+        assert!(body.contains("action=\"/admin/clear-queue\""));
+        assert!(body.contains("action=\"/admin/pause-queue\""));
+        assert!(body.contains("action=\"/admin/resume-queue\""));
+        assert!(body.contains("Clear queue"));
+        assert!(body.contains("Pause queue"));
+        assert!(body.contains("Resume queue"));
         assert!(body.contains("data-admin-backup"));
         assert!(body.contains("data-admin-backup-create"));
         assert!(body.contains("data-admin-backup-cancel"));
         assert!(body.contains("data-admin-backup-download"));
+    }
+
+    #[tokio::test]
+    async fn clear_queue_marks_only_queued_rows_cleared() {
+        let (server, connection) = new_server("").await;
+        insert_queue_job(&connection, 1, "queued", r#"{"processing_job_id":1}"#).await;
+        insert_queue_job(&connection, 2, "processing", r#"{"processing_job_id":2}"#).await;
+        insert_queue_job(&connection, 3, "failed", r#"{"processing_job_id":3}"#).await;
+        insert_queue_job(&connection, 4, "completed", r#"{"processing_job_id":4}"#).await;
+
+        let action = server.post("/admin/clear-queue").await;
+        action.assert_status_see_other();
+        action.assert_header("location", "/admin");
+
+        assert_eq!(queue_status(&connection, 1).await, "cleared");
+        assert_eq!(queue_status(&connection, 2).await, "processing");
+        assert_eq!(queue_status(&connection, 3).await, "failed");
+        assert_eq!(queue_status(&connection, 4).await, "completed");
+    }
+
+    #[tokio::test]
+    async fn pause_queue_redirects_when_queue_controls_are_unavailable() {
+        let (server, _) = new_server("").await;
+
+        let action = server.post("/admin/pause-queue").await;
+        action.assert_status_see_other();
+        action.assert_header("location", "/admin");
+    }
+
+    #[tokio::test]
+    async fn resume_queue_redirects_when_queue_controls_are_unavailable() {
+        let (server, _) = new_server("").await;
+
+        let action = server.post("/admin/resume-queue").await;
+        action.assert_status_see_other();
+        action.assert_header("location", "/admin");
     }
 
     #[tokio::test]
@@ -1887,7 +2053,7 @@ mod tests {
                     (3, 1, 2, '2026-02-21 00:00:30');
                 INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
                 VALUES
-                    (9, 1, NULL, 'screenshot_png', X'89504E47', 'image/png', 4, '2026-02-21 00:01:00');
+                    (9, 1, NULL, 'screenshot_webp', X'52494646', 'image/webp', 4, '2026-02-21 00:01:00');
             "#,
         )
         .await;
@@ -1960,11 +2126,61 @@ mod tests {
 
         let payload = read_zip_binary_file(&mut archive, "artifacts/9.bin")
             .expect("artifact payload should exist");
-        assert_eq!(payload, vec![0x89, 0x50, 0x4E, 0x47]);
+        assert_eq!(payload, vec![0x52, 0x49, 0x46, 0x46]);
 
         let alias_export = server.get("/admin/export").await;
         alias_export.assert_status_ok();
         alias_export.assert_header("content-type", "application/zip");
+    }
+
+    #[tokio::test]
+    async fn admin_export_preserves_gzip_snapshot_warc_payload_and_content_type() {
+        let (server, connection) = new_server(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'Gzip snapshot export', 'https://example.com/warc', 'https://example.com/warc', 0, 0, NULL, '2026-02-21 00:00:00', '2026-02-21 00:00:00');
+            "#,
+        )
+        .await;
+
+        let raw_warc = b"WARC/1.0\r\nWARC-Type: response\r\n\r\n<html>gzip export</html>";
+        let compressed_warc = hyperlink_artifact_model::compress_snapshot_warc_payload(raw_warc)
+            .expect("snapshot warc payload should compress");
+        let inserted = hyperlink_artifact_model::insert(
+            &connection,
+            1,
+            None,
+            HyperlinkArtifactKind::SnapshotWarc,
+            compressed_warc.clone(),
+            hyperlink_artifact_model::SNAPSHOT_WARC_GZIP_CONTENT_TYPE,
+        )
+        .await
+        .expect("snapshot_warc artifact should insert");
+
+        let start = server.post("/admin/export/start").await;
+        start.assert_status(StatusCode::ACCEPTED);
+        let _ = wait_for_backup_ready(&server).await;
+
+        let export = server.get("/admin/export/download").await;
+        export.assert_status_ok();
+
+        let mut archive = ZipArchive::new(Cursor::new(export.as_bytes().to_vec()))
+            .expect("export should be a valid zip archive");
+        let artifacts: Vec<HyperlinkArtifactBackupRow> =
+            read_zip_json_file(&mut archive, BACKUP_ARTIFACTS_PATH)
+                .expect("artifacts should parse");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].id, inserted.id);
+        assert_eq!(
+            artifacts[0].content_type,
+            hyperlink_artifact_model::SNAPSHOT_WARC_GZIP_CONTENT_TYPE
+        );
+        assert_eq!(artifacts[0].size_bytes, compressed_warc.len() as i32);
+
+        let payload = read_zip_binary_file(&mut archive, &artifacts[0].payload_path)
+            .expect("artifact payload should exist");
+        assert_eq!(payload, compressed_warc);
     }
 
     #[tokio::test]
@@ -2058,9 +2274,9 @@ mod tests {
         let artifacts = vec![HyperlinkArtifactBackupRow {
             id: 33,
             hyperlink_id: 11,
-            kind: HyperlinkArtifactKind::ScreenshotPng,
-            content_type: "image/png".to_string(),
-            size_bytes: 4,
+            kind: HyperlinkArtifactKind::ScreenshotWebp,
+            content_type: "image/webp".to_string(),
+            size_bytes: 12,
             created_at: "2026-02-22T00:30:00Z".to_string(),
             job_id: None,
             checksum_sha256: None,
@@ -2084,7 +2300,7 @@ mod tests {
         write_zip_binary_file_with_compression(
             &mut writer,
             "artifacts/33.bin",
-            &[0x89, 0x50, 0x4E, 0x47],
+            &[0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50],
             CompressionMethod::Deflated,
         )
         .expect("artifact payload should write");
@@ -2139,6 +2355,110 @@ mod tests {
         let payload = hyperlink_artifact_model::load_payload(&artifact)
             .await
             .expect("artifact payload should load");
-        assert_eq!(payload, vec![0x89, 0x50, 0x4E, 0x47]);
+        assert_eq!(
+            payload,
+            vec![
+                0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_import_restores_gzip_snapshot_warc_artifact_and_processing_payload() {
+        let (server, connection) = new_server("").await;
+
+        let hyperlinks = vec![HyperlinkBackupRow {
+            id: 101,
+            title: "Imported gzip WARC".to_string(),
+            url: "https://example.com/warc".to_string(),
+            raw_url: "https://example.com/warc".to_string(),
+            og_title: None,
+            og_description: None,
+            og_type: None,
+            og_url: None,
+            og_image_url: None,
+            og_site_name: None,
+            discovery_depth: 0,
+            clicks_count: 0,
+            last_clicked_at: None,
+            created_at: "2026-02-22T00:00:00Z".to_string(),
+            updated_at: "2026-02-22T00:00:00Z".to_string(),
+        }];
+        let relations: Vec<HyperlinkRelationBackupRow> = Vec::new();
+        let raw_warc = b"WARC/1.0\r\nWARC-Type: response\r\n\r\n<html>gzip import</html>";
+        let compressed_warc = hyperlink_artifact_model::compress_snapshot_warc_payload(raw_warc)
+            .expect("snapshot warc payload should compress");
+        let artifacts = vec![HyperlinkArtifactBackupRow {
+            id: 202,
+            hyperlink_id: 101,
+            kind: HyperlinkArtifactKind::SnapshotWarc,
+            content_type: hyperlink_artifact_model::SNAPSHOT_WARC_GZIP_CONTENT_TYPE.to_string(),
+            size_bytes: compressed_warc.len() as i32,
+            created_at: "2026-02-22T00:10:00Z".to_string(),
+            job_id: None,
+            checksum_sha256: None,
+            payload_path: "artifacts/202.bin".to_string(),
+        }];
+        let manifest = BackupManifest {
+            version: BACKUP_VERSION,
+            exported_at: "2026-02-22T00:40:00Z".to_string(),
+            hyperlinks: hyperlinks.len(),
+            relations: relations.len(),
+            artifacts: artifacts.len(),
+        };
+
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        write_zip_json_file(&mut writer, BACKUP_MANIFEST_PATH, &manifest)
+            .expect("manifest should write");
+        write_zip_json_file(&mut writer, BACKUP_HYPERLINKS_PATH, &hyperlinks)
+            .expect("hyperlinks should write");
+        write_zip_json_file(&mut writer, BACKUP_RELATIONS_PATH, &relations)
+            .expect("relations should write");
+        write_zip_binary_file_with_compression(
+            &mut writer,
+            "artifacts/202.bin",
+            &compressed_warc,
+            CompressionMethod::Deflated,
+        )
+        .expect("artifact payload should write");
+        write_zip_json_file(&mut writer, BACKUP_ARTIFACTS_PATH, &artifacts)
+            .expect("artifacts should write");
+        let archive_payload = writer
+            .finish()
+            .expect("zip writer should finish")
+            .into_inner();
+
+        let multipart = MultipartForm::new().add_part(
+            "archive",
+            Part::bytes(archive_payload)
+                .file_name("backup.zip")
+                .mime_type("application/zip"),
+        );
+        let import = server.post("/admin/import").multipart(multipart).await;
+        import.assert_status_see_other();
+        import.assert_header("location", "/admin");
+
+        let artifact = hyperlink_artifact::Entity::find_by_id(202)
+            .one(&connection)
+            .await
+            .expect("artifact lookup should succeed")
+            .expect("artifact should exist");
+        assert_eq!(
+            artifact.content_type,
+            hyperlink_artifact_model::SNAPSHOT_WARC_GZIP_CONTENT_TYPE
+        );
+        assert_eq!(artifact.size_bytes, compressed_warc.len() as i32);
+        assert!(artifact.storage_path.is_some());
+        assert!(artifact.payload.is_empty());
+
+        let stored_payload = hyperlink_artifact_model::load_payload(&artifact)
+            .await
+            .expect("stored payload should load");
+        assert_eq!(stored_payload, compressed_warc);
+
+        let processing_payload = hyperlink_artifact_model::load_processing_payload(&artifact)
+            .await
+            .expect("processing payload should decode");
+        assert_eq!(processing_payload, raw_warc);
     }
 }

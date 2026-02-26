@@ -128,10 +128,10 @@ fn kind_slug(kind: &HyperlinkArtifactKind) -> &'static str {
         HyperlinkArtifactKind::ReadableText => "readable_text",
         HyperlinkArtifactKind::ReadableMeta => "readable_meta",
         HyperlinkArtifactKind::ReadableError => "readable_error",
-        HyperlinkArtifactKind::ScreenshotPng => "screenshot_png",
-        HyperlinkArtifactKind::ScreenshotThumbPng => "screenshot_thumb_png",
-        HyperlinkArtifactKind::ScreenshotDarkPng => "screenshot_dark_png",
-        HyperlinkArtifactKind::ScreenshotThumbDarkPng => "screenshot_thumb_dark_png",
+        HyperlinkArtifactKind::ScreenshotWebp => "screenshot_webp",
+        HyperlinkArtifactKind::ScreenshotThumbWebp => "screenshot_thumb_webp",
+        HyperlinkArtifactKind::ScreenshotDarkWebp => "screenshot_dark_webp",
+        HyperlinkArtifactKind::ScreenshotThumbDarkWebp => "screenshot_thumb_dark_webp",
         HyperlinkArtifactKind::ScreenshotError => "screenshot_error",
     }
 }
@@ -149,10 +149,10 @@ fn extension(kind: &HyperlinkArtifactKind) -> &'static str {
         HyperlinkArtifactKind::ReadableText => "md",
         HyperlinkArtifactKind::ReadableMeta => "json",
         HyperlinkArtifactKind::ReadableError => "json",
-        HyperlinkArtifactKind::ScreenshotPng => "png",
-        HyperlinkArtifactKind::ScreenshotThumbPng => "png",
-        HyperlinkArtifactKind::ScreenshotDarkPng => "png",
-        HyperlinkArtifactKind::ScreenshotThumbDarkPng => "png",
+        HyperlinkArtifactKind::ScreenshotWebp => "webp",
+        HyperlinkArtifactKind::ScreenshotThumbWebp => "webp",
+        HyperlinkArtifactKind::ScreenshotDarkWebp => "webp",
+        HyperlinkArtifactKind::ScreenshotThumbDarkWebp => "webp",
         HyperlinkArtifactKind::ScreenshotError => "json",
     }
 }

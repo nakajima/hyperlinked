@@ -131,7 +131,7 @@ impl Processor for ReadabilityFetcher {
 
         let extraction = match source {
             ReadabilitySource::Html(snapshot) => {
-                let snapshot_payload = hyperlink_artifact_model::load_payload(&snapshot)
+                let snapshot_payload = hyperlink_artifact_model::load_processing_payload(&snapshot)
                     .await
                     .map_err(ProcessingError::DB)?;
                 let html = match extract_html_from_warc(&snapshot_payload) {

@@ -37,14 +37,14 @@ pub enum HyperlinkArtifactKind {
     ReadableMeta,
     #[sea_orm(string_value = "readable_error")]
     ReadableError,
-    #[sea_orm(string_value = "screenshot_png")]
-    ScreenshotPng,
-    #[sea_orm(string_value = "screenshot_thumb_png")]
-    ScreenshotThumbPng,
-    #[sea_orm(string_value = "screenshot_dark_png")]
-    ScreenshotDarkPng,
-    #[sea_orm(string_value = "screenshot_thumb_dark_png")]
-    ScreenshotThumbDarkPng,
+    #[sea_orm(string_value = "screenshot_webp")]
+    ScreenshotWebp,
+    #[sea_orm(string_value = "screenshot_thumb_webp")]
+    ScreenshotThumbWebp,
+    #[sea_orm(string_value = "screenshot_dark_webp")]
+    ScreenshotDarkWebp,
+    #[sea_orm(string_value = "screenshot_thumb_dark_webp")]
+    ScreenshotThumbDarkWebp,
     #[sea_orm(string_value = "screenshot_error")]
     ScreenshotError,
 }

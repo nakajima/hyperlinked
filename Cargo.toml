@@ -7,11 +7,14 @@ edition = "2024"
 lilqueue = { path = "../lilqueue" }
 async-trait = "0.1.89"
 axum = { version = "0.8.8", features = ["macros", "multipart", "ws"] }
+base64 = "0.22.1"
 clap = { version = "4.5.49", features = ["derive", "env"] }
 chrono = "0.4.42"
 dom_smoothie = "0.8.0"
+flate2 = { version = "1.0.35", default-features = false, features = ["rust_backend"] }
+futures-util = "0.3.32"
 html2md = "0.2"
-image = { version = "0.25.8", default-features = false, features = ["png"] }
+image = { version = "0.25.8", default-features = false, features = ["png", "webp"] }
 notify = "8.2.0"
 pdf-extract = "0.7"
 reqwest = { version = "0.12.24", default-features = false, features = [
@@ -37,11 +40,13 @@ sqlx = { version = "0.8.6", default-features = false, features = [
   "sqlite",
 ] }
 tokio = { version = "1.49.0", features = ["full"] }
+tokio-tungstenite = "0.28.0"
 tokio-util = { version = "0.7.16", features = ["io"] }
 tower-http = { version = "0.6.6", features = ["fs"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 tracing-tree = "0.4.0"
+webp = "0.3.1"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

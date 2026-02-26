@@ -122,9 +122,10 @@ impl Processor for OgFetcher {
         }
 
         let snapshot_artifact = snapshot_artifact.expect("already guarded");
-        let snapshot_payload = hyperlink_artifact_model::load_payload(&snapshot_artifact)
-            .await
-            .map_err(ProcessingError::DB)?;
+        let snapshot_payload =
+            hyperlink_artifact_model::load_processing_payload(&snapshot_artifact)
+                .await
+                .map_err(ProcessingError::DB)?;
         let html = match extract_html_from_warc(&snapshot_payload) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
             Err(error) => {

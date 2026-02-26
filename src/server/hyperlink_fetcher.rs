@@ -140,13 +140,13 @@ impl<'a> HyperlinkFetcher<'a> {
         let thumbnail_artifacts = hyperlink_artifact_model::latest_for_hyperlinks_kind(
             self.connection,
             &shown_hyperlink_ids,
-            HyperlinkArtifactKind::ScreenshotThumbPng,
+            HyperlinkArtifactKind::ScreenshotThumbWebp,
         )
         .await?;
         let dark_thumbnail_artifacts = hyperlink_artifact_model::latest_for_hyperlinks_kind(
             self.connection,
             &shown_hyperlink_ids,
-            HyperlinkArtifactKind::ScreenshotThumbDarkPng,
+            HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
         )
         .await?;
 

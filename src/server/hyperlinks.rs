@@ -412,11 +412,8 @@ async fn serve_latest_artifact(
         .insert(header::CONTENT_TYPE, content_type);
 
     if as_attachment {
-        let filename = format!(
-            "hyperlink-{id}-{}.{}",
-            artifact_kind_slug(&kind),
-            artifact_kind_file_extension(&kind)
-        );
+        let extension = artifact_download_file_extension(&kind, &artifact);
+        let filename = format!("hyperlink-{id}-{}.{}", artifact_kind_slug(&kind), extension);
         if let Ok(disposition) =
             HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
         {
@@ -588,7 +585,7 @@ async fn show_with_kind(state: &Context, id: i32, kind: ResponseKind, flash: Fla
                 match crate::model::hyperlink_artifact::latest_for_hyperlinks_kind(
                     &state.connection,
                     &discovered_link_ids,
-                    HyperlinkArtifactKind::ScreenshotThumbPng,
+                    HyperlinkArtifactKind::ScreenshotThumbWebp,
                 )
                 .await
                 {
@@ -606,7 +603,7 @@ async fn show_with_kind(state: &Context, id: i32, kind: ResponseKind, flash: Fla
                 match crate::model::hyperlink_artifact::latest_for_hyperlinks_kind(
                     &state.connection,
                     &discovered_link_ids,
-                    HyperlinkArtifactKind::ScreenshotThumbDarkPng,
+                    HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
                 )
                 .await
                 {
@@ -1023,7 +1020,7 @@ impl<'a> HyperlinksIndexTemplate<'a> {
             .contains_key(&hyperlink_id)
             .then_some(artifact_inline_path(
                 hyperlink_id,
-                &HyperlinkArtifactKind::ScreenshotThumbPng,
+                &HyperlinkArtifactKind::ScreenshotThumbWebp,
             ))
     }
 
@@ -1032,7 +1029,7 @@ impl<'a> HyperlinksIndexTemplate<'a> {
             .contains_key(&hyperlink_id)
             .then_some(artifact_inline_path(
                 hyperlink_id,
-                &HyperlinkArtifactKind::ScreenshotThumbDarkPng,
+                &HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
             ))
     }
 }
@@ -1170,30 +1167,30 @@ impl<'a> HyperlinksShowTemplate<'a> {
 
     fn screenshot_inline_path(&self) -> Option<String> {
         self.latest_artifacts
-            .contains_key(&HyperlinkArtifactKind::ScreenshotPng)
-            .then_some(self.artifact_inline_path(&HyperlinkArtifactKind::ScreenshotPng))
+            .contains_key(&HyperlinkArtifactKind::ScreenshotWebp)
+            .then_some(self.artifact_inline_path(&HyperlinkArtifactKind::ScreenshotWebp))
     }
 
     fn screenshot_dark_inline_path(&self) -> Option<String> {
         self.latest_artifacts
-            .contains_key(&HyperlinkArtifactKind::ScreenshotDarkPng)
-            .then_some(self.artifact_inline_path(&HyperlinkArtifactKind::ScreenshotDarkPng))
+            .contains_key(&HyperlinkArtifactKind::ScreenshotDarkWebp)
+            .then_some(self.artifact_inline_path(&HyperlinkArtifactKind::ScreenshotDarkWebp))
     }
 
     fn thumbnail_inline_path(&self, hyperlink_id: i32) -> Option<String> {
         if hyperlink_id == self.link.id
             && self
                 .latest_artifacts
-                .contains_key(&HyperlinkArtifactKind::ScreenshotThumbPng)
+                .contains_key(&HyperlinkArtifactKind::ScreenshotThumbWebp)
         {
-            return Some(self.artifact_inline_path(&HyperlinkArtifactKind::ScreenshotThumbPng));
+            return Some(self.artifact_inline_path(&HyperlinkArtifactKind::ScreenshotThumbWebp));
         }
 
         self.discovered_thumbnail_artifacts
             .contains_key(&hyperlink_id)
             .then_some(artifact_inline_path(
                 hyperlink_id,
-                &HyperlinkArtifactKind::ScreenshotThumbPng,
+                &HyperlinkArtifactKind::ScreenshotThumbWebp,
             ))
     }
 
@@ -1201,16 +1198,16 @@ impl<'a> HyperlinksShowTemplate<'a> {
         if hyperlink_id == self.link.id
             && self
                 .latest_artifacts
-                .contains_key(&HyperlinkArtifactKind::ScreenshotThumbDarkPng)
+                .contains_key(&HyperlinkArtifactKind::ScreenshotThumbDarkWebp)
         {
-            return Some(self.artifact_inline_path(&HyperlinkArtifactKind::ScreenshotThumbDarkPng));
+            return Some(self.artifact_inline_path(&HyperlinkArtifactKind::ScreenshotThumbDarkWebp));
         }
 
         self.discovered_dark_thumbnail_artifacts
             .contains_key(&hyperlink_id)
             .then_some(artifact_inline_path(
                 hyperlink_id,
-                &HyperlinkArtifactKind::ScreenshotThumbDarkPng,
+                &HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
             ))
     }
 }
@@ -1497,10 +1494,10 @@ fn show_artifact_kinds() -> [HyperlinkArtifactKind; 14] {
         HyperlinkArtifactKind::OgMeta,
         HyperlinkArtifactKind::OgImage,
         HyperlinkArtifactKind::OgError,
-        HyperlinkArtifactKind::ScreenshotPng,
-        HyperlinkArtifactKind::ScreenshotThumbPng,
-        HyperlinkArtifactKind::ScreenshotDarkPng,
-        HyperlinkArtifactKind::ScreenshotThumbDarkPng,
+        HyperlinkArtifactKind::ScreenshotWebp,
+        HyperlinkArtifactKind::ScreenshotThumbWebp,
+        HyperlinkArtifactKind::ScreenshotDarkWebp,
+        HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
         HyperlinkArtifactKind::ScreenshotError,
         HyperlinkArtifactKind::ReadableText,
         HyperlinkArtifactKind::ReadableMeta,
@@ -1514,10 +1511,10 @@ fn required_show_artifact_kinds(
 ) -> Vec<HyperlinkArtifactKind> {
     vec![
         required_source_artifact_kind(hyperlink_url, latest_artifacts),
-        HyperlinkArtifactKind::ScreenshotPng,
-        HyperlinkArtifactKind::ScreenshotDarkPng,
-        HyperlinkArtifactKind::ScreenshotThumbPng,
-        HyperlinkArtifactKind::ScreenshotThumbDarkPng,
+        HyperlinkArtifactKind::ScreenshotWebp,
+        HyperlinkArtifactKind::ScreenshotDarkWebp,
+        HyperlinkArtifactKind::ScreenshotThumbWebp,
+        HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
         HyperlinkArtifactKind::OgMeta,
         HyperlinkArtifactKind::ReadableText,
         HyperlinkArtifactKind::ReadableMeta,
@@ -1566,17 +1563,19 @@ fn artifact_kind_info(
             ("readable_meta", "Readable Metadata", "json", false)
         }
         HyperlinkArtifactKind::ReadableError => ("readable_error", "Readable Error", "json", true),
-        HyperlinkArtifactKind::ScreenshotPng => ("screenshot_png", "Screenshot PNG", "png", false),
-        HyperlinkArtifactKind::ScreenshotThumbPng => {
-            ("screenshot_thumb_png", "Screenshot Thumbnail", "png", false)
+        HyperlinkArtifactKind::ScreenshotWebp => {
+            ("screenshot_webp", "Screenshot WebP", "webp", false)
         }
-        HyperlinkArtifactKind::ScreenshotDarkPng => {
-            ("screenshot_dark_png", "Screenshot Dark", "png", false)
+        HyperlinkArtifactKind::ScreenshotThumbWebp => {
+            ("screenshot_thumb_webp", "Screenshot Thumbnail", "webp", false)
         }
-        HyperlinkArtifactKind::ScreenshotThumbDarkPng => (
-            "screenshot_thumb_dark_png",
+        HyperlinkArtifactKind::ScreenshotDarkWebp => {
+            ("screenshot_dark_webp", "Screenshot Dark", "webp", false)
+        }
+        HyperlinkArtifactKind::ScreenshotThumbDarkWebp => (
+            "screenshot_thumb_dark_webp",
             "Screenshot Thumbnail Dark",
-            "png",
+            "webp",
             false,
         ),
         HyperlinkArtifactKind::ScreenshotError => {
@@ -1601,6 +1600,19 @@ fn artifact_kind_label(kind: &HyperlinkArtifactKind) -> &'static str {
 
 fn artifact_kind_file_extension(kind: &HyperlinkArtifactKind) -> &'static str {
     artifact_kind_info(kind).2
+}
+
+fn artifact_download_file_extension(
+    kind: &HyperlinkArtifactKind,
+    artifact: &hyperlink_artifact::Model,
+) -> String {
+    if *kind == HyperlinkArtifactKind::SnapshotWarc
+        && crate::model::hyperlink_artifact::is_snapshot_warc_gzip_artifact(artifact)
+    {
+        return "warc.gz".to_string();
+    }
+
+    artifact_kind_file_extension(kind).to_string()
 }
 
 fn artifact_download_path(hyperlink_id: i32, kind: &HyperlinkArtifactKind) -> String {
@@ -2247,8 +2259,8 @@ mod tests {
                 );
                 INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
                 VALUES
-                    (1, 1, NULL, 'screenshot_png', X'00', 'image/png', 1, '2026-02-22 00:00:01'),
-                    (2, 1, NULL, 'screenshot_dark_png', X'00', 'image/png', 1, '2026-02-22 00:00:02');
+                    (1, 1, NULL, 'screenshot_webp', X'00', 'image/webp', 1, '2026-02-22 00:00:01'),
+                    (2, 1, NULL, 'screenshot_dark_webp', X'00', 'image/webp', 1, '2026-02-22 00:00:02');
                 INSERT INTO hyperlink_processing_job (id, hyperlink_id, kind, state, error_message, queued_at, started_at, finished_at, created_at, updated_at)
                 VALUES
                     (42, 1, 'snapshot', 'succeeded', NULL, '2026-02-22 00:00:03', '2026-02-22 00:00:04', '2026-02-22 00:00:05', '2026-02-22 00:00:03', '2026-02-22 00:00:05');
@@ -2259,8 +2271,8 @@ mod tests {
         let show = server.get("/hyperlinks/1").await;
         show.assert_status_ok();
         let body = show.text();
-        assert!(body.contains("/hyperlinks/1/artifacts/screenshot_png/inline"));
-        assert!(body.contains("/hyperlinks/1/artifacts/screenshot_dark_png/inline"));
+        assert!(body.contains("/hyperlinks/1/artifacts/screenshot_webp/inline"));
+        assert!(body.contains("/hyperlinks/1/artifacts/screenshot_dark_webp/inline"));
         assert!(body.contains("media=\"(prefers-color-scheme: dark)\""));
         assert!(body.contains("Screenshot for Example article"));
         assert!(body.contains("class=\"text-sm break-all\""));
@@ -2420,7 +2432,9 @@ mod tests {
                     (1, 1, NULL, 'readable_text', X'6669727374', 'text/markdown; charset=utf-8', 5, '2026-02-19 00:00:01'),
                     (2, 1, NULL, 'readable_text', X'7365636f6e642070726576696577', 'text/markdown; charset=utf-8', 14, '2026-02-19 00:00:02'),
                     (3, 1, NULL, 'pdf_source', X'255044462D312E34', 'application/pdf', 8, '2026-02-19 00:00:01'),
-                    (4, 1, NULL, 'pdf_source', X'255044462D312E350A25', 'application/pdf', 10, '2026-02-19 00:00:03');
+                    (4, 1, NULL, 'pdf_source', X'255044462D312E350A25', 'application/pdf', 10, '2026-02-19 00:00:03'),
+                    (5, 1, NULL, 'snapshot_warc', X'57415243', 'application/warc', 4, '2026-02-19 00:00:04'),
+                    (6, 1, NULL, 'snapshot_warc', X'1F8B0800920EA06900030B770C7256284ECC2DC8490500D757B83F0B000000', 'application/warc+gzip', 31, '2026-02-19 00:00:05');
             "#,
         ))
         .await;
@@ -2457,10 +2471,22 @@ mod tests {
         pdf_inline.assert_header("content-type", "application/pdf");
         assert_eq!(pdf_inline.text(), "%PDF-1.5\n%");
 
-        server
-            .get("/hyperlinks/1/artifacts/snapshot_warc")
-            .await
-            .assert_status_not_found();
+        let warc_download = server.get("/hyperlinks/1/artifacts/snapshot_warc").await;
+        warc_download.assert_status_ok();
+        warc_download.assert_header("content-type", "application/warc+gzip");
+        warc_download.assert_header(
+            "content-disposition",
+            "attachment; filename=\"hyperlink-1-snapshot_warc.warc.gz\"",
+        );
+        assert!(warc_download.as_bytes().starts_with(&[0x1f, 0x8b]));
+
+        let warc_inline = server
+            .get("/hyperlinks/1/artifacts/snapshot_warc/inline")
+            .await;
+        warc_inline.assert_status_ok();
+        warc_inline.assert_header("content-type", "application/warc+gzip");
+        assert!(warc_inline.as_bytes().starts_with(&[0x1f, 0x8b]));
+
         server
             .get("/hyperlinks/1/artifacts/not_a_kind")
             .await
@@ -2469,6 +2495,30 @@ mod tests {
             .get("/hyperlinks/999/artifacts/readable_text")
             .await
             .assert_status_not_found();
+    }
+
+    #[tokio::test]
+    async fn artifact_download_endpoint_keeps_legacy_snapshot_warc_extension_for_plain_content_type()
+     {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Example', 'https://example.com', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (1, 1, NULL, 'snapshot_warc', X'57415243', 'application/warc', 4, '2026-02-19 00:00:01');
+            "#,
+        ))
+        .await;
+
+        let download = server.get("/hyperlinks/1/artifacts/snapshot_warc").await;
+        download.assert_status_ok();
+        download.assert_header("content-type", "application/warc");
+        download.assert_header(
+            "content-disposition",
+            "attachment; filename=\"hyperlink-1-snapshot_warc.warc\"",
+        );
+        assert_eq!(download.text(), "WARC");
     }
 
     #[tokio::test]

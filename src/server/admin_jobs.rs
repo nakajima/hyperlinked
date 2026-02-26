@@ -421,6 +421,30 @@ pub(crate) async fn fetch_pending_queue_counts(
     })
 }
 
+pub(crate) async fn set_all_queued_rows_cleared(
+    connection: &DatabaseConnection,
+) -> Result<u64, DbErr> {
+    let now_epoch = now_epoch_seconds();
+    let statement = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "UPDATE jobs
+         SET status = ?,
+             updated_at = ?,
+             last_finished_at = COALESCE(last_finished_at, ?)
+         WHERE job_type = ?
+           AND status = 'queued'"
+            .to_string(),
+        vec![
+            "cleared".into(),
+            now_epoch.into(),
+            now_epoch.into(),
+            processing_task_job_type().into(),
+        ],
+    );
+
+    Ok(connection.execute(statement).await?.rows_affected())
+}
+
 async fn fetch_filtered_total(
     connection: &DatabaseConnection,
     status_filter: QueueStatusFilter,

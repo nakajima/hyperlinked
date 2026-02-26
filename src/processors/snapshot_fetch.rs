@@ -1,13 +1,16 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use futures_util::{SinkExt, StreamExt};
 use image::{GenericImageView, imageops::FilterType};
 use reqwest::{Url, header::CONTENT_TYPE};
 use sea_orm::DatabaseConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::HashSet;
-use std::io::Cursor;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::{net::lookup_host, process::Command, time::sleep};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::{
     entity::{hyperlink, hyperlink_artifact::HyperlinkArtifactKind},
@@ -21,11 +24,13 @@ const MAX_CSS_FILES: usize = 25;
 const MAX_CSS_BYTES_PER_FILE: usize = 1024 * 1024;
 const MAX_TOTAL_CSS_BYTES: usize = 20 * 1024 * 1024;
 
-const SNAPSHOT_CONTENT_TYPE: &str = "application/warc";
+const SNAPSHOT_CONTENT_TYPE: &str = hyperlink_artifact::SNAPSHOT_WARC_GZIP_CONTENT_TYPE;
 const SNAPSHOT_ERROR_CONTENT_TYPE: &str = "application/json";
 const PDF_SOURCE_DEFAULT_CONTENT_TYPE: &str = "application/pdf";
-const SCREENSHOT_CONTENT_TYPE: &str = "image/png";
+const SCREENSHOT_CONTENT_TYPE: &str = "image/webp";
 const SCREENSHOT_ERROR_CONTENT_TYPE: &str = "application/json";
+const SCREENSHOT_WEBP_QUALITY: f32 = 85.0;
+const SCREENSHOT_CDP_WEBP_QUALITY: u8 = 85;
 
 const RETRY_ATTEMPTS: usize = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -42,6 +47,10 @@ const DEFAULT_SCREENSHOT_DESKTOP_VIEWPORT: Viewport = Viewport {
 };
 const DEFAULT_SCREENSHOT_THUMB_SIZE: u32 = 400;
 const DEFAULT_SCREENSHOT_RENDER_WAIT_MS: u64 = 5000;
+const DEFAULT_SCREENSHOT_MIN_PAGE_HEIGHT: u32 = 720;
+const DEFAULT_SCREENSHOT_MAX_PAGE_HEIGHT: u32 = 12_000;
+const CDP_CAPTURE_RELAYOUT_WAIT_MS: u64 = 120;
+const CDP_STARTUP_POLL_INTERVAL_MS: u64 = 75;
 
 pub struct SnapshotFetcher {
     job_id: i32,
@@ -77,11 +86,16 @@ impl Processor for SnapshotFetcher {
         match capture_snapshot(hyperlink.url.as_ref()).await {
             Ok(capture) => {
                 let (kind, payload, content_type) = match capture {
-                    SnapshotCapture::Html { archive } => (
-                        HyperlinkArtifactKind::SnapshotWarc,
-                        archive,
-                        SNAPSHOT_CONTENT_TYPE.to_string(),
-                    ),
+                    SnapshotCapture::Html { archive } => {
+                        let compressed =
+                            hyperlink_artifact::compress_snapshot_warc_payload(&archive)
+                                .map_err(ProcessingError::DB)?;
+                        (
+                            HyperlinkArtifactKind::SnapshotWarc,
+                            compressed,
+                            SNAPSHOT_CONTENT_TYPE.to_string(),
+                        )
+                    }
                     SnapshotCapture::Pdf {
                         payload,
                         content_type,
@@ -115,21 +129,21 @@ impl Processor for SnapshotFetcher {
                             connection,
                             hyperlink_id,
                             Some(self.job_id),
-                            HyperlinkArtifactKind::ScreenshotPng,
-                            capture.desktop_png,
+                            HyperlinkArtifactKind::ScreenshotWebp,
+                            capture.desktop_webp,
                             SCREENSHOT_CONTENT_TYPE,
                         )
                         .await
                         .map_err(ProcessingError::DB)?;
                         output.screenshot_artifact_id = Some(screenshot_artifact.id);
 
-                        if let Some(dark_png) = capture.desktop_dark_png {
+                        if let Some(dark_webp) = capture.desktop_dark_webp {
                             let dark_artifact = hyperlink_artifact::insert(
                                 connection,
                                 hyperlink_id,
                                 Some(self.job_id),
-                                HyperlinkArtifactKind::ScreenshotDarkPng,
-                                dark_png,
+                                HyperlinkArtifactKind::ScreenshotDarkWebp,
+                                dark_webp,
                                 SCREENSHOT_CONTENT_TYPE,
                             )
                             .await
@@ -141,21 +155,21 @@ impl Processor for SnapshotFetcher {
                             connection,
                             hyperlink_id,
                             Some(self.job_id),
-                            HyperlinkArtifactKind::ScreenshotThumbPng,
-                            capture.thumbnail_png,
+                            HyperlinkArtifactKind::ScreenshotThumbWebp,
+                            capture.thumbnail_webp,
                             SCREENSHOT_CONTENT_TYPE,
                         )
                         .await
                         .map_err(ProcessingError::DB)?;
                         output.screenshot_thumb_artifact_id = Some(thumbnail_artifact.id);
 
-                        if let Some(dark_thumbnail_png) = capture.thumbnail_dark_png {
+                        if let Some(dark_thumbnail_webp) = capture.thumbnail_dark_webp {
                             let dark_thumbnail_artifact = hyperlink_artifact::insert(
                                 connection,
                                 hyperlink_id,
                                 Some(self.job_id),
-                                HyperlinkArtifactKind::ScreenshotThumbDarkPng,
-                                dark_thumbnail_png,
+                                HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
+                                dark_thumbnail_webp,
                                 SCREENSHOT_CONTENT_TYPE,
                             )
                             .await
@@ -266,17 +280,162 @@ struct SnapshotCaptureError {
 }
 
 struct ScreenshotCapture {
-    desktop_png: Vec<u8>,
-    desktop_dark_png: Option<Vec<u8>>,
-    thumbnail_png: Vec<u8>,
-    thumbnail_dark_png: Option<Vec<u8>>,
+    desktop_webp: Vec<u8>,
+    desktop_dark_webp: Option<Vec<u8>>,
+    thumbnail_webp: Vec<u8>,
+    thumbnail_dark_webp: Option<Vec<u8>>,
     warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+struct SingleScreenshotCapture {
+    bytes: Vec<u8>,
+    warning: Option<String>,
 }
 
 #[derive(Clone, Copy)]
 struct Viewport {
     width: u32,
     height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PageHeightBounds {
+    min: u32,
+    max: u32,
+}
+
+#[derive(Deserialize)]
+struct ChromiumDebugTarget {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(rename = "webSocketDebuggerUrl")]
+    websocket_debugger_url: Option<String>,
+}
+
+struct CdpSession {
+    stream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    next_id: i64,
+}
+
+impl CdpSession {
+    fn new(
+        stream: tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Self {
+        Self { stream, next_id: 1 }
+    }
+
+    async fn send_command(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let payload = json!({
+            "id": id,
+            "method": method,
+            "params": params
+        })
+        .to_string();
+        self.stream
+            .send(Message::Text(payload.into()))
+            .await
+            .map_err(|err| format!("failed to send chromium devtools command `{method}`: {err}"))?;
+
+        loop {
+            let Some(message) = self.stream.next().await else {
+                return Err(format!(
+                    "chromium devtools connection closed while waiting for `{method}` response"
+                ));
+            };
+
+            match message {
+                Ok(Message::Text(text)) => {
+                    if let Some(result) = handle_cdp_text_message(id, method, text.as_ref())? {
+                        return Ok(result);
+                    }
+                }
+                Ok(Message::Binary(payload)) => {
+                    let text = String::from_utf8(payload.to_vec()).map_err(|err| {
+                        format!(
+                            "chromium devtools sent non-utf8 binary response for `{method}`: {err}"
+                        )
+                    })?;
+                    if let Some(result) = handle_cdp_text_message(id, method, &text)? {
+                        return Ok(result);
+                    }
+                }
+                Ok(Message::Ping(payload)) => {
+                    self.stream
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|err| {
+                            format!("failed to respond to chromium devtools ping: {err}")
+                        })?;
+                }
+                Ok(Message::Close(frame)) => {
+                    return Err(format!(
+                        "chromium devtools closed the connection while waiting for `{method}`: {frame:?}"
+                    ));
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    return Err(format!(
+                        "failed to read chromium devtools response for `{method}`: {err}"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn handle_cdp_text_message(
+    expected_id: i64,
+    method: &str,
+    text: &str,
+) -> Result<Option<Value>, String> {
+    let payload: Value = serde_json::from_str(text).map_err(|err| {
+        format!("failed to decode chromium devtools response for `{method}`: {err}")
+    })?;
+
+    let Some(id) = payload.get("id").and_then(Value::as_i64).or_else(|| {
+        payload
+            .get("id")
+            .and_then(Value::as_u64)
+            .map(|value| value as i64)
+    }) else {
+        return Ok(None);
+    };
+    if id != expected_id {
+        return Ok(None);
+    }
+
+    if let Some(error) = payload.get("error") {
+        return Err(format!(
+            "chromium devtools command `{method}` failed: {}",
+            cdp_error_message(error)
+        ));
+    }
+
+    Ok(Some(payload.get("result").cloned().unwrap_or(Value::Null)))
+}
+
+fn cdp_error_message(error: &Value) -> String {
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown error");
+    let data = error
+        .get("data")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if data.is_empty() {
+        message.to_string()
+    } else {
+        format!("{message}: {data}")
+    }
 }
 
 #[derive(Clone)]
@@ -784,18 +943,26 @@ async fn capture_screenshots(url: &str) -> Result<ScreenshotCapture, String> {
     let parsed = Url::parse(url).map_err(|err| format!("invalid screenshot url: {err}"))?;
     ensure_fetchable_url(&parsed).await?;
 
+    let mut warnings = Vec::new();
     let desktop_viewport = screenshot_desktop_viewport();
-    let desktop_png =
+    let desktop_capture =
         capture_single_screenshot(parsed.as_str(), desktop_viewport, ScreenshotVariant::Light)
             .await?;
-    let thumbnail_png = build_square_thumbnail(&desktop_png, screenshot_thumbnail_size())?;
+    if let Some(warning) = desktop_capture.warning {
+        warnings.push(format!("light screenshot fallback: {warning}"));
+    }
+    let desktop_webp = desktop_capture.bytes;
+    let thumbnail_webp = build_square_thumbnail(&desktop_webp, screenshot_thumbnail_size())?;
 
-    let mut warnings = Vec::new();
-    let (desktop_dark_png, thumbnail_dark_png) = if screenshot_dark_mode_enabled() {
+    let (desktop_dark_webp, thumbnail_dark_webp) = if screenshot_dark_mode_enabled() {
         match capture_single_screenshot(parsed.as_str(), desktop_viewport, ScreenshotVariant::Dark)
             .await
         {
-            Ok(bytes) => {
+            Ok(capture) => {
+                if let Some(warning) = capture.warning {
+                    warnings.push(format!("dark screenshot fallback: {warning}"));
+                }
+                let bytes = capture.bytes;
                 let thumbnail = match build_square_thumbnail(&bytes, screenshot_thumbnail_size()) {
                     Ok(thumbnail) => Some(thumbnail),
                     Err(error) => {
@@ -815,15 +982,345 @@ async fn capture_screenshots(url: &str) -> Result<ScreenshotCapture, String> {
     };
 
     Ok(ScreenshotCapture {
-        desktop_png,
-        desktop_dark_png,
-        thumbnail_png,
-        thumbnail_dark_png,
+        desktop_webp,
+        desktop_dark_webp,
+        thumbnail_webp,
+        thumbnail_dark_webp,
         warnings,
     })
 }
 
 async fn capture_single_screenshot(
+    url: &str,
+    viewport: Viewport,
+    variant: ScreenshotVariant,
+) -> Result<SingleScreenshotCapture, String> {
+    if !screenshot_exact_height_enabled() {
+        return capture_single_screenshot_fixed_viewport(url, viewport, variant)
+            .await
+            .map(|bytes| SingleScreenshotCapture {
+                bytes,
+                warning: None,
+            });
+    }
+
+    match capture_single_screenshot_exact_height(url, viewport, variant).await {
+        Ok(bytes) => Ok(SingleScreenshotCapture {
+            bytes,
+            warning: None,
+        }),
+        Err(exact_error) => resolve_exact_height_capture_result(
+            exact_error,
+            capture_single_screenshot_fixed_viewport(url, viewport, variant).await,
+        ),
+    }
+}
+
+fn resolve_exact_height_capture_result(
+    exact_error: String,
+    fallback_result: Result<Vec<u8>, String>,
+) -> Result<SingleScreenshotCapture, String> {
+    match fallback_result {
+        Ok(bytes) => Ok(SingleScreenshotCapture {
+            bytes,
+            warning: Some(format!(
+                "exact-height capture failed and fixed-viewport fallback was used: {exact_error}"
+            )),
+        }),
+        Err(fallback_error) => Err(format!(
+            "exact-height screenshot capture failed: {exact_error}; fixed-viewport fallback failed: {fallback_error}"
+        )),
+    }
+}
+
+async fn capture_single_screenshot_exact_height(
+    url: &str,
+    viewport: Viewport,
+    variant: ScreenshotVariant,
+) -> Result<Vec<u8>, String> {
+    let timeout = screenshot_timeout();
+    tokio::time::timeout(
+        timeout,
+        capture_single_screenshot_exact_height_inner(url, viewport, variant),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "exact-height screenshot capture timed out after {}s",
+            timeout.as_secs()
+        )
+    })?
+}
+
+async fn capture_single_screenshot_exact_height_inner(
+    url: &str,
+    viewport: Viewport,
+    variant: ScreenshotVariant,
+) -> Result<Vec<u8>, String> {
+    let debug_port = reserve_local_debug_port()?;
+    let profile_dir = screenshot_profile_dir();
+    tokio::fs::create_dir_all(&profile_dir)
+        .await
+        .map_err(|err| {
+            format!(
+                "failed to create temporary chromium profile {}: {err}",
+                profile_dir.display()
+            )
+        })?;
+
+    let mut command = Command::new(screenshot_chromium_path());
+    command
+        .arg("--headless=new")
+        .arg("--disable-gpu")
+        .arg("--hide-scrollbars")
+        .arg("--run-all-compositor-stages-before-draw")
+        .arg(format!(
+            "--virtual-time-budget={}",
+            screenshot_render_wait_ms()
+        ))
+        .arg(format!(
+            "--window-size={},{}",
+            viewport.width,
+            viewport.height.max(1)
+        ))
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg(format!("--remote-debugging-port={debug_port}"))
+        .arg(format!("--user-data-dir={}", profile_dir.display()))
+        .arg("about:blank");
+    if matches!(variant, ScreenshotVariant::Dark) {
+        command
+            .arg("--force-dark-mode")
+            .arg("--enable-features=WebContentsForceDark");
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("failed to launch chromium for exact-height screenshot: {err}"))?;
+
+    let result = capture_screenshot_with_cdp(url, viewport, debug_port).await;
+    let _ = cleanup_exact_height_chromium(&mut child, &profile_dir).await;
+    result
+}
+
+async fn cleanup_exact_height_chromium(
+    child: &mut tokio::process::Child,
+    profile_dir: &PathBuf,
+) -> Result<(), String> {
+    match child.try_wait() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect chromium process status: {error}"
+            ));
+        }
+    }
+
+    match tokio::fs::remove_dir_all(profile_dir).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "failed to clean up temporary chromium profile {}: {error}",
+            profile_dir.display()
+        )),
+    }
+}
+
+async fn capture_screenshot_with_cdp(
+    url: &str,
+    viewport: Viewport,
+    debug_port: u16,
+) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|err| format!("failed to initialize chromium debug client: {err}"))?;
+    let websocket_url = wait_for_chromium_page_websocket_url(&client, debug_port).await?;
+    let (stream, _) = connect_async(websocket_url.as_str())
+        .await
+        .map_err(|err| format!("failed to connect to chromium devtools: {err}"))?;
+    let mut cdp = CdpSession::new(stream);
+
+    cdp.send_command("Page.enable", json!({})).await?;
+    cdp.send_command("Runtime.enable", json!({})).await?;
+    cdp.send_command(
+        "Emulation.setDeviceMetricsOverride",
+        json!({
+            "width": viewport.width,
+            "height": viewport.height.max(1),
+            "deviceScaleFactor": 1,
+            "mobile": false
+        }),
+    )
+    .await?;
+    cdp.send_command("Page.navigate", json!({ "url": url }))
+        .await?;
+
+    sleep(Duration::from_millis(screenshot_render_wait_ms())).await;
+
+    let evaluation = cdp
+        .send_command(
+            "Runtime.evaluate",
+            json!({
+                "expression": page_height_expression(),
+                "returnByValue": true
+            }),
+        )
+        .await?;
+    let page_height = clamp_page_height(
+        parse_page_height_from_evaluation(&evaluation)?,
+        screenshot_page_height_bounds(),
+    );
+
+    cdp.send_command(
+        "Emulation.setDeviceMetricsOverride",
+        json!({
+            "width": viewport.width,
+            "height": page_height,
+            "deviceScaleFactor": 1,
+            "mobile": false
+        }),
+    )
+    .await?;
+    sleep(Duration::from_millis(CDP_CAPTURE_RELAYOUT_WAIT_MS)).await;
+
+    let screenshot = cdp
+        .send_command(
+            "Page.captureScreenshot",
+            json!({
+                "format": "webp",
+                "quality": SCREENSHOT_CDP_WEBP_QUALITY,
+                "fromSurface": true,
+                "captureBeyondViewport": true
+            }),
+        )
+        .await?;
+    parse_webp_from_capture_screenshot_result(&screenshot)
+}
+
+fn reserve_local_debug_port() -> Result<u16, String> {
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .map_err(|err| format!("failed to reserve local chromium debug port: {err}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|err| format!("failed to read chromium debug listener address: {err}"))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
+async fn wait_for_chromium_page_websocket_url(
+    client: &reqwest::Client,
+    debug_port: u16,
+) -> Result<String, String> {
+    let endpoint = format!("http://127.0.0.1:{debug_port}/json/list");
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    loop {
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for chromium devtools endpoint".to_string());
+        }
+
+        if let Ok(response) = client.get(&endpoint).send().await
+            && response.status().is_success()
+            && let Ok(body) = response.bytes().await
+            && let Ok(targets) = serde_json::from_slice::<Vec<ChromiumDebugTarget>>(&body)
+        {
+            if let Some(websocket_url) = targets
+                .into_iter()
+                .find(|target| target.kind == "page")
+                .and_then(|target| target.websocket_debugger_url)
+            {
+                return Ok(websocket_url);
+            }
+        }
+
+        sleep(Duration::from_millis(CDP_STARTUP_POLL_INTERVAL_MS)).await;
+    }
+}
+
+fn page_height_expression() -> &'static str {
+    "Math.max(document.documentElement?.scrollHeight || 0, document.body?.scrollHeight || 0, document.documentElement?.offsetHeight || 0, document.body?.offsetHeight || 0, document.documentElement?.clientHeight || 0)"
+}
+
+fn parse_page_height_from_evaluation(value: &Value) -> Result<u32, String> {
+    if value.get("exceptionDetails").is_some() {
+        return Err("chromium page-height evaluation raised an exception".to_string());
+    }
+
+    let height = value
+        .pointer("/result/value")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| {
+            "chromium page-height evaluation returned a non-numeric result".to_string()
+        })?;
+    if !height.is_finite() || height <= 0.0 {
+        return Err(format!(
+            "chromium page-height evaluation returned an invalid value: {height}"
+        ));
+    }
+
+    let rounded = height.ceil();
+    if rounded > u32::MAX as f64 {
+        return Ok(u32::MAX);
+    }
+    Ok(rounded as u32)
+}
+
+fn parse_webp_from_capture_screenshot_result(value: &Value) -> Result<Vec<u8>, String> {
+    let encoded = value
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "chromium screenshot response was missing webp data".to_string())?;
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|err| format!("failed to decode chromium screenshot payload: {err}"))?;
+    if bytes.is_empty() {
+        return Err("chromium screenshot response contained an empty payload".to_string());
+    }
+    Ok(bytes)
+}
+
+fn clamp_page_height(height: u32, bounds: PageHeightBounds) -> u32 {
+    height.clamp(bounds.min, bounds.max)
+}
+
+fn screenshot_page_height_bounds() -> PageHeightBounds {
+    let min = env_u64(
+        "SCREENSHOT_MIN_PAGE_HEIGHT",
+        DEFAULT_SCREENSHOT_MIN_PAGE_HEIGHT as u64,
+        1,
+        100_000,
+    ) as u32;
+    let max = env_u64(
+        "SCREENSHOT_MAX_PAGE_HEIGHT",
+        DEFAULT_SCREENSHOT_MAX_PAGE_HEIGHT as u64,
+        1,
+        100_000,
+    ) as u32;
+    normalize_page_height_bounds(PageHeightBounds { min, max })
+}
+
+fn normalize_page_height_bounds(bounds: PageHeightBounds) -> PageHeightBounds {
+    if bounds.min <= bounds.max {
+        bounds
+    } else {
+        PageHeightBounds {
+            min: bounds.max,
+            max: bounds.min,
+        }
+    }
+}
+
+fn screenshot_exact_height_enabled() -> bool {
+    env_bool("SCREENSHOT_EXACT_HEIGHT_ENABLED", true)
+}
+
+async fn capture_single_screenshot_fixed_viewport(
     url: &str,
     viewport: Viewport,
     variant: ScreenshotVariant,
@@ -866,16 +1363,16 @@ async fn capture_single_screenshot(
         ));
     }
 
-    let bytes = tokio::fs::read(&screenshot_path)
+    let screenshot_bytes = tokio::fs::read(&screenshot_path)
         .await
         .map_err(|err| format!("failed to read screenshot file {screenshot_path:?}: {err}"))?;
     let _ = tokio::fs::remove_file(&screenshot_path).await;
 
-    if bytes.is_empty() {
+    if screenshot_bytes.is_empty() {
         return Err("chromium created an empty screenshot payload".to_string());
     }
 
-    Ok(bytes)
+    encode_webp_from_image_bytes(&screenshot_bytes)
 }
 
 fn screenshot_temp_path() -> PathBuf {
@@ -884,7 +1381,18 @@ fn screenshot_temp_path() -> PathBuf {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     let jitter = jitter_ms();
-    std::env::temp_dir().join(format!("hyperlinked-screenshot-{nanos:x}-{jitter:x}.png"))
+    std::env::temp_dir().join(format!("hyperlinked-screenshot-{nanos:x}-{jitter:x}.tmp"))
+}
+
+fn screenshot_profile_dir() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let jitter = jitter_ms();
+    std::env::temp_dir().join(format!(
+        "hyperlinked-screenshot-profile-{nanos:x}-{jitter:x}"
+    ))
 }
 
 fn screenshot_chromium_path() -> String {
@@ -997,9 +1505,9 @@ fn parse_viewport_env(key: &str, default: Viewport) -> Viewport {
     Viewport { width, height }
 }
 
-fn build_square_thumbnail(source_png: &[u8], size: u32) -> Result<Vec<u8>, String> {
-    let image = image::load_from_memory(source_png)
-        .map_err(|err| format!("invalid screenshot png: {err}"))?;
+fn build_square_thumbnail(source_image_bytes: &[u8], size: u32) -> Result<Vec<u8>, String> {
+    let image = image::load_from_memory(source_image_bytes)
+        .map_err(|err| format!("invalid screenshot image payload: {err}"))?;
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
         return Err("invalid screenshot dimensions".to_string());
@@ -1010,12 +1518,23 @@ fn build_square_thumbnail(source_png: &[u8], size: u32) -> Result<Vec<u8>, Strin
     let y = 0;
     let square = image.crop_imm(x, y, side, side);
     let thumbnail = square.resize_exact(size, size, FilterType::Lanczos3);
+    encode_webp_from_dynamic_image(&thumbnail)
+}
 
-    let mut buffer = Cursor::new(Vec::new());
-    thumbnail
-        .write_to(&mut buffer, image::ImageFormat::Png)
-        .map_err(|err| format!("failed to encode screenshot thumbnail png: {err}"))?;
-    Ok(buffer.into_inner())
+fn encode_webp_from_image_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let image = image::load_from_memory(bytes)
+        .map_err(|err| format!("invalid screenshot image payload: {err}"))?;
+    encode_webp_from_dynamic_image(&image)
+}
+
+fn encode_webp_from_dynamic_image(image: &image::DynamicImage) -> Result<Vec<u8>, String> {
+    let rgba = image.to_rgba8();
+    let encoded = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
+        .encode(SCREENSHOT_WEBP_QUALITY);
+    if encoded.is_empty() {
+        return Err("webp encoding produced an empty payload".to_string());
+    }
+    Ok(encoded.to_vec())
 }
 
 async fn fetch_response_with_retry(
@@ -1560,6 +2079,60 @@ mod tests {
         <html><body><article>hello world</article></body></html>
         "#;
         assert!(!looks_like_pdf_viewer_dom(html.as_bytes()));
+    }
+
+    #[test]
+    fn normalize_page_height_bounds_swaps_inverted_values() {
+        let bounds = normalize_page_height_bounds(PageHeightBounds {
+            min: 1800,
+            max: 900,
+        });
+        assert_eq!(
+            bounds,
+            PageHeightBounds {
+                min: 900,
+                max: 1800
+            }
+        );
+    }
+
+    #[test]
+    fn clamp_page_height_respects_bounds() {
+        let bounds = PageHeightBounds {
+            min: 800,
+            max: 1600,
+        };
+        assert_eq!(clamp_page_height(200, bounds), 800);
+        assert_eq!(clamp_page_height(1200, bounds), 1200);
+        assert_eq!(clamp_page_height(3200, bounds), 1600);
+    }
+
+    #[test]
+    fn exact_height_fallback_success_returns_warning() {
+        let capture =
+            resolve_exact_height_capture_result("cdp failed".to_string(), Ok(vec![1, 2, 3, 4]))
+                .expect("fallback success should preserve screenshot bytes");
+
+        assert_eq!(capture.bytes, vec![1, 2, 3, 4]);
+        assert!(
+            capture
+                .warning
+                .as_deref()
+                .unwrap_or_default()
+                .contains("fixed-viewport fallback was used")
+        );
+    }
+
+    #[test]
+    fn exact_height_fallback_failure_combines_errors() {
+        let error = resolve_exact_height_capture_result(
+            "cdp failed".to_string(),
+            Err("cli failed".to_string()),
+        )
+        .expect_err("fallback failure should return a combined error");
+
+        assert!(error.contains("cdp failed"));
+        assert!(error.contains("cli failed"));
     }
 
     #[test]

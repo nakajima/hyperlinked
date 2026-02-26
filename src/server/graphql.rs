@@ -554,19 +554,19 @@ fn register_hyperlink_artifact_url_fields(builder: &mut Builder) {
 
     let mut screenshot_url_field = Some(hyperlink_artifact_url_field(
         "screenshotUrl",
-        "screenshot_png",
+        "screenshot_webp",
     ));
     let mut screenshot_dark_url_field = Some(hyperlink_artifact_url_field(
         "screenshotDarkUrl",
-        "screenshot_dark_png",
+        "screenshot_dark_webp",
     ));
     let mut thumbnail_url_field = Some(hyperlink_artifact_url_field(
         "thumbnailUrl",
-        "screenshot_thumb_png",
+        "screenshot_thumb_webp",
     ));
     let mut thumbnail_dark_url_field = Some(hyperlink_artifact_url_field(
         "thumbnailDarkUrl",
-        "screenshot_thumb_dark_png",
+        "screenshot_thumb_dark_webp",
     ));
 
     builder.outputs = builder
@@ -781,25 +781,25 @@ mod tests {
             payload["data"]["hyperlinks"]["nodes"][0]["thumbnailUrl"]
                 .as_str()
                 .unwrap_or("")
-                .ends_with("/hyperlinks/1/artifacts/screenshot_thumb_png/inline")
+                .ends_with("/hyperlinks/1/artifacts/screenshot_thumb_webp/inline")
         );
         assert!(
             payload["data"]["hyperlinks"]["nodes"][0]["thumbnailDarkUrl"]
                 .as_str()
                 .unwrap_or("")
-                .ends_with("/hyperlinks/1/artifacts/screenshot_thumb_dark_png/inline")
+                .ends_with("/hyperlinks/1/artifacts/screenshot_thumb_dark_webp/inline")
         );
         assert!(
             payload["data"]["hyperlinks"]["nodes"][0]["screenshotUrl"]
                 .as_str()
                 .unwrap_or("")
-                .ends_with("/hyperlinks/1/artifacts/screenshot_png/inline")
+                .ends_with("/hyperlinks/1/artifacts/screenshot_webp/inline")
         );
         assert!(
             payload["data"]["hyperlinks"]["nodes"][0]["screenshotDarkUrl"]
                 .as_str()
                 .unwrap_or("")
-                .ends_with("/hyperlinks/1/artifacts/screenshot_dark_png/inline")
+                .ends_with("/hyperlinks/1/artifacts/screenshot_dark_webp/inline")
         );
         assert_eq!(
             payload["data"]["hyperlinks"]["nodes"][0]["sublinks"]["nodes"][0]["id"],

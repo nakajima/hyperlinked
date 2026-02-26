@@ -121,6 +121,33 @@
   </section>
 
   <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
+    <h3>Queue controls</h3>
+    <p class="text-sm text-tertiary">
+      Clear queued processing rows. Running, completed, and failed rows are not changed.
+    </p>
+    <div class="flex flex-row flex-wrap items-center gap-[0.4rem]">
+      <form
+        action="/admin/clear-queue"
+        method="post"
+        data-confirm="Clear all queued queue rows? Running jobs are not affected."
+      >
+        <button type="submit">Clear queue</button>
+      </form>
+      <form
+        action="/admin/pause-queue"
+        method="post"
+        data-confirm="Pause queue workers? Running tasks will finish, and new queued tasks will wait."
+      >
+        <button type="submit">Pause queue</button>
+      </form>
+      <form action="/admin/resume-queue" method="post">
+        <button type="submit">Resume queue</button>
+      </form>
+      <a href="/admin/jobs">Open jobs dashboard</a>
+    </div>
+  </section>
+
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
     <h3>Import / Export</h3>
     <p class="text-sm text-tertiary">
       Download a full ZIP backup (including artifacts) or restore from a previously exported ZIP.
