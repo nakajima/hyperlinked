@@ -1,0 +1,30 @@
+[project]
+name = "hyperlinks"
+# binary = "hyperlinks"  # defaults to project name
+repo = "nakajima/hyperlinks"
+# version_command = "git describe --tags --abbrev=0"
+
+[build]
+command = "cargo build --release --target {target}"
+artifact = "target/{target}/release/{binary}"
+targets = [
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
+[channels.git]
+enabled = true
+
+# [channels.homebrew]
+tap = "nakajima/homebrew-tap"
+formula_name = "hyperlinks"
+
+# [channels.cargo]
+# crate_name = "hyperlinks"
+
+# [channels.curl]
+
+# [channels.nix]
+flake_repo = "nakajima/hyperlinks"  # defaults to project repo
