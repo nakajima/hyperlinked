@@ -1298,6 +1298,8 @@ private struct HyperlinksWidgetEntryView: View {
             .buttonStyle(.plain)
         } else {
             VStack(alignment: .leading, spacing: 8) {
+                Spacer(minLength: 0)
+
                 ForEach(Array(links.enumerated()), id: \.element.id) { index, hyperlink in
                     Link(destination: WidgetTapURLBuilder.destinationURL(for: hyperlink.visitURL)) {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -1327,6 +1329,7 @@ private struct HyperlinksWidgetEntryView: View {
 
                 Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
     }
 
