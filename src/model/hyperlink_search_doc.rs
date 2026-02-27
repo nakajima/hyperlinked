@@ -30,6 +30,22 @@ pub async fn upsert_readable_text(
         .map(|_| ())
 }
 
+pub async fn clear_all_readable_text(connection: &DatabaseConnection) -> Result<u64, DbErr> {
+    let backend = connection.get_database_backend();
+    let result = connection
+        .execute(Statement::from_string(
+            backend,
+            r#"
+                UPDATE hyperlink_search_doc
+                SET readable_text = '', updated_at = CURRENT_TIMESTAMP
+                WHERE readable_text <> ''
+            "#
+            .to_string(),
+        ))
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub fn is_search_doc_missing_error(error: &DbErr) -> bool {
     match error {
         DbErr::Exec(exec_error) => exec_error

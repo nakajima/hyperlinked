@@ -13,6 +13,7 @@ use crate::{
     model::{
         hyperlink::ROOT_DISCOVERY_DEPTH,
         hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
+        settings,
     },
     processors::pipeline::Pipeline,
 };
@@ -66,6 +67,18 @@ pub async fn process_job(
         running_job.id,
         Some(sender.clone()),
     );
+    let collection_settings = settings::load(connection).await?;
+
+    if !collection_settings.allows_processing_job_kind(running_job.kind.clone()) {
+        tracing::info!(
+            hyperlink_id = running_job.hyperlink_id,
+            job_id = running_job.id,
+            kind = ?running_job.kind,
+            "processing skipped because artifact collection for this job kind is disabled"
+        );
+        mark_job_succeeded(connection, running_job.id).await?;
+        return Ok(());
+    }
 
     match running_job.kind {
         HyperlinkProcessingJobKind::Snapshot => match pipeline.process_snapshot(connection).await {
@@ -73,8 +86,12 @@ pub async fn process_job(
                 hyperlink_active_model.updated_at = Set(now_utc());
                 hyperlink_active_model.update(connection).await?;
                 mark_job_succeeded(connection, running_job.id).await?;
-                enqueue_og_job(connection, sender, running_job.hyperlink_id).await?;
-                enqueue_readability_job(connection, sender, running_job.hyperlink_id).await?;
+                if collection_settings.collect_og {
+                    enqueue_og_job(connection, sender, running_job.hyperlink_id).await?;
+                }
+                if collection_settings.collect_readability {
+                    enqueue_readability_job(connection, sender, running_job.hyperlink_id).await?;
+                }
             }
             Err(error) => {
                 mark_job_failed(connection, running_job.id, &error.to_string()).await?;

@@ -27,6 +27,15 @@ pub async fn start(host: &str, port: &str, mdns_options: MdnsOptions) -> Result<
     let connection = crate::db::connection::init()
         .await
         .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    match crate::model::hyperlink_processing_job::delete_stale_active_rows(&connection).await {
+        Ok(repaired) if repaired > 0 => {
+            tracing::info!(repaired, "deleted stale queued/running processing jobs");
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to delete stale queued/running processing jobs");
+        }
+    }
     let processing_queue = crate::queue::ProcessingQueue::connect(connection.clone()).await?;
     processing_queue.spawn_worker(connection.clone()).await?;
     let _artifact_gc_worker = crate::storage::gc::spawn(connection.clone());

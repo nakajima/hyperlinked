@@ -50,7 +50,7 @@ enum ShareOutboxStoreError: LocalizedError {
 
 final class ShareOutboxStore {
     static let appGroupID = "group.fm.folder.hyperlinked"
-    static let databaseFilename = "share_outbox.sqlite"
+    static let databaseFilename = "db.sqlite"
 
     private let dbQueue: DatabaseQueue
 

@@ -84,7 +84,7 @@ struct ConfigurationAppIntent: WidgetConfigurationIntent {
 extension ConfigurationAppIntent {
     static var previewNewestRoot: ConfigurationAppIntent {
         let intent = ConfigurationAppIntent()
-        intent.sortOrder = .newest
+        intent.sortOrder = .oldest
         intent.scope = .rootOnly
         intent.unclickedOnly = false
         return intent

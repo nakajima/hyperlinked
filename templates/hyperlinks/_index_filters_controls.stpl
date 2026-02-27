@@ -1,6 +1,6 @@
 <div class="flex min-w-0 flex-col items-start gap-1 sm:flex-row sm:items-center">
   <label class="text-sm text-tertiary">Status</label>
-  <select data-filter-key="status" class="w-full sm:w-auto">
+  <select data-filter-key="status" class="min-h-7 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.55rem] py-[0.2rem] text-xs leading-4 text-subdued focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 sm:w-auto">
   <option value="all" <% if self.status_select_value() == "all" { %>selected<% } %>>All</option>
   <option value="processing" <% if self.status_select_value() == "processing" { %>selected<% } %>>Processing</option>
   <option value="failed" <% if self.status_select_value() == "failed" { %>selected<% } %>>Failed</option>
@@ -11,7 +11,7 @@
 
 <div class="flex min-w-0 flex-col items-start gap-1 sm:flex-row sm:items-center">
   <label class="text-sm text-tertiary">Type</label>
-  <select data-filter-key="type" class="w-full sm:w-auto">
+  <select data-filter-key="type" class="min-h-7 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.55rem] py-[0.2rem] text-xs leading-4 text-subdued focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 sm:w-auto">
   <option value="all" <% if self.type_select_value() == "all" { %>selected<% } %>>All</option>
   <option value="pdf" <% if self.type_select_value() == "pdf" { %>selected<% } %>>PDF</option>
   <option value="non-pdf" <% if self.type_select_value() == "non-pdf" { %>selected<% } %>>Non-PDF</option>
@@ -20,7 +20,7 @@
 
 <div class="flex min-w-0 flex-col items-start gap-1 sm:flex-row sm:items-center">
   <label class="text-sm text-tertiary">Sort</label>
-  <select data-filter-key="order" class="w-full sm:w-auto">
+  <select data-filter-key="order" class="min-h-7 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.55rem] py-[0.2rem] text-xs leading-4 text-subdued focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 sm:w-auto">
   <option value="newest" <% if self.order_select_value() == "newest" { %>selected<% } %>>Newest</option>
   <% if self.has_free_text() { %>
     <option value="relevance" <% if self.order_select_value() == "relevance" { %>selected<% } %>>Relevance</option>
@@ -36,7 +36,7 @@
   <input
     type="checkbox"
     data-discovered-filter
-    class="h-[1rem] w-[1rem] min-h-0 shrink-0 p-0"
+    class="h-4 w-4 shrink-0 rounded border border-form-control-border bg-form-control accent-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
     <% if self.show_discovered_links_checked() { %>checked<% } %>
   />
   Show discovered links

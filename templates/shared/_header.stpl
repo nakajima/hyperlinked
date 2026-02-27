@@ -1,6 +1,6 @@
-<header class="flex flex-wrap items-center gap-[0.4rem]">
-  <h1 class="flex flex-row items-center gap-[0.4rem]">
-    <a href="/hyperlinks">
+<header class="mx-auto mb-4 flex w-full max-w-[75rem] flex-wrap items-center gap-[0.4rem] bg-surface px-3 py-4 sm:px-6">
+  <h1 class="flex flex-row items-center gap-[0.4rem] font-brand text-5xl leading-none font-bold italic">
+    <a href="/hyperlinks" class="text-accent no-underline hover:text-accent/80">
       <span>Hyperlinked</span>
     </a>
   </h1>
@@ -9,15 +9,15 @@
   <span class="hidden flex-1 sm:block" aria-hidden="true"></span>
 
   <nav class="header-nav-links basis-full flex flex-col gap-1 text-sm sm:basis-auto sm:flex-row sm:flex-wrap sm:justify-end sm:gap-4">
-    <a href="/hyperlinks/new" class="tap-target">Add</a>
-    <a href="/admin/jobs" class="tap-target flex flex-row items-center gap-1">
+    <a href="/hyperlinks/new" class="inline-flex min-h-11 items-center text-accent no-underline hover:text-accent/80">Add</a>
+    <a href="/admin/jobs" class="inline-flex min-h-11 flex-row items-center gap-1 text-accent no-underline hover:text-accent/80">
       <span>Queue</span>
       <span
         data-queue-pending-badge
         class="hidden rounded-[0.25rem] bg-badge px-[0.2rem] py-1 text-[0.5rem] leading-[0.5rem] text-black"
       >0</span>
     </a>
-    <a href="/admin" class="tap-target flex flex-row items-center gap-1">
+    <a href="/admin" class="inline-flex min-h-11 flex-row items-center gap-1 text-accent no-underline hover:text-accent/80">
       <span>Admin</span>
       <% if self.show_admin_warning_badge { %>
         <span

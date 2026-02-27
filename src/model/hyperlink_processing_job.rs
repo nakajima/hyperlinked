@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Statement,
     entity::prelude::{DateTime, DateTimeUtc},
 };
 
@@ -189,6 +190,32 @@ pub fn kind_name(kind: HyperlinkProcessingJobKind) -> &'static str {
     }
 }
 
+fn processing_task_job_type() -> &'static str {
+    std::any::type_name::<crate::queue::ProcessingTask>()
+}
+
+pub async fn delete_stale_active_rows(
+    connection: &DatabaseConnection,
+) -> Result<u64, sea_orm::DbErr> {
+    let statement = Statement::from_sql_and_values(
+        DbBackend::Sqlite,
+        "DELETE FROM hyperlink_processing_job
+         WHERE state IN ('queued', 'running')
+           AND NOT EXISTS (
+               SELECT 1
+               FROM jobs queue_job
+               WHERE queue_job.job_type = ?
+                 AND queue_job.status IN ('queued', 'processing')
+                 AND json_valid(queue_job.payload)
+                 AND CAST(json_extract(queue_job.payload, '$.processing_job_id') AS INTEGER) = hyperlink_processing_job.id
+           )"
+            .to_string(),
+        vec![processing_task_job_type().into()],
+    );
+
+    Ok(connection.execute(statement).await?.rows_affected())
+}
+
 fn now_utc() -> DateTime {
     DateTimeUtc::from(std::time::SystemTime::now()).naive_utc()
 }
@@ -317,5 +344,63 @@ mod tests {
                 .iter()
                 .any(|job| job.kind == HyperlinkProcessingJobKind::Readability)
         );
+    }
+
+    #[tokio::test]
+    async fn delete_stale_active_rows_only_removes_orphaned_active_rows() {
+        let connection = new_connection().await;
+        crate::server::test_support::initialize_queue_jobs_schema(&connection).await;
+
+        connection
+            .execute_unprepared(
+                r#"
+                INSERT INTO hyperlink_processing_job (id, hyperlink_id, kind, state, error_message, queued_at, started_at, finished_at, created_at, updated_at)
+                VALUES
+                    (1, 1, 'snapshot', 'queued', NULL, '2026-02-27 00:00:01', NULL, NULL, '2026-02-27 00:00:01', '2026-02-27 00:00:01'),
+                    (2, 2, 'snapshot', 'running', NULL, '2026-02-27 00:00:02', '2026-02-27 00:00:03', NULL, '2026-02-27 00:00:02', '2026-02-27 00:00:03'),
+                    (3, 3, 'snapshot', 'succeeded', NULL, '2026-02-27 00:00:04', '2026-02-27 00:00:05', '2026-02-27 00:00:06', '2026-02-27 00:00:04', '2026-02-27 00:00:06');
+                "#,
+            )
+            .await
+            .expect("processing job seed data should insert");
+
+        let queue_seed = format!(
+            "
+            INSERT INTO jobs (id, job_type, payload, status, attempts, max_attempts, available_at, locked_at, lock_token, last_error, created_at, updated_at, completed_at, first_enqueued_at, last_enqueued_at, first_started_at, last_started_at, last_finished_at, queued_ms_total, queued_ms_last, processing_ms_total, processing_ms_last)
+            VALUES
+                (10, '{job_type}', '{{\"processing_job_id\":1}}', 'queued', 0, 3, 0, NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, 0, NULL),
+                (11, '{job_type}', '{{\"processing_job_id\":999}}', 'processing', 0, 3, 0, NULL, NULL, NULL, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, 0, NULL);
+            ",
+            job_type = processing_task_job_type()
+        );
+        connection
+            .execute_unprepared(queue_seed.trim())
+            .await
+            .expect("queue seed data should insert");
+
+        let affected = delete_stale_active_rows(&connection)
+            .await
+            .expect("stale repair should succeed");
+        assert_eq!(affected, 1);
+
+        let stale_row = hyperlink_processing_job::Entity::find_by_id(2)
+            .one(&connection)
+            .await
+            .expect("stale row query should succeed");
+        assert!(stale_row.is_none());
+
+        let active_row = hyperlink_processing_job::Entity::find_by_id(1)
+            .one(&connection)
+            .await
+            .expect("active row query should succeed")
+            .expect("active row should exist");
+        assert_eq!(active_row.state, HyperlinkProcessingJobState::Queued);
+
+        let completed_row = hyperlink_processing_job::Entity::find_by_id(3)
+            .one(&connection)
+            .await
+            .expect("completed row query should succeed")
+            .expect("completed row should exist");
+        assert_eq!(completed_row.state, HyperlinkProcessingJobState::Succeeded);
     }
 }

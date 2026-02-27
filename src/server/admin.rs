@@ -7,7 +7,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Multipart, State},
+    extract::{Form, Multipart, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing,
@@ -31,6 +31,8 @@ use crate::{
     model::{
         hyperlink_artifact as hyperlink_artifact_model,
         hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
+        hyperlink_search_doc,
+        settings::{self, ArtifactCollectionSettings},
     },
     server::{
         admin_backup::{
@@ -75,6 +77,10 @@ pub fn routes() -> Router<Context> {
         .route("/admin/pause-queue", routing::post(pause_queue))
         .route("/admin/resume-queue", routing::post(resume_queue))
         .route(
+            "/admin/artifact-settings",
+            routing::post(update_artifact_settings),
+        )
+        .route(
             "/admin/process-missing-artifacts",
             routing::post(process_missing_artifacts),
         )
@@ -104,6 +110,7 @@ struct MissingArtifactsSummary {
 #[derive(Default)]
 struct ArtifactPresence {
     has_source: bool,
+    has_screenshot: bool,
     has_og_meta: bool,
     has_readable_text: bool,
     has_readable_meta: bool,
@@ -112,8 +119,26 @@ struct ArtifactPresence {
 struct MissingArtifactsPlan {
     summary: MissingArtifactsSummary,
     snapshot_hyperlink_ids: Vec<i32>,
+    screenshot_hyperlink_ids: Vec<i32>,
     og_hyperlink_ids: Vec<i32>,
     readability_hyperlink_ids: Vec<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtifactSettingsForm {
+    collect_source: Option<String>,
+    collect_screenshots: Option<String>,
+    collect_screenshot_dark: Option<String>,
+    collect_og: Option<String>,
+    collect_readability: Option<String>,
+    delete_source_on_disable: Option<String>,
+    delete_screenshots_on_disable: Option<String>,
+    delete_og_on_disable: Option<String>,
+    delete_readability_on_disable: Option<String>,
+    queue_source_on_enable: Option<String>,
+    queue_screenshots_on_enable: Option<String>,
+    queue_og_on_enable: Option<String>,
+    queue_readability_on_enable: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -250,7 +275,17 @@ struct BuiltBackupZip {
 }
 
 async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
-    let plan = match build_missing_artifacts_plan(&state.connection).await {
+    let artifact_settings = match settings::load(&state.connection).await {
+        Ok(settings) => settings,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load artifact settings: {err}"),
+            );
+        }
+    };
+
+    let plan = match build_missing_artifacts_plan(&state.connection, &artifact_settings).await {
         Ok(plan) => plan,
         Err(err) => {
             return response_error(
@@ -274,7 +309,7 @@ async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
 
     views::render_html_page_with_flash(
         "Admin",
-        render_index(&plan.summary, &stats, &chromium, &fonts),
+        render_index(&plan.summary, &stats, &artifact_settings, &chromium, &fonts),
         Flash::from_headers(&headers),
     )
 }
@@ -430,7 +465,17 @@ async fn import_hyperlinks(
 }
 
 async fn process_missing_artifacts(State(state): State<Context>, headers: HeaderMap) -> Response {
-    let plan = match build_missing_artifacts_plan(&state.connection).await {
+    let artifact_settings = match settings::load(&state.connection).await {
+        Ok(settings) => settings,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load artifact settings: {err}"),
+            );
+        }
+    };
+
+    let plan = match build_missing_artifacts_plan(&state.connection, &artifact_settings).await {
         Ok(plan) => plan,
         Err(err) => {
             return response_error(
@@ -443,6 +488,7 @@ async fn process_missing_artifacts(State(state): State<Context>, headers: Header
     let result = match execute_missing_artifacts_plan(
         &state.connection,
         state.processing_queue.as_ref(),
+        &artifact_settings,
         plan,
     )
     .await
@@ -463,6 +509,263 @@ async fn process_missing_artifacts(State(state): State<Context>, headers: Header
         format!(
             "Queued {} snapshot job(s), {} og job(s), and {} readability job(s).",
             result.snapshot_queued, result.og_queued, result.readability_queued
+        ),
+    )
+}
+
+async fn update_artifact_settings(
+    State(state): State<Context>,
+    headers: HeaderMap,
+    Form(form): Form<ArtifactSettingsForm>,
+) -> Response {
+    let current_settings = match settings::load(&state.connection).await {
+        Ok(settings) => settings,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load current artifact settings: {err}"),
+            );
+        }
+    };
+
+    let requested_settings = ArtifactCollectionSettings {
+        collect_source: checkbox_checked(&form.collect_source),
+        collect_screenshots: checkbox_checked(&form.collect_screenshots),
+        collect_screenshot_dark: checkbox_checked(&form.collect_screenshot_dark),
+        collect_og: checkbox_checked(&form.collect_og),
+        collect_readability: checkbox_checked(&form.collect_readability),
+    };
+
+    let updated_settings = match settings::save(&state.connection, requested_settings).await {
+        Ok(settings) => settings,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to save artifact settings: {err}"),
+            );
+        }
+    };
+
+    let source_disabled = current_settings.collect_source && !updated_settings.collect_source;
+    let source_enabled = !current_settings.collect_source && updated_settings.collect_source;
+    let screenshots_disabled =
+        current_settings.collect_screenshots && !updated_settings.collect_screenshots;
+    let screenshots_enabled =
+        !current_settings.collect_screenshots && updated_settings.collect_screenshots;
+    let og_disabled = current_settings.collect_og && !updated_settings.collect_og;
+    let og_enabled = !current_settings.collect_og && updated_settings.collect_og;
+    let readability_disabled =
+        current_settings.collect_readability && !updated_settings.collect_readability;
+    let readability_enabled =
+        !current_settings.collect_readability && updated_settings.collect_readability;
+
+    let mut deleted_source = 0u64;
+    let mut deleted_screenshots = 0u64;
+    let mut deleted_og = 0u64;
+    let mut deleted_readability = 0u64;
+
+    if source_disabled && checkbox_checked(&form.delete_source_on_disable) {
+        deleted_source = match delete_source_artifacts(&state.connection).await {
+            Ok(count) => count,
+            Err(err) => {
+                return response_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to delete source artifacts: {err}"),
+                );
+            }
+        };
+    }
+
+    if screenshots_disabled && checkbox_checked(&form.delete_screenshots_on_disable) {
+        deleted_screenshots = match delete_screenshot_artifacts(&state.connection).await {
+            Ok(count) => count,
+            Err(err) => {
+                return response_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to delete screenshot artifacts: {err}"),
+                );
+            }
+        };
+    }
+
+    if og_disabled && checkbox_checked(&form.delete_og_on_disable) {
+        deleted_og = match delete_og_artifacts_and_clear_fields(&state.connection).await {
+            Ok(count) => count,
+            Err(err) => {
+                return response_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to delete open graph artifacts: {err}"),
+                );
+            }
+        };
+    }
+
+    if readability_disabled && checkbox_checked(&form.delete_readability_on_disable) {
+        deleted_readability =
+            match delete_readability_artifacts_and_clear_search(&state.connection).await {
+                Ok(count) => count,
+                Err(err) => {
+                    return response_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to delete readability artifacts: {err}"),
+                    );
+                }
+            };
+    }
+
+    let queue_source = source_enabled && checkbox_checked(&form.queue_source_on_enable);
+    let queue_screenshots =
+        screenshots_enabled && checkbox_checked(&form.queue_screenshots_on_enable);
+    let queue_og = og_enabled && checkbox_checked(&form.queue_og_on_enable);
+    let queue_readability =
+        readability_enabled && checkbox_checked(&form.queue_readability_on_enable);
+    let should_queue_backfill = queue_source || queue_screenshots || queue_og || queue_readability;
+
+    let mut queued_snapshot = 0usize;
+    let mut queued_screenshots = 0usize;
+    let mut queued_og = 0usize;
+    let mut queued_readability = 0usize;
+    let mut queue_warning = None::<String>;
+
+    if should_queue_backfill {
+        let Some(queue) = state.processing_queue.as_ref() else {
+            queue_warning = Some(
+                "Backfill was requested, but queue workers are unavailable in this environment."
+                    .to_string(),
+            );
+            return redirect_with_flash(
+                &headers,
+                "/admin",
+                FlashName::Notice,
+                build_artifact_settings_message(
+                    deleted_source,
+                    deleted_screenshots,
+                    deleted_og,
+                    deleted_readability,
+                    queued_snapshot,
+                    queued_screenshots,
+                    queued_og,
+                    queued_readability,
+                    queue_warning.as_deref(),
+                ),
+            );
+        };
+
+        if queue_source || queue_og || queue_readability {
+            let plan =
+                match build_missing_artifacts_plan(&state.connection, &updated_settings).await {
+                    Ok(plan) => plan,
+                    Err(err) => {
+                        return response_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("failed to build missing-artifact backfill plan: {err}"),
+                        );
+                    }
+                };
+
+            if queue_source {
+                queued_snapshot = match enqueue_hyperlink_jobs(
+                    &state.connection,
+                    Some(queue),
+                    HyperlinkProcessingJobKind::Snapshot,
+                    &plan.snapshot_hyperlink_ids,
+                )
+                .await
+                {
+                    Ok(count) => count,
+                    Err(err) => {
+                        return response_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("failed to queue source backfill jobs: {err}"),
+                        );
+                    }
+                };
+            }
+
+            if queue_og {
+                queued_og = match enqueue_hyperlink_jobs(
+                    &state.connection,
+                    Some(queue),
+                    HyperlinkProcessingJobKind::Og,
+                    &plan.og_hyperlink_ids,
+                )
+                .await
+                {
+                    Ok(count) => count,
+                    Err(err) => {
+                        return response_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("failed to queue open graph backfill jobs: {err}"),
+                        );
+                    }
+                };
+            }
+
+            if queue_readability {
+                queued_readability = match enqueue_hyperlink_jobs(
+                    &state.connection,
+                    Some(queue),
+                    HyperlinkProcessingJobKind::Readability,
+                    &plan.readability_hyperlink_ids,
+                )
+                .await
+                {
+                    Ok(count) => count,
+                    Err(err) => {
+                        return response_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("failed to queue readability backfill jobs: {err}"),
+                        );
+                    }
+                };
+            }
+        }
+
+        if queue_screenshots {
+            let missing_screenshot_hyperlink_ids =
+                match build_missing_screenshot_hyperlink_ids(&state.connection).await {
+                    Ok(ids) => ids,
+                    Err(err) => {
+                        return response_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("failed to build screenshot backfill plan: {err}"),
+                        );
+                    }
+                };
+
+            queued_screenshots = match enqueue_hyperlink_jobs(
+                &state.connection,
+                Some(queue),
+                HyperlinkProcessingJobKind::Snapshot,
+                &missing_screenshot_hyperlink_ids,
+            )
+            .await
+            {
+                Ok(count) => count,
+                Err(err) => {
+                    return response_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to queue screenshot backfill jobs: {err}"),
+                    );
+                }
+            };
+        }
+    }
+
+    redirect_with_flash(
+        &headers,
+        "/admin",
+        FlashName::Notice,
+        build_artifact_settings_message(
+            deleted_source,
+            deleted_screenshots,
+            deleted_og,
+            deleted_readability,
+            queued_snapshot,
+            queued_screenshots,
+            queued_og,
+            queued_readability,
+            queue_warning.as_deref(),
         ),
     )
 }
@@ -1169,8 +1472,173 @@ fn parse_naive_datetime(value: &str) -> Option<sea_orm::entity::prelude::DateTim
     None
 }
 
+fn checkbox_checked(value: &Option<String>) -> bool {
+    value.is_some()
+}
+
+fn build_artifact_settings_message(
+    deleted_source: u64,
+    deleted_screenshots: u64,
+    deleted_og: u64,
+    deleted_readability: u64,
+    queued_snapshot: usize,
+    queued_screenshots: usize,
+    queued_og: usize,
+    queued_readability: usize,
+    queue_warning: Option<&str>,
+) -> String {
+    let mut parts = vec!["Updated artifact settings.".to_string()];
+
+    if deleted_source > 0 || deleted_screenshots > 0 || deleted_og > 0 || deleted_readability > 0 {
+        parts.push(format!(
+            "Deleted source={deleted_source}, screenshots={deleted_screenshots}, og={deleted_og}, readability={deleted_readability}."
+        ));
+    }
+
+    if queued_snapshot > 0 || queued_screenshots > 0 || queued_og > 0 || queued_readability > 0 {
+        parts.push(format!(
+            "Queued backfill snapshot={queued_snapshot}, screenshots={queued_screenshots}, og={queued_og}, readability={queued_readability}."
+        ));
+    }
+
+    if let Some(warning) = queue_warning {
+        parts.push(warning.to_string());
+    }
+
+    parts.join(" ")
+}
+
+async fn enqueue_hyperlink_jobs(
+    connection: &DatabaseConnection,
+    queue: Option<&ProcessingQueueSender>,
+    kind: HyperlinkProcessingJobKind,
+    hyperlink_ids: &[i32],
+) -> Result<usize, DbErr> {
+    let mut queued = 0usize;
+    for hyperlink_id in hyperlink_ids {
+        hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
+            connection,
+            *hyperlink_id,
+            kind.clone(),
+            queue,
+        )
+        .await?;
+        queued += 1;
+    }
+    Ok(queued)
+}
+
+async fn delete_source_artifacts(connection: &DatabaseConnection) -> Result<u64, DbErr> {
+    delete_artifacts_for_kinds(
+        connection,
+        &[
+            HyperlinkArtifactKind::SnapshotWarc,
+            HyperlinkArtifactKind::PdfSource,
+            HyperlinkArtifactKind::SnapshotError,
+        ],
+    )
+    .await
+}
+
+async fn delete_screenshot_artifacts(connection: &DatabaseConnection) -> Result<u64, DbErr> {
+    delete_artifacts_for_kinds(
+        connection,
+        &[
+            HyperlinkArtifactKind::ScreenshotWebp,
+            HyperlinkArtifactKind::ScreenshotThumbWebp,
+            HyperlinkArtifactKind::ScreenshotDarkWebp,
+            HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
+            HyperlinkArtifactKind::ScreenshotError,
+        ],
+    )
+    .await
+}
+
+async fn delete_og_artifacts_and_clear_fields(
+    connection: &DatabaseConnection,
+) -> Result<u64, DbErr> {
+    let deleted = delete_artifacts_for_kinds(
+        connection,
+        &[
+            HyperlinkArtifactKind::OgMeta,
+            HyperlinkArtifactKind::OgImage,
+            HyperlinkArtifactKind::OgError,
+        ],
+    )
+    .await?;
+    clear_hyperlink_og_fields(connection).await?;
+    Ok(deleted)
+}
+
+async fn delete_readability_artifacts_and_clear_search(
+    connection: &DatabaseConnection,
+) -> Result<u64, DbErr> {
+    let deleted = delete_artifacts_for_kinds(
+        connection,
+        &[
+            HyperlinkArtifactKind::ReadableText,
+            HyperlinkArtifactKind::ReadableMeta,
+            HyperlinkArtifactKind::ReadableError,
+        ],
+    )
+    .await?;
+
+    match hyperlink_search_doc::clear_all_readable_text(connection).await {
+        Ok(_) => {}
+        Err(error) if hyperlink_search_doc::is_search_doc_missing_error(&error) => {}
+        Err(error) => return Err(error),
+    }
+
+    Ok(deleted)
+}
+
+async fn delete_artifacts_for_kinds(
+    connection: &DatabaseConnection,
+    kinds: &[HyperlinkArtifactKind],
+) -> Result<u64, DbErr> {
+    if kinds.is_empty() {
+        return Ok(0);
+    }
+
+    let result = hyperlink_artifact::Entity::delete_many()
+        .filter(hyperlink_artifact::Column::Kind.is_in(kinds.to_vec()))
+        .exec(connection)
+        .await?;
+    Ok(result.rows_affected)
+}
+
+async fn clear_hyperlink_og_fields(connection: &DatabaseConnection) -> Result<u64, DbErr> {
+    let backend = connection.get_database_backend();
+    let result = connection
+        .execute(Statement::from_string(
+            backend,
+            r#"
+                UPDATE hyperlink
+                SET
+                    og_title = NULL,
+                    og_description = NULL,
+                    og_type = NULL,
+                    og_url = NULL,
+                    og_image_url = NULL,
+                    og_site_name = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE
+                    og_title IS NOT NULL
+                    OR og_description IS NOT NULL
+                    OR og_type IS NOT NULL
+                    OR og_url IS NOT NULL
+                    OR og_image_url IS NOT NULL
+                    OR og_site_name IS NOT NULL
+            "#
+            .to_string(),
+        ))
+        .await?;
+    Ok(result.rows_affected())
+}
+
 async fn build_missing_artifacts_plan(
     connection: &DatabaseConnection,
+    artifact_settings: &ArtifactCollectionSettings,
 ) -> Result<MissingArtifactsPlan, sea_orm::DbErr> {
     let hyperlink_ids = hyperlink::Entity::find()
         .select_only()
@@ -1188,6 +1656,7 @@ async fn build_missing_artifacts_plan(
         return Ok(MissingArtifactsPlan {
             summary,
             snapshot_hyperlink_ids: Vec::new(),
+            screenshot_hyperlink_ids: Vec::new(),
             og_hyperlink_ids: Vec::new(),
             readability_hyperlink_ids: Vec::new(),
         });
@@ -1201,6 +1670,10 @@ async fn build_missing_artifacts_plan(
         .filter(hyperlink_artifact::Column::Kind.is_in([
             HyperlinkArtifactKind::SnapshotWarc,
             HyperlinkArtifactKind::PdfSource,
+            HyperlinkArtifactKind::ScreenshotWebp,
+            HyperlinkArtifactKind::ScreenshotThumbWebp,
+            HyperlinkArtifactKind::ScreenshotDarkWebp,
+            HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
             HyperlinkArtifactKind::OgMeta,
             HyperlinkArtifactKind::ReadableText,
             HyperlinkArtifactKind::ReadableMeta,
@@ -1218,6 +1691,10 @@ async fn build_missing_artifacts_plan(
             HyperlinkArtifactKind::SnapshotWarc | HyperlinkArtifactKind::PdfSource => {
                 presence.has_source = true;
             }
+            HyperlinkArtifactKind::ScreenshotWebp
+            | HyperlinkArtifactKind::ScreenshotThumbWebp
+            | HyperlinkArtifactKind::ScreenshotDarkWebp
+            | HyperlinkArtifactKind::ScreenshotThumbDarkWebp => presence.has_screenshot = true,
             HyperlinkArtifactKind::OgMeta => {
                 presence.has_og_meta = true;
             }
@@ -1268,6 +1745,7 @@ async fn build_missing_artifacts_plan(
     }
 
     let mut snapshot_hyperlink_ids = Vec::new();
+    let mut screenshot_hyperlink_ids = Vec::new();
     let mut og_hyperlink_ids = Vec::new();
     let mut readability_hyperlink_ids = Vec::new();
 
@@ -1276,21 +1754,33 @@ async fn build_missing_artifacts_plan(
         let has_source = presence.is_some_and(|presence| presence.has_source);
         if !has_source {
             summary.missing_source += 1;
-            if snapshot_active_hyperlinks.contains(&hyperlink_id) {
-                summary.snapshot_already_processing += 1;
-            } else {
-                snapshot_hyperlink_ids.push(hyperlink_id);
+            if artifact_settings.collect_source {
+                if snapshot_active_hyperlinks.contains(&hyperlink_id) {
+                    summary.snapshot_already_processing += 1;
+                } else {
+                    snapshot_hyperlink_ids.push(hyperlink_id);
+                }
             }
             continue;
+        }
+
+        let has_screenshot = presence.is_some_and(|presence| presence.has_screenshot);
+        if artifact_settings.collect_screenshots
+            && !has_screenshot
+            && !snapshot_active_hyperlinks.contains(&hyperlink_id)
+        {
+            screenshot_hyperlink_ids.push(hyperlink_id);
         }
 
         let has_og_meta = presence.is_some_and(|presence| presence.has_og_meta);
         if !has_og_meta {
             summary.missing_og += 1;
-            if og_active_hyperlinks.contains(&hyperlink_id) {
-                summary.og_already_processing += 1;
-            } else {
-                og_hyperlink_ids.push(hyperlink_id);
+            if artifact_settings.collect_og {
+                if og_active_hyperlinks.contains(&hyperlink_id) {
+                    summary.og_already_processing += 1;
+                } else {
+                    og_hyperlink_ids.push(hyperlink_id);
+                }
             }
         }
 
@@ -1298,10 +1788,12 @@ async fn build_missing_artifacts_plan(
             .is_some_and(|presence| presence.has_readable_text && presence.has_readable_meta);
         if !has_readable_artifacts {
             summary.missing_readability += 1;
-            if readability_active_hyperlinks.contains(&hyperlink_id) {
-                summary.readability_already_processing += 1;
-            } else {
-                readability_hyperlink_ids.push(hyperlink_id);
+            if artifact_settings.collect_readability {
+                if readability_active_hyperlinks.contains(&hyperlink_id) {
+                    summary.readability_already_processing += 1;
+                } else {
+                    readability_hyperlink_ids.push(hyperlink_id);
+                }
             }
         }
     }
@@ -1313,6 +1805,7 @@ async fn build_missing_artifacts_plan(
     Ok(MissingArtifactsPlan {
         summary,
         snapshot_hyperlink_ids,
+        screenshot_hyperlink_ids,
         og_hyperlink_ids,
         readability_hyperlink_ids,
     })
@@ -1321,41 +1814,65 @@ async fn build_missing_artifacts_plan(
 async fn execute_missing_artifacts_plan(
     connection: &DatabaseConnection,
     queue: Option<&ProcessingQueueSender>,
+    artifact_settings: &ArtifactCollectionSettings,
     plan: MissingArtifactsPlan,
 ) -> Result<LastRunSummary, sea_orm::DbErr> {
-    for hyperlink_id in &plan.snapshot_hyperlink_ids {
-        hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
+    let snapshot_queued = if artifact_settings.collect_source {
+        enqueue_hyperlink_jobs(
             connection,
-            *hyperlink_id,
+            queue,
             HyperlinkProcessingJobKind::Snapshot,
-            queue,
+            &plan.snapshot_hyperlink_ids,
         )
-        .await?;
-    }
-    for hyperlink_id in &plan.og_hyperlink_ids {
-        hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
+        .await?
+    } else {
+        0
+    };
+    let og_queued = if artifact_settings.collect_og {
+        enqueue_hyperlink_jobs(
             connection,
-            *hyperlink_id,
+            queue,
             HyperlinkProcessingJobKind::Og,
-            queue,
+            &plan.og_hyperlink_ids,
         )
-        .await?;
-    }
-    for hyperlink_id in &plan.readability_hyperlink_ids {
-        hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
+        .await?
+    } else {
+        0
+    };
+    let readability_queued = if artifact_settings.collect_readability {
+        enqueue_hyperlink_jobs(
             connection,
-            *hyperlink_id,
-            HyperlinkProcessingJobKind::Readability,
             queue,
+            HyperlinkProcessingJobKind::Readability,
+            &plan.readability_hyperlink_ids,
         )
-        .await?;
-    }
+        .await?
+    } else {
+        0
+    };
 
     Ok(LastRunSummary {
-        snapshot_queued: plan.snapshot_hyperlink_ids.len(),
-        og_queued: plan.og_hyperlink_ids.len(),
-        readability_queued: plan.readability_hyperlink_ids.len(),
+        snapshot_queued,
+        og_queued,
+        readability_queued,
     })
+}
+
+async fn build_missing_screenshot_hyperlink_ids(
+    connection: &DatabaseConnection,
+) -> Result<Vec<i32>, DbErr> {
+    let plan = build_missing_artifacts_plan(
+        connection,
+        &ArtifactCollectionSettings {
+            collect_source: true,
+            collect_screenshots: true,
+            collect_screenshot_dark: true,
+            collect_og: false,
+            collect_readability: false,
+        },
+    )
+    .await?;
+    Ok(plan.screenshot_hyperlink_ids)
 }
 
 async fn build_dataset_stats(
@@ -1518,6 +2035,7 @@ fn file_size_bytes(path: &Path) -> Result<u64, DbErr> {
 struct AdminIndexTemplate<'a> {
     summary: &'a MissingArtifactsSummary,
     stats: &'a AdminDatasetStats,
+    artifact_settings: &'a ArtifactCollectionSettings,
     has_missing_artifacts_to_process: bool,
     chromium: &'a ChromiumDiagnostics,
     fonts: &'a FontDiagnostics,
@@ -1544,12 +2062,14 @@ impl AdminIndexTemplate<'_> {
 fn render_index(
     summary: &MissingArtifactsSummary,
     stats: &AdminDatasetStats,
+    artifact_settings: &ArtifactCollectionSettings,
     chromium: &ChromiumDiagnostics,
     fonts: &FontDiagnostics,
 ) -> Result<String, sailfish::RenderError> {
     AdminIndexTemplate {
         summary,
         stats,
+        artifact_settings,
         has_missing_artifacts_to_process: summary.snapshot_will_queue > 0
             || summary.og_will_queue > 0
             || summary.readability_will_queue > 0,
@@ -1616,8 +2136,14 @@ mod tests {
         };
         let fonts = FontDiagnostics::default();
 
-        let html = render_index(&summary, &stats, &chromium, &fonts)
-            .expect("admin template should render");
+        let html = render_index(
+            &summary,
+            &stats,
+            &ArtifactCollectionSettings::default(),
+            &chromium,
+            &fonts,
+        )
+        .expect("admin template should render");
         assert!(html.contains("Screenshot browser setup required"));
         assert!(html.contains("CHROMIUM_PATH"));
     }
@@ -1633,8 +2159,14 @@ mod tests {
         };
         let fonts = FontDiagnostics::default();
 
-        let html = render_index(&summary, &stats, &chromium, &fonts)
-            .expect("admin template should render");
+        let html = render_index(
+            &summary,
+            &stats,
+            &ArtifactCollectionSettings::default(),
+            &chromium,
+            &fonts,
+        )
+        .expect("admin template should render");
         assert!(!html.contains("Screenshot browser setup required"));
     }
 
@@ -1667,11 +2199,101 @@ mod tests {
             fontconfig_error: None,
         };
 
-        let html = render_index(&summary, &stats, &chromium, &fonts)
-            .expect("admin template should render");
+        let html = render_index(
+            &summary,
+            &stats,
+            &ArtifactCollectionSettings::default(),
+            &chromium,
+            &fonts,
+        )
+        .expect("admin template should render");
         assert!(html.contains("Screenshot font setup recommended"));
         assert!(html.contains("Noto Color Emoji"));
         assert!(html.contains("fontconfig"));
+    }
+
+    #[tokio::test]
+    async fn artifact_settings_disable_does_not_delete_without_explicit_checkbox() {
+        let (server, connection) = new_server(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, og_title, og_description, og_type, og_url, og_image_url, og_site_name, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Example', 'https://example.com', 'https://example.com', 'OG Title', 'OG Description', 'article', 'https://example.com/post', 'https://example.com/image.png', 'Example', 0, 0, NULL, '2026-02-22 00:00:00', '2026-02-22 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES (1, 1, NULL, 'og_meta', X'7B7D', 'application/json', 2, '2026-02-22 00:01:00');
+            "#,
+        )
+        .await;
+
+        let response = server
+            .post("/admin/artifact-settings")
+            .text(artifact_settings_disable_og_form(false))
+            .content_type("application/x-www-form-urlencoded")
+            .await;
+        response.assert_status_see_other();
+        response.assert_header("location", "/admin");
+
+        let og_artifact_count = hyperlink_artifact::Entity::find()
+            .filter(hyperlink_artifact::Column::Kind.eq(HyperlinkArtifactKind::OgMeta))
+            .count(&connection)
+            .await
+            .expect("og artifact count should load");
+        assert_eq!(og_artifact_count, 1);
+    }
+
+    #[tokio::test]
+    async fn artifact_settings_disable_with_delete_checkbox_removes_og_artifacts() {
+        let (server, connection) = new_server(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, og_title, og_description, og_type, og_url, og_image_url, og_site_name, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Example', 'https://example.com', 'https://example.com', 'OG Title', 'OG Description', 'article', 'https://example.com/post', 'https://example.com/image.png', 'Example', 0, 0, NULL, '2026-02-22 00:00:00', '2026-02-22 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (1, 1, NULL, 'og_meta', X'7B7D', 'application/json', 2, '2026-02-22 00:01:00'),
+                    (2, 1, NULL, 'og_image', X'89504E47', 'image/png', 4, '2026-02-22 00:01:00');
+            "#,
+        )
+        .await;
+
+        let response = server
+            .post("/admin/artifact-settings")
+            .text(artifact_settings_disable_og_form(true))
+            .content_type("application/x-www-form-urlencoded")
+            .await;
+        response.assert_status_see_other();
+        response.assert_header("location", "/admin");
+
+        let og_artifact_count = hyperlink_artifact::Entity::find()
+            .filter(hyperlink_artifact::Column::Kind.is_in([
+                HyperlinkArtifactKind::OgMeta,
+                HyperlinkArtifactKind::OgImage,
+                HyperlinkArtifactKind::OgError,
+            ]))
+            .count(&connection)
+            .await
+            .expect("og artifact count should load");
+        assert_eq!(og_artifact_count, 0);
+
+        let updated_link = hyperlink::Entity::find_by_id(1)
+            .one(&connection)
+            .await
+            .expect("hyperlink lookup should succeed")
+            .expect("hyperlink should exist");
+        assert!(updated_link.og_title.is_none());
+        assert!(updated_link.og_description.is_none());
+        assert!(updated_link.og_type.is_none());
+        assert!(updated_link.og_url.is_none());
+        assert!(updated_link.og_image_url.is_none());
+        assert!(updated_link.og_site_name.is_none());
+    }
+
+    fn artifact_settings_disable_og_form(with_delete: bool) -> String {
+        let mut form =
+            "collect_source=1&collect_screenshots=1&collect_screenshot_dark=1&collect_readability=1"
+                .to_string();
+        if with_delete {
+            form.push_str("&delete_og_on_disable=1");
+        }
+        form
     }
 
     async fn new_server(seed_sql: &str) -> (axum_test::TestServer, sea_orm::DatabaseConnection) {
@@ -1920,7 +2542,8 @@ mod tests {
         let page = server.get("/admin").await;
         page.assert_status_ok();
         let body = page.text();
-        assert!(body.contains("<button type=\"submit\" disabled>Process all artifacts</button>"));
+        assert!(body.contains("Process all artifacts</button>"));
+        assert!(body.contains("disabled>Process all artifacts</button>"));
     }
 
     #[tokio::test]
@@ -2300,7 +2923,9 @@ mod tests {
         write_zip_binary_file_with_compression(
             &mut writer,
             "artifacts/33.bin",
-            &[0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50],
+            &[
+                0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50,
+            ],
             CompressionMethod::Deflated,
         )
         .expect("artifact payload should write");

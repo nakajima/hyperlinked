@@ -160,6 +160,8 @@ function setInlineRevealVisible(slot, button, visible) {
   if (!visible) {
     slot.dataset.entering = "false";
     slot.dataset.visible = "false";
+    button.dataset.entering = "false";
+    button.dataset.visible = "false";
     slot.setAttribute("aria-hidden", "true");
     button.disabled = true;
     return;
@@ -167,18 +169,22 @@ function setInlineRevealVisible(slot, button, visible) {
 
   if (wasVisible) {
     slot.dataset.visible = "true";
+    button.dataset.visible = "true";
     slot.setAttribute("aria-hidden", "false");
     button.disabled = false;
     return;
   }
 
   slot.dataset.entering = "true";
-  slot.dataset.visible = visible ? "true" : "false";
+  slot.dataset.visible = "true";
+  button.dataset.entering = "true";
+  button.dataset.visible = "true";
   slot.setAttribute("aria-hidden", "false");
   button.disabled = false;
 
   const timerId = window.setTimeout(() => {
     slot.dataset.entering = "false";
+    button.dataset.entering = "false";
     inlineRevealEnterTimers.delete(slot);
   }, INLINE_REVEAL_ENTER_MS + 40);
   inlineRevealEnterTimers.set(slot, timerId);

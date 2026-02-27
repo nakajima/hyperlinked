@@ -1,4 +1,7 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+};
 
 use axum::{
     Json, Router,
@@ -319,11 +322,17 @@ async fn reprocess(
     )
     .await
     {
-        Ok(Some(link)) => redirect_with_flash(
+        Ok(Some((link, true))) => redirect_with_flash(
             &headers,
             &show_path(link.id),
             FlashName::Notice,
             "Queued reprocessing.",
+        ),
+        Ok(Some((link, false))) => redirect_with_flash(
+            &headers,
+            &show_path(link.id),
+            FlashName::Notice,
+            "Reprocessing skipped because source artifact collection is disabled.",
         ),
         Ok(None) => hyperlink_not_found(ResponseKind::Text, id),
         Err(err) => hyperlink_internal_error(ResponseKind::Text, id, "enqueue for processing", err),
@@ -829,12 +838,19 @@ enum IndexStatus {
     Failed,
 }
 
-fn index_status(job: Option<&hyperlink_processing_job::Model>) -> Option<IndexStatus> {
+fn index_status(
+    job: Option<&hyperlink_processing_job::Model>,
+    active_processing_job_ids: Option<&HashSet<i32>>,
+) -> Option<IndexStatus> {
     let job = job?;
     match job.state {
         hyperlink_processing_job::HyperlinkProcessingJobState::Queued
         | hyperlink_processing_job::HyperlinkProcessingJobState::Running => {
-            Some(IndexStatus::Processing)
+            if let Some(active_ids) = active_processing_job_ids {
+                active_ids.contains(&job.id).then_some(IndexStatus::Processing)
+            } else {
+                Some(IndexStatus::Processing)
+            }
         }
         hyperlink_processing_job::HyperlinkProcessingJobState::Failed => Some(IndexStatus::Failed),
         _ => None,
@@ -905,6 +921,7 @@ fn hyperlink_internal_error(
 struct HyperlinksIndexTemplate<'a> {
     links: &'a [hyperlink::Model],
     latest_jobs: &'a HashMap<i32, hyperlink_processing_job::Model>,
+    active_processing_job_ids: &'a HashSet<i32>,
     thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     dark_thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     match_snippets: &'a HashMap<i32, String>,
@@ -919,6 +936,10 @@ struct HyperlinksIndexTemplate<'a> {
 }
 
 impl<'a> HyperlinksIndexTemplate<'a> {
+    fn index_status(&self, job: Option<&hyperlink_processing_job::Model>) -> Option<IndexStatus> {
+        index_status(job, Some(self.active_processing_job_ids))
+    }
+
     fn has_free_text(&self) -> bool {
         !self.free_text.trim().is_empty()
     }
@@ -1049,6 +1070,7 @@ fn render_index(results: &HyperlinkFetchResults) -> Result<String, sailfish::Ren
     HyperlinksIndexTemplate {
         links: &results.links,
         latest_jobs: &results.latest_jobs,
+        active_processing_job_ids: &results.active_processing_job_ids,
         thumbnail_artifacts: &results.thumbnail_artifacts,
         dark_thumbnail_artifacts: &results.dark_thumbnail_artifacts,
         match_snippets: &results.match_snippets,
@@ -1101,6 +1123,10 @@ struct HyperlinksShowTemplate<'a> {
 }
 
 impl<'a> HyperlinksShowTemplate<'a> {
+    fn index_status(&self, job: Option<&hyperlink_processing_job::Model>) -> Option<IndexStatus> {
+        index_status(job, None)
+    }
+
     fn display_title(&self) -> &str {
         self.display_title.as_str()
     }
@@ -1200,7 +1226,9 @@ impl<'a> HyperlinksShowTemplate<'a> {
                 .latest_artifacts
                 .contains_key(&HyperlinkArtifactKind::ScreenshotThumbDarkWebp)
         {
-            return Some(self.artifact_inline_path(&HyperlinkArtifactKind::ScreenshotThumbDarkWebp));
+            return Some(
+                self.artifact_inline_path(&HyperlinkArtifactKind::ScreenshotThumbDarkWebp),
+            );
         }
 
         self.discovered_dark_thumbnail_artifacts
@@ -1566,9 +1594,12 @@ fn artifact_kind_info(
         HyperlinkArtifactKind::ScreenshotWebp => {
             ("screenshot_webp", "Screenshot WebP", "webp", false)
         }
-        HyperlinkArtifactKind::ScreenshotThumbWebp => {
-            ("screenshot_thumb_webp", "Screenshot Thumbnail", "webp", false)
-        }
+        HyperlinkArtifactKind::ScreenshotThumbWebp => (
+            "screenshot_thumb_webp",
+            "Screenshot Thumbnail",
+            "webp",
+            false,
+        ),
         HyperlinkArtifactKind::ScreenshotDarkWebp => {
             ("screenshot_dark_webp", "Screenshot Dark", "webp", false)
         }
@@ -1982,7 +2013,9 @@ mod tests {
                 "data-hyperlink-id=\"1\"",
             ],
         );
-        assert!(index_body.contains("class=\"tap-target\""));
+        assert!(index_body.contains(
+            "href=\"/hyperlinks/new\" class=\"inline-flex min-h-11 items-center"
+        ));
         assert!(index_body.contains("data-url-intent-input"));
         assert!(index_body.contains("data-url-intent"));
         assert!(index_body.contains("aria-hidden=\"true\""));
@@ -2102,9 +2135,9 @@ mod tests {
         let show = server.get("/hyperlinks/1").await;
         show.assert_status_ok();
         let body = show.text();
-        assert!(body.contains("<h2>https://example.com/watch?v=1</h2>"));
+        assert!(body.contains(">https://example.com/watch?v=1</h2>"));
         assert!(!body.contains("View full oEmbed JSON"));
-        assert!(!body.contains("<h4 class=\"font-bold\">oEmbed</h4>"));
+        assert!(!body.contains(">oEmbed</h4>"));
 
         let shown = show_json_hyperlink(&server, 1).await;
         assert_eq!(shown.title, "https://example.com/watch?v=1");
@@ -2164,8 +2197,8 @@ mod tests {
         let show = server.get("/hyperlinks/1").await;
         show.assert_status_ok();
         let body = show.text();
-        assert!(body.contains("<h2>Example OG Video</h2>"));
-        assert!(body.contains("<h4 class=\"font-bold\">Open Graph</h4>"));
+        assert!(body.contains(">Example OG Video</h2>"));
+        assert!(body.contains("Open Graph</h4>"));
     }
 
     #[tokio::test]
@@ -2205,8 +2238,8 @@ mod tests {
         let show = server.get("/hyperlinks/1").await;
         show.assert_status_ok();
         let body = show.text();
-        assert!(body.contains("<h2>Cats &amp; Dogs</h2>"));
-        assert!(!body.contains("<h2>Cats &amp;amp; Dogs</h2>"));
+        assert!(body.contains(">Cats &amp; Dogs</h2>"));
+        assert!(!body.contains(">Cats &amp;amp; Dogs</h2>"));
         assert!(body.contains("Tips &amp; Tricks"));
         assert!(body.contains("Daily"));
         assert!(!body.contains("Tips &amp;amp; Tricks"));
@@ -2238,8 +2271,8 @@ mod tests {
         let show = server.get("/hyperlinks/1").await;
         show.assert_status_ok();
         let body = show.text();
-        assert!(body.contains("<h2>Cats &amp; Dogs</h2>"));
-        assert!(!body.contains("<h2>Cats &amp;amp; Dogs</h2>"));
+        assert!(body.contains(">Cats &amp; Dogs</h2>"));
+        assert!(!body.contains(">Cats &amp;amp; Dogs</h2>"));
     }
 
     #[tokio::test]
@@ -2275,7 +2308,7 @@ mod tests {
         assert!(body.contains("/hyperlinks/1/artifacts/screenshot_dark_webp/inline"));
         assert!(body.contains("media=\"(prefers-color-scheme: dark)\""));
         assert!(body.contains("Screenshot for Example article"));
-        assert!(body.contains("class=\"text-sm break-all\""));
+        assert!(body.contains("break-all text-sm"));
         assert!(body.contains("class=\"flex flex-row flex-wrap gap-4 text-sm\""));
         assert!(
             body.contains("class=\"flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4\"")
@@ -2396,9 +2429,9 @@ mod tests {
         let show = server.get("/hyperlinks/1").await;
         show.assert_status_ok();
         let body = show.text();
-        assert!(body.contains("<h4 class=\"font-bold\">Open Graph</h4>"));
+        assert!(body.contains("Open Graph</h4>"));
         assert!(body.contains("View full Open Graph JSON"));
-        assert!(!body.contains("<h4 class=\"font-bold\">oEmbed</h4>"));
+        assert!(!body.contains(">oEmbed</h4>"));
         assert!(!body.contains("View full oEmbed JSON"));
     }
 
