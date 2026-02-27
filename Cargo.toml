@@ -3,6 +3,9 @@ name = "hyperlinked"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "hyperlinked"
+
 [dependencies]
 lilqueue = { path = "../lilqueue" }
 async-trait = "0.1.89"
@@ -11,10 +14,15 @@ base64 = "0.22.1"
 clap = { version = "4.5.49", features = ["derive", "env"] }
 chrono = "0.4.42"
 dom_smoothie = "0.8.0"
-flate2 = { version = "1.0.35", default-features = false, features = ["rust_backend"] }
+flate2 = { version = "1.0.35", default-features = false, features = [
+  "rust_backend",
+] }
 futures-util = "0.3.32"
 html2md = "0.2"
-image = { version = "0.25.8", default-features = false, features = ["png", "webp"] }
+image = { version = "0.25.8", default-features = false, features = [
+  "png",
+  "webp",
+] }
 notify = "8.2.0"
 pdf-extract = "0.7"
 reqwest = { version = "0.12.24", default-features = false, features = [
