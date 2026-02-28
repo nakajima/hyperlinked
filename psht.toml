@@ -1,0 +1,3 @@
+url = "https://github.com/nakajima/hyperlinked/releases/download/v0.0.3/hyperlinked-0.0.3-x86_64-unknown-linux-gnu.tar.gz"
+start = "./hyperlinked serve"
+app = "hyperlinked"

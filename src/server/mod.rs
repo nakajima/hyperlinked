@@ -16,6 +16,7 @@ pub(crate) mod test_support;
 mod views;
 
 use axum::{Router, response::Redirect, routing::get};
+use sea_orm::DatabaseConnection;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
@@ -25,10 +26,12 @@ pub mod hyperlinks;
 pub use mdns::MdnsOptions;
 
 #[instrument(level = tracing::Level::TRACE)]
-pub async fn start(host: &str, port: &str, mdns_options: MdnsOptions) -> Result<(), String> {
-    let connection = crate::db::connection::init()
-        .await
-        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+pub async fn start(
+    connection: DatabaseConnection,
+    host: &str,
+    port: &str,
+    mdns_options: MdnsOptions,
+) -> Result<(), String> {
     match crate::model::hyperlink_processing_job::delete_stale_active_rows(&connection).await {
         Ok(repaired) if repaired > 0 => {
             tracing::info!(repaired, "deleted stale queued/running processing jobs");

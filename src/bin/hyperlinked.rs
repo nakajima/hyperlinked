@@ -1,9 +1,12 @@
 use clap::{ArgAction, Parser, Subcommand};
-use std::fs;
 use std::collections::HashSet;
+use std::fs;
 use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, prelude::*};
 use tracing_tree::HierarchicalLayer;
+
+const AUTO_MIGRATE_ON_SERVE_ENV: &str = "HYPERLINKED_AUTO_MIGRATE_ON_SERVE";
+const DEV_MODE_ENV: &str = "HYPERLINKED_DEV_MODE";
 
 #[derive(Debug, Parser)]
 #[command(name = "hyperlinked")]
@@ -118,7 +121,25 @@ async fn run() -> Result<i32, String> {
         } => {
             let mdns_options =
                 build_mdns_options(mdns_enabled, mdns_service_name, mdns_service_type);
-            hyperlinked::server::start(&host, &port, mdns_options).await?;
+            let connection = hyperlinked::db::connection::init()
+                .await
+                .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+
+            let auto_migrate_enabled = auto_migrate_on_serve_enabled();
+            let dev_mode = running_in_dev_mode();
+            if dev_mode {
+                tracing::info!("skipping startup migrations in dev mode");
+            } else if auto_migrate_enabled {
+                tracing::info!("running pending startup migrations");
+                hyperlinked::db::migrate::migrate_pending(&connection).await?;
+                tracing::info!("startup migrations complete");
+            } else {
+                tracing::info!(
+                    "{AUTO_MIGRATE_ON_SERVE_ENV}=false; skipping startup migrations on serve"
+                );
+            }
+
+            hyperlinked::server::start(connection, &host, &port, mdns_options).await?;
             Ok(0)
         }
         Commands::Dev {
@@ -152,6 +173,24 @@ fn build_mdns_options(
     let service_name =
         service_name.unwrap_or_else(hyperlinked::server::MdnsOptions::default_service_name);
     hyperlinked::server::MdnsOptions::new(enabled, service_name, service_type)
+}
+
+fn auto_migrate_on_serve_enabled() -> bool {
+    parse_auto_migrate_on_serve(std::env::var(AUTO_MIGRATE_ON_SERVE_ENV).ok().as_deref())
+}
+
+fn parse_auto_migrate_on_serve(raw: Option<&str>) -> bool {
+    match raw {
+        Some(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        None => true,
+    }
+}
+
+fn running_in_dev_mode() -> bool {
+    std::env::var(DEV_MODE_ENV).ok().as_deref() == Some("1")
 }
 
 async fn run_linkwarden_import(input: PathBuf) -> Result<i32, String> {
@@ -339,4 +378,28 @@ async fn run_export_graphql_schema(out: PathBuf) -> Result<i32, String> {
         .map_err(|err| format!("failed to write schema file {}: {err}", out.display()))?;
     println!("wrote graphql schema to {}", out.display());
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_auto_migrate_on_serve;
+
+    #[test]
+    fn auto_migrate_defaults_to_enabled() {
+        assert!(parse_auto_migrate_on_serve(None));
+    }
+
+    #[test]
+    fn auto_migrate_disable_values_are_honored() {
+        for value in ["0", "false", "no", "off", " FALSE ", "Off"] {
+            assert!(!parse_auto_migrate_on_serve(Some(value)));
+        }
+    }
+
+    #[test]
+    fn auto_migrate_non_disable_values_enable_migration() {
+        for value in ["1", "true", "yes", "on", "custom", ""] {
+            assert!(parse_auto_migrate_on_serve(Some(value)));
+        }
+    }
 }
