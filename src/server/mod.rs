@@ -2,6 +2,7 @@ pub mod admin;
 pub(crate) mod admin_backup;
 pub mod admin_jobs;
 mod chromium_diagnostics;
+pub mod controllers;
 pub mod context;
 mod flash;
 pub(crate) mod font_diagnostics;
@@ -53,10 +54,8 @@ pub async fn start(host: &str, port: &str, mdns_options: MdnsOptions) -> Result<
     let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/server/assets");
     let app = Router::<context::Context>::new()
         .route("/", get(|| async { Redirect::temporary("/hyperlinks") }))
-        .merge(admin::routes())
-        .merge(admin_jobs::routes())
+        .merge(controllers::routes())
         .merge(graphql::routes())
-        .merge(hyperlinks::links())
         .nest_service("/jobs", jobs_dashboard.into_service())
         .nest_service("/assets", ServeDir::new(assets_dir))
         .with_state(state);
