@@ -7,14 +7,15 @@ import GRDBQuery
 struct HyperlinksListView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.colorScheme) private var colorScheme
-    private static let syncQuery = "scope:all order:newest"
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "fm.folder.hyperlinked",
         category: "hyperlink-cache"
     )
 
-    @Query(CachedHyperlinksRequest(limit: 500))
-    private var cachedHyperlinks: [Hyperlink]
+    @Query(CachedHyperlinksRequest(limit: 5000, rootOnly: false))
+    private var cachedAllHyperlinks: [Hyperlink]
+    @Query(CachedHyperlinksRequest(limit: 5000, rootOnly: true))
+    private var cachedRootHyperlinks: [Hyperlink]
     @Query(PendingShareOutboxItemsRequest(limit: 200))
     private var pendingOutboxItems: [ShareOutboxItemRecord]
     @State private var isLoading = false
@@ -88,9 +89,7 @@ struct HyperlinksListView: View {
     }
 
     private var visibleHyperlinks: [Hyperlink] {
-        let scoped = showDiscoveredLinks
-            ? cachedHyperlinks
-            : cachedHyperlinks.filter { ($0.discoveryDepth ?? 0) == 0 }
+        let scoped = showDiscoveredLinks ? cachedAllHyperlinks : cachedRootHyperlinks
         let filtered = filterHyperlinks(scoped, query: trimmedQueryText)
         return sortHyperlinks(filtered, order: effectiveOrder, query: trimmedQueryText)
     }
@@ -256,31 +255,15 @@ struct HyperlinksListView: View {
                     ForEach(listRows) { row in
                         switch row {
                         case .pending(let pendingItem):
-                            pendingOutboxRow(pendingItem)
+                            PendingOutboxRowContent(item: pendingItem)
                         case .hyperlink(let hyperlink):
                             NavigationLink(
                                 destination: HyperlinkDetailView(hyperlinkID: hyperlink.id, fallback: hyperlink)
                             ) {
-                                HStack(alignment: .top, spacing: 12) {
-                                    HyperlinkThumbnailView(hyperlink: hyperlink, colorScheme: colorScheme)
-
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(hyperlink.title)
-                                            .font(.headline)
-                                            .lineLimit(2)
-                                        Text(hyperlink.url)
-                                            .font(.footnote)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                        HStack(spacing: 12) {
-                                            Text(hyperlink.processingState.capitalized)
-                                            Text("\(hyperlink.clicksCount) clicks")
-                                        }
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    }
-                                }
-                                .padding(.vertical, 4)
+                                HyperlinkListRowContent(
+                                    hyperlink: hyperlink,
+                                    colorScheme: colorScheme
+                                )
                             }
                         }
                     }
@@ -301,7 +284,7 @@ struct HyperlinksListView: View {
 
         do {
             await retryPendingOutbox(using: client)
-            let fetched = try await client.listHyperlinks(q: Self.syncQuery)
+            let fetched = try await client.listHyperlinks()
             persistHyperlinks(hyperlinks: fetched)
             errorMessage = nil
         } catch is CancellationError {
@@ -481,19 +464,84 @@ struct HyperlinksListView: View {
         }
         return newestFirst(lhs: lhs, rhs: rhs)
     }
+}
 
-    @ViewBuilder
-    private func pendingOutboxRow(_ item: ShareOutboxItemRecord) -> some View {
+private enum HyperlinkOrderFilter: String, Identifiable {
+    case newest
+    case relevance
+    case oldest
+    case mostClicked = "most-clicked"
+    case recentlyClicked = "recently-clicked"
+    case random
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .newest:
+            return "Newest"
+        case .relevance:
+            return "Relevance"
+        case .oldest:
+            return "Oldest"
+        case .mostClicked:
+            return "Most Clicked"
+        case .recentlyClicked:
+            return "Recently Clicked"
+        case .random:
+            return "Random"
+        }
+    }
+}
+
+private struct HyperlinkListRowContent: View {
+    let hyperlink: Hyperlink
+    let colorScheme: ColorScheme
+
+    var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.secondary.opacity(0.18))
-                .frame(width: 96, height: 64)
-                .overlay {
-                    Image(systemName: "tray.and.arrow.up")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.secondary)
-                }
+            HyperlinkThumbnailView(hyperlink: hyperlink, colorScheme: colorScheme)
 
+            VStack(alignment: .leading, spacing: 4) {
+                Text(hyperlink.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                Text(hyperlink.url)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+										.lineLimit(1)
+							
+							if let description = hyperlink.ogDescription, hyperlink.discoveredVia.isEmpty {
+								Text(description)
+									.foregroundStyle(.secondary)
+									.font(.caption)
+									.lineLimit(2)
+							}
+
+                HStack(spacing: 12) {
+									if !hyperlink.discoveredVia.isEmpty {
+										Text("From \(hyperlink.discoveredVia[0].url)")
+											.foregroundStyle(.secondary)
+									}
+  
+                    if hyperlink.isURLValid == false {
+                        Text("Invalid URL")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct PendingOutboxRowContent: View {
+    let item: ShareOutboxItemRecord
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? item.url : item.title)
                     .font(.headline)
@@ -525,30 +573,112 @@ struct HyperlinksListView: View {
     }
 }
 
-private enum HyperlinkOrderFilter: String, Identifiable {
-    case newest
-    case relevance
-    case oldest
-    case mostClicked = "most-clicked"
-    case recentlyClicked = "recently-clicked"
-    case random
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .newest:
-            return "Newest"
-        case .relevance:
-            return "Relevance"
-        case .oldest:
-            return "Oldest"
-        case .mostClicked:
-            return "Most Clicked"
-        case .recentlyClicked:
-            return "Recently Clicked"
-        case .random:
-            return "Random"
+#if DEBUG
+struct HyperlinksListRowPreviews: PreviewProvider {
+    static var previews: some View {
+        List {
+            HyperlinkListRowContent(
+                hyperlink: sampleHyperlink(),
+                colorScheme: .light
+            )
+            HyperlinkListRowContent(
+                hyperlink: sampleInvalidHyperlink(),
+                colorScheme: .dark
+            )
+            HyperlinkListRowContent(
+                hyperlink: sampleDiscoveredHyperlink(),
+                colorScheme: .light
+            )
+            PendingOutboxRowContent(item: samplePendingOutboxItem())
         }
+        .listStyle(.plain)
+        .previewDisplayName("Hyperlink List Rows")
+    }
+
+    private static func sampleHyperlink() -> Hyperlink {
+        Hyperlink(
+            id: 1,
+            title: "@LiveModel `in SwiftData",
+            url: "https://patschbewebblog.com/posts/2-live-model/",
+            rawURL: "https://patschbewebblog.com/posts/2-live-model/",
+            ogDescription: "A practical walkthrough of live models in SwiftData.",
+            isURLValid: true,
+            discoveryDepth: 0,
+            clicksCount: 2,
+            lastClickedAt: "2026-02-28T01:45:00Z",
+            processingState: "ready",
+            createdAt: "2026-02-27T12:00:00Z",
+            updatedAt: "2026-02-28T01:45:00Z",
+            thumbnailURL: nil,
+            thumbnailDarkURL: nil,
+            screenshotURL: nil,
+            screenshotDarkURL: nil
+        )
+    }
+
+    private static func sampleInvalidHyperlink() -> Hyperlink {
+        Hyperlink(
+            id: 2,
+            title: "Imported Link Missing Scheme",
+            url: "example.com/no-scheme",
+            rawURL: "example.com/no-scheme",
+            ogDescription: nil,
+            isURLValid: false,
+            discoveryDepth: 0,
+            clicksCount: 0,
+            lastClickedAt: nil,
+            processingState: "ready",
+            createdAt: "2026-02-27T12:00:00Z",
+            updatedAt: "2026-02-28T01:45:00Z",
+            thumbnailURL: nil,
+            thumbnailDarkURL: nil,
+            screenshotURL: nil,
+            screenshotDarkURL: nil
+        )
+    }
+
+    private static func sampleDiscoveredHyperlink() -> Hyperlink {
+        Hyperlink(
+            id: 3,
+            title: "SwiftUI Data Flow Notes",
+            url: "https://developer.apple.com/documentation/swiftui/data-flow",
+            rawURL: "https://developer.apple.com/documentation/swiftui/data-flow",
+            ogDescription: "Apple docs page found while crawling a root link.",
+            isURLValid: true,
+            discoveryDepth: 1,
+            clicksCount: 7,
+            lastClickedAt: "2026-02-28T01:40:00Z",
+            processingState: "ready",
+            createdAt: "2026-02-27T14:00:00Z",
+            updatedAt: "2026-02-28T01:40:00Z",
+            thumbnailURL: nil,
+            thumbnailDarkURL: nil,
+            screenshotURL: nil,
+            screenshotDarkURL: nil,
+            discoveredVia: [
+                HyperlinkRef(
+                    id: 1,
+                    title: "@LiveModel `in SwiftData",
+                    url: "https://patschbewebblog.com/posts/2-live-model/",
+                    rawURL: "https://patschbewebblog.com/posts/2-live-model/"
+                )
+            ]
+        )
+    }
+
+    private static func samplePendingOutboxItem() -> ShareOutboxItemRecord {
+        ShareOutboxItemRecord(
+            id: "preview-pending-1",
+            url: "https://ryanbrewer.dev/posts/sequent-calculus/",
+            title: "Par Part 1: Sequent Calculus",
+            createdAt: Date().timeIntervalSince1970 - 120,
+            state: ShareOutboxState.pending.rawValue,
+            attemptCount: 1,
+            nextAttemptAt: Date().timeIntervalSince1970 + 10,
+            lastAttemptAt: Date().timeIntervalSince1970 - 30,
+            lastError: "Temporary network timeout",
+            deliveredAt: nil
+        )
     }
 }
+#endif

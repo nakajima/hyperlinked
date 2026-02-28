@@ -39,15 +39,35 @@ struct APIClient {
         _ = try await listHyperlinks()
     }
 
-    func listHyperlinks(q: String? = nil) async throws -> [Hyperlink] {
-        let normalizedQ = q?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .nilIfEmpty
-        let payload: GraphQLHyperlinksPayload = try await sendGraphQL(
-            query: Self.hyperlinksQuery,
-            variables: normalizedQ.map { ["q": $0] }
-        )
-        return payload.hyperlinks.nodes.map { $0.toHyperlink() }
+    func listHyperlinks() async throws -> [Hyperlink] {
+        let pageSize = 200
+        let maxPages = 50
+        var page = 0
+        var hyperlinks: [Hyperlink] = []
+        var seenIDs = Set<Int>()
+
+        while page < maxPages {
+            let payload: GraphQLHyperlinksPayload = try await sendGraphQL(
+                query: Self.hyperlinksPageQuery(page: page, limit: pageSize)
+            )
+            let batch = payload.hyperlinks.nodes.map { $0.toHyperlink() }
+            if batch.isEmpty {
+                break
+            }
+
+            for hyperlink in batch {
+                if seenIDs.insert(hyperlink.id).inserted {
+                    hyperlinks.append(hyperlink)
+                }
+            }
+
+            if batch.count < pageSize {
+                break
+            }
+            page += 1
+        }
+
+        return hyperlinks
     }
 
     func fetchUpdatedHyperlinks(updatedAt: String) async throws -> UpdatedHyperlinksBatch {
@@ -194,27 +214,28 @@ struct APIClient {
       thumbnailDarkUrl
       screenshotUrl
       screenshotDarkUrl
-      hyperlinkProcessingJob(
-        pagination: { page: { limit: 1, page: 0 } }
-        orderBy: { id: DESC }
-      ) {
-        nodes { state }
+      discoveredVia {
+        id
+        title
+        url
+        rawUrl
       }
     """
 
-    private static let hyperlinksQuery = """
-    query HyperlinksIndex($q: String) {
-      hyperlinks(
-        q: $q
-        pagination: { page: { limit: 200, page: 0 } }
-        orderBy: { id: DESC }
-      ) {
-        nodes {
-    \(hyperlinkFields)
+    private static func hyperlinksPageQuery(page: Int, limit: Int) -> String {
+        """
+        query HyperlinksIndexPage {
+          hyperlinks(
+            pagination: { page: { limit: \(limit), page: \(page) } }
+            orderBy: { id: DESC }
+          ) {
+            nodes {
+        \(hyperlinkFields)
+            }
+          }
         }
-      }
+        """
     }
-    """
 
     private static let updatedHyperlinksQuery = """
     query UpdatedHyperlinks($updatedAt: String!) {
@@ -334,7 +355,7 @@ private struct GraphQLHyperlinkNodePayload: Decodable {
     let thumbnailDarkUrl: String?
     let screenshotUrl: String?
     let screenshotDarkUrl: String?
-    let hyperlinkProcessingJob: GraphQLProcessingJobConnectionPayload?
+    let discoveredVia: [GraphQLHyperlinkRefPayload]?
 
     func toHyperlink() -> Hyperlink {
         Hyperlink(
@@ -343,30 +364,29 @@ private struct GraphQLHyperlinkNodePayload: Decodable {
             url: url,
             rawURL: rawUrl,
             ogDescription: ogDescription,
+            isURLValid: nil,
             discoveryDepth: discoveryDepth,
             clicksCount: clicksCount,
             lastClickedAt: lastClickedAt,
-            processingState: hyperlinkProcessingJob?.nodes.first?.state ?? "idle",
+            processingState: "ready",
             createdAt: createdAt,
             updatedAt: updatedAt,
             thumbnailURL: thumbnailUrl,
             thumbnailDarkURL: thumbnailDarkUrl,
             screenshotURL: screenshotUrl,
-            screenshotDarkURL: screenshotDarkUrl
+            screenshotDarkURL: screenshotDarkUrl,
+            discoveredVia: discoveredVia?.map { $0.toHyperlinkRef() } ?? []
         )
     }
 }
 
-private struct GraphQLProcessingJobConnectionPayload: Decodable {
-    let nodes: [GraphQLProcessingJobPayload]
-}
+private struct GraphQLHyperlinkRefPayload: Decodable {
+    let id: Int
+    let title: String
+    let url: String
+    let rawUrl: String
 
-private struct GraphQLProcessingJobPayload: Decodable {
-    let state: String
-}
-
-private extension String {
-    var nilIfEmpty: String? {
-        isEmpty ? nil : self
+    func toHyperlinkRef() -> HyperlinkRef {
+        HyperlinkRef(id: id, title: title, url: url, rawURL: rawUrl)
     }
 }

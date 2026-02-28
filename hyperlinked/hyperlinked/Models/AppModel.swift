@@ -36,10 +36,19 @@ final class AppModel: ObservableObject {
     }
 
     func saveServerURL(_ url: URL) {
-        let normalized = url.absoluteString.trimmingCharacters(in: .whitespacesAndNewlines)
-        selectedServerURL = URL(string: normalized)
-        sharedDefaults?.set(normalized, forKey: Self.selectedServerURLKey)
-        defaults.set(normalized, forKey: Self.selectedServerURLKey)
+        guard let normalizedURL = Self.normalizedServerURL(from: url.absoluteString) else {
+            return
+        }
+        let normalized = normalizedURL.absoluteString
+        let previous = selectedServerURL?.absoluteString
+
+        if previous != normalized {
+            try? HyperlinkStore.openShared().clearAll()
+        }
+
+        selectedServerURL = normalizedURL
+        sharedDefaults?.set(normalizedURL.absoluteString, forKey: Self.selectedServerURLKey)
+        defaults.set(normalizedURL.absoluteString, forKey: Self.selectedServerURLKey)
         shouldShowServerSetup = false
     }
 
@@ -52,6 +61,7 @@ final class AppModel: ObservableObject {
     }
 
     func resetServerSelection() {
+        try? HyperlinkStore.openShared().clearAll()
         sharedDefaults?.removeObject(forKey: Self.selectedServerURLKey)
         defaults.removeObject(forKey: Self.selectedServerURLKey)
         selectedServerURL = nil

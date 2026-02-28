@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     Json, Router,
     extract::State,
@@ -7,7 +9,8 @@ use axum::{
 };
 use chrono::{DateTime as ChronoDateTime, SecondsFormat, Utc};
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+    ColumnTrait, DatabaseConnection, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
 };
 use seaography::{
     Builder, BuilderContext, ConnectionObjectBuilder, EntityObjectBuilder, FilterInputBuilder,
@@ -53,6 +56,7 @@ struct GraphqlRequestBaseUrl(String);
 const UPDATED_HYPERLINKS_PAYLOAD_TYPE: &str = "UpdatedHyperlinksPayload";
 const UPDATED_HYPERLINK_CHANGE_TYPE: &str = "UpdatedHyperlinkChange";
 const HYPERLINK_CHANGE_TYPE_ENUM: &str = "HyperlinkChangeType";
+const HYPERLINK_REF_TYPE: &str = "HyperlinkRef";
 const FIELD_UPDATED_AT: &str = "updatedAt";
 
 #[derive(Clone, Debug)]
@@ -67,6 +71,25 @@ struct UpdatedHyperlinkChange {
     change_type: HyperlinkChangeType,
     updated_at: sea_orm::entity::prelude::DateTime,
     hyperlink: Option<hyperlink::Model>,
+}
+
+#[derive(Clone, Debug)]
+struct HyperlinkRef {
+    id: i32,
+    title: String,
+    url: String,
+    raw_url: String,
+}
+
+impl From<hyperlink::Model> for HyperlinkRef {
+    fn from(model: hyperlink::Model) -> Self {
+        Self {
+            id: model.id,
+            title: model.title,
+            url: model.url,
+            raw_url: model.raw_url,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -152,6 +175,8 @@ fn schema(
     register_read_only_entity!(builder, hyperlink_processing_job);
     register_read_only_entity!(builder, hyperlink_artifact);
     register_hyperlink_sublinks_field(&mut builder);
+    builder.outputs.push(hyperlink_ref_object());
+    register_hyperlink_discovered_via_field(&mut builder);
     register_hyperlink_artifact_url_fields(&mut builder);
 
     builder.register_enumeration::<hyperlink_processing_job::HyperlinkProcessingJobState>();
@@ -460,6 +485,34 @@ fn now_utc() -> sea_orm::entity::prelude::DateTime {
     sea_orm::entity::prelude::DateTimeUtc::from(std::time::SystemTime::now()).naive_utc()
 }
 
+fn hyperlink_ref_object() -> Object {
+    Object::new(HYPERLINK_REF_TYPE)
+        .field(Field::new("id", TypeRef::named_nn(TypeRef::INT), |ctx| {
+            FieldFuture::new(async move {
+                let hyperlink_ref = ctx.parent_value.try_downcast_ref::<HyperlinkRef>()?;
+                Ok(Some(FieldValue::value(hyperlink_ref.id)))
+            })
+        }))
+        .field(Field::new("title", TypeRef::named_nn(TypeRef::STRING), |ctx| {
+            FieldFuture::new(async move {
+                let hyperlink_ref = ctx.parent_value.try_downcast_ref::<HyperlinkRef>()?;
+                Ok(Some(FieldValue::value(hyperlink_ref.title.clone())))
+            })
+        }))
+        .field(Field::new("url", TypeRef::named_nn(TypeRef::STRING), |ctx| {
+            FieldFuture::new(async move {
+                let hyperlink_ref = ctx.parent_value.try_downcast_ref::<HyperlinkRef>()?;
+                Ok(Some(FieldValue::value(hyperlink_ref.url.clone())))
+            })
+        }))
+        .field(Field::new("rawUrl", TypeRef::named_nn(TypeRef::STRING), |ctx| {
+            FieldFuture::new(async move {
+                let hyperlink_ref = ctx.parent_value.try_downcast_ref::<HyperlinkRef>()?;
+                Ok(Some(FieldValue::value(hyperlink_ref.raw_url.clone())))
+            })
+        }))
+}
+
 fn register_hyperlink_sublinks_field(builder: &mut Builder) {
     let context = builder.context;
     let entity_object_builder = EntityObjectBuilder { context };
@@ -539,6 +592,68 @@ fn register_hyperlink_sublinks_field(builder: &mut Builder) {
                     sublinks_field
                         .take()
                         .expect("sublinks field should only be added once"),
+                )
+            } else {
+                object
+            }
+        })
+        .collect();
+}
+
+fn register_hyperlink_discovered_via_field(builder: &mut Builder) {
+    let context = builder.context;
+    let entity_object_builder = EntityObjectBuilder { context };
+    let hyperlink_type_name = entity_object_builder.type_name::<hyperlink::Entity>();
+
+    let discovered_via_field = Field::new(
+        "discoveredVia",
+        TypeRef::named_nn_list_nn(HYPERLINK_REF_TYPE),
+        |ctx| {
+            FieldFuture::new(async move {
+                let hyperlink = ctx
+                    .parent_value
+                    .try_downcast_ref::<hyperlink::Model>()
+                    .expect("parent hyperlink should exist");
+                let db = ctx.data::<DatabaseConnection>()?;
+
+                let parents = hyperlink::Entity::find()
+                    .join(
+                        JoinType::InnerJoin,
+                        hyperlink_relation::Relation::ParentHyperlink.def().rev(),
+                    )
+                    .filter(hyperlink_relation::Column::ChildHyperlinkId.eq(hyperlink.id))
+                    .order_by_desc(hyperlink_relation::Column::CreatedAt)
+                    .order_by_desc(hyperlink_relation::Column::Id)
+                    .all(db)
+                    .await?;
+
+                let mut seen_parent_ids = HashSet::with_capacity(parents.len());
+                let discovered_via = parents
+                    .into_iter()
+                    .filter_map(|parent| {
+                        if seen_parent_ids.insert(parent.id) {
+                            Some(FieldValue::owned_any(HyperlinkRef::from(parent)))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                Ok(Some(FieldValue::list(discovered_via)))
+            })
+        },
+    );
+
+    let mut discovered_via_field = Some(discovered_via_field);
+    builder.outputs = builder
+        .outputs
+        .drain(..)
+        .map(|object| {
+            if object.type_name() == hyperlink_type_name {
+                object.field(
+                    discovered_via_field
+                        .take()
+                        .expect("discoveredVia field should only be added once"),
                 )
             } else {
                 object
@@ -847,6 +962,45 @@ mod tests {
         assert_eq!(nodes[0]["id"], 2);
         assert_eq!(nodes[0]["title"], "Discovered Child");
         assert_eq!(nodes[0]["discoveryDepth"], 1);
+    }
+
+    #[tokio::test]
+    async fn graphql_hyperlink_exposes_discovered_via() {
+        let server = new_server().await;
+        let payload = run_graphql(
+            &server,
+            r#"
+            {
+              hyperlinks(
+                filters: { id: { eq: 2 } }
+                pagination: { page: { limit: 10, page: 0 } }
+              ) {
+                nodes {
+                  id
+                  discoveredVia {
+                    id
+                    title
+                    url
+                    rawUrl
+                  }
+                }
+              }
+            }
+            "#,
+        )
+        .await;
+
+        let discovered_via = payload["data"]["hyperlinks"]["nodes"][0]["discoveredVia"]
+            .as_array()
+            .expect("discoveredVia should be an array");
+        assert_eq!(discovered_via.len(), 1);
+        assert_eq!(discovered_via[0]["id"], 1);
+        assert_eq!(discovered_via[0]["title"], "Example");
+        assert_eq!(discovered_via[0]["url"], "https://example.com");
+        assert_eq!(
+            discovered_via[0]["rawUrl"],
+            "https://example.com?utm_source=newsletter"
+        );
     }
 
     #[tokio::test]

@@ -123,6 +123,7 @@ public struct DB {
                 t.column("url", .text).notNull()
                 t.column("host", .text).notNull()
                 t.column("one_liner", .text).notNull()
+                t.column("is_url_valid", .boolean).notNull().defaults(to: true)
                 t.column("clicks_count", .integer).notNull().defaults(to: 0)
                 t.column("last_clicked_at", .text)
                 t.column("discovery_depth", .integer).notNull().defaults(to: 0)
@@ -130,6 +131,7 @@ public struct DB {
                 t.column("updated_at", .text).notNull()
                 t.column("thumbnail_url", .text)
                 t.column("thumbnail_dark_url", .text)
+                t.column("discovered_via_json", .text).notNull().defaults(to: "[]")
             }
 
             try db.create(
@@ -158,6 +160,37 @@ public struct DB {
             )
         }
 
+        migrator.registerMigration("add_hyperlink_records_is_url_valid_v1") { db in
+            guard try tableExists(hyperlinkTableName, in: db) else {
+                return
+            }
+
+            guard try !columnExists("is_url_valid", in: hyperlinkTableName, db: db) else {
+                return
+            }
+
+            try db.execute(
+                sql: """
+                    ALTER TABLE \(hyperlinkTableName)
+                    ADD COLUMN is_url_valid INTEGER NOT NULL DEFAULT 1
+                """
+            )
+        }
+
+        migrator.registerMigration("add_hyperlink_records_discovered_via_json_v1") { db in
+            guard try tableExists(hyperlinkTableName, in: db) else {
+                return
+            }
+
+            guard try !columnExists("discovered_via_json", in: hyperlinkTableName, db: db) else {
+                return
+            }
+
+            try db.alter(table: hyperlinkTableName) { t in
+                t.add(column: "discovered_via_json", .text).notNull().defaults(to: "[]")
+            }
+        }
+
         try migrator.migrate(queue)
     }
 
@@ -170,6 +203,23 @@ public struct DB {
                 WHERE type = 'table' AND name = ?
             """,
             arguments: [name]
+        ) ?? 0
+        return count > 0
+    }
+
+    nonisolated private static func columnExists(
+        _ columnName: String,
+        in tableName: String,
+        db: Database
+    ) throws -> Bool {
+        let count = try Int.fetchOne(
+            db,
+            sql: """
+                SELECT COUNT(*)
+                FROM pragma_table_info('\(tableName)')
+                WHERE name = ?
+            """,
+            arguments: [columnName]
         ) ?? 0
         return count > 0
     }

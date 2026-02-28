@@ -19,7 +19,7 @@ struct HyperlinkDetailSectionsView: View {
         }
 
         Section("Status") {
-            LabeledContent("Processing", value: hyperlink.processingState.capitalized)
+            LabeledContent("URL", value: hyperlink.isURLValid == false ? "Invalid" : "Valid")
             LabeledContent("Clicks", value: "\(hyperlink.clicksCount)")
             LabeledContent("Last Clicked", value: hyperlink.lastClickedAt ?? "Never")
         }

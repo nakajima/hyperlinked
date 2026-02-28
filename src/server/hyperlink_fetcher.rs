@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, Statement, Value,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter,
+    Statement, Value,
 };
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +117,7 @@ impl<'a> HyperlinkFetcher<'a> {
         let has_free_text = !search_terms.is_empty();
         let effective_order = parsed.parsed_query.effective_order(has_free_text);
         let requested_page = resolve_page(self.query.page);
+        let queue_jobs_table_available = queue_jobs_table_exists(self.connection).await?;
         let page_slice = fetch_hyperlink_page_slice(
             self.connection,
             &parsed.parsed_query,
@@ -123,6 +125,7 @@ impl<'a> HyperlinkFetcher<'a> {
             effective_order,
             requested_page,
             INDEX_PER_PAGE,
+            queue_jobs_table_available,
         )
         .await?;
 
@@ -131,8 +134,11 @@ impl<'a> HyperlinkFetcher<'a> {
         let latest_jobs =
             hyperlink_job_model::latest_for_hyperlinks(self.connection, &hyperlink_ids).await?;
         let latest_job_ids = latest_jobs.values().map(|job| job.id).collect::<Vec<_>>();
-        let active_processing_job_ids =
-            active_queue_processing_job_ids(self.connection, &latest_job_ids).await?;
+        let active_processing_job_ids = if queue_jobs_table_available {
+            active_queue_processing_job_ids(self.connection, &latest_job_ids).await?
+        } else {
+            HashSet::new()
+        };
 
         let match_snippets = if !search_terms.is_empty() {
             build_match_snippets(self.connection, &links, &search_terms).await?
@@ -173,6 +179,27 @@ impl<'a> HyperlinkFetcher<'a> {
 
 fn processing_task_job_type() -> &'static str {
     std::any::type_name::<crate::queue::ProcessingTask>()
+}
+
+async fn queue_jobs_table_exists(connection: &DatabaseConnection) -> Result<bool, sea_orm::DbErr> {
+    if connection.get_database_backend() != DbBackend::Sqlite {
+        return Ok(true);
+    }
+
+    let row = connection
+        .query_one(Statement::from_sql_and_values(
+            connection.get_database_backend(),
+            "SELECT COUNT(*) AS table_count FROM sqlite_master WHERE type = 'table' AND name = 'jobs'",
+            Vec::new(),
+        ))
+        .await?;
+
+    let count = row
+        .as_ref()
+        .and_then(|row| row.try_get::<i64>("", "table_count").ok())
+        .unwrap_or_default();
+
+    Ok(count > 0)
 }
 
 async fn active_queue_processing_job_ids(
@@ -255,8 +282,14 @@ async fn fetch_hyperlink_page_slice(
     order: OrderToken,
     requested_page: u64,
     per_page: u64,
+    queue_jobs_table_available: bool,
 ) -> Result<HyperlinkPageSlice, sea_orm::DbErr> {
-    let sql_parts = build_hyperlink_sql_parts(parsed_query, search_terms, order);
+    let sql_parts = build_hyperlink_sql_parts(
+        parsed_query,
+        search_terms,
+        order,
+        queue_jobs_table_available,
+    );
     let backend = connection.get_database_backend();
     let select_prefix = if sql_parts.with_clause.is_empty() {
         String::new()
@@ -333,6 +366,7 @@ fn build_hyperlink_sql_parts(
     parsed_query: &ParsedHyperlinkQuery,
     search_terms: &[SearchTerm],
     order: OrderToken,
+    queue_jobs_table_available: bool,
 ) -> HyperlinkSqlParts {
     let mut values = Vec::new();
     let mut joins = Vec::new();
@@ -411,19 +445,23 @@ fn build_hyperlink_sql_parts(
             status_terms.push("lpj.id IS NULL".to_string());
         }
         if statuses.contains(&StatusToken::Processing) {
-            values.push(processing_task_job_type().into());
-            status_terms.push(
-                "((lpj.state = 'queued' OR lpj.state = 'running')
-                  AND EXISTS (
-                      SELECT 1
-                      FROM jobs queue_job
-                      WHERE queue_job.job_type = ?
-                        AND queue_job.status IN ('queued', 'processing')
-                        AND json_valid(queue_job.payload)
-                        AND CAST(json_extract(queue_job.payload, '$.processing_job_id') AS INTEGER) = lpj.id
-                  ))"
-                    .to_string(),
-            );
+            if queue_jobs_table_available {
+                values.push(processing_task_job_type().into());
+                status_terms.push(
+                    "((lpj.state = 'queued' OR lpj.state = 'running')
+                      AND EXISTS (
+                          SELECT 1
+                          FROM jobs queue_job
+                          WHERE queue_job.job_type = ?
+                            AND queue_job.status IN ('queued', 'processing')
+                            AND json_valid(queue_job.payload)
+                            AND CAST(json_extract(queue_job.payload, '$.processing_job_id') AS INTEGER) = lpj.id
+                      ))"
+                        .to_string(),
+                );
+            } else {
+                status_terms.push("0 = 1".to_string());
+            }
         }
         if statuses.contains(&StatusToken::Failed) {
             status_terms.push("lpj.state = 'failed'".to_string());
@@ -1278,14 +1316,14 @@ mod tests {
         let mut parsed = ParsedHyperlinkQuery::default();
         parsed.clicks.push(ClickToken::Unclicked);
 
-        let sql_parts = build_hyperlink_sql_parts(&parsed, &[], OrderToken::Newest);
+        let sql_parts = build_hyperlink_sql_parts(&parsed, &[], OrderToken::Newest, true);
         assert!(sql_parts.where_sql.contains("h.clicks_count = 0"));
     }
 
     #[test]
     fn build_hyperlink_sql_parts_skips_unclicked_filter_by_default() {
         let parsed = ParsedHyperlinkQuery::default();
-        let sql_parts = build_hyperlink_sql_parts(&parsed, &[], OrderToken::Newest);
+        let sql_parts = build_hyperlink_sql_parts(&parsed, &[], OrderToken::Newest, true);
         assert!(!sql_parts.where_sql.contains("h.clicks_count = 0"));
     }
 
@@ -1294,10 +1332,25 @@ mod tests {
         let mut parsed = ParsedHyperlinkQuery::default();
         parsed.statuses.push(StatusToken::Processing);
 
-        let sql_parts = build_hyperlink_sql_parts(&parsed, &[], OrderToken::Newest);
+        let sql_parts = build_hyperlink_sql_parts(&parsed, &[], OrderToken::Newest, true);
         assert!(sql_parts.where_sql.contains("EXISTS ("));
-        assert!(sql_parts.where_sql.contains("queue_job.status IN ('queued', 'processing')"));
+        assert!(
+            sql_parts
+                .where_sql
+                .contains("queue_job.status IN ('queued', 'processing')")
+        );
         assert_eq!(sql_parts.values.len(), 1);
+    }
+
+    #[test]
+    fn build_hyperlink_sql_parts_processing_status_without_queue_table_returns_no_matches() {
+        let mut parsed = ParsedHyperlinkQuery::default();
+        parsed.statuses.push(StatusToken::Processing);
+
+        let sql_parts = build_hyperlink_sql_parts(&parsed, &[], OrderToken::Newest, false);
+        assert!(sql_parts.where_sql.contains("0 = 1"));
+        assert!(!sql_parts.where_sql.contains("FROM jobs queue_job"));
+        assert_eq!(sql_parts.values.len(), 0);
     }
 
     #[test]

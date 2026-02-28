@@ -9,6 +9,7 @@ pub(crate) mod font_diagnostics;
 pub mod graphql;
 mod html_layout;
 mod hyperlink_fetcher;
+mod http_logging;
 mod mdns;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -58,6 +59,7 @@ pub async fn start(host: &str, port: &str, mdns_options: MdnsOptions) -> Result<
         .merge(graphql::routes())
         .nest_service("/jobs", jobs_dashboard.into_service())
         .nest_service("/assets", ServeDir::new(assets_dir))
+        .layer(axum::middleware::from_fn(http_logging::log_requests))
         .with_state(state);
     let addr = [host, port].join(":");
 
