@@ -1,7 +1,7 @@
 [project]
-name = "hyperlinks"
-# binary = "hyperlinks"  # defaults to project name
-repo = "nakajima/hyperlinks"
+name = "hyperlinked"
+binary = "hyperlinked"  # defaults to project name
+repo = "nakajima/hyperlinked"
 # version_command = "git describe --tags --abbrev=0"
 
 [build]
@@ -19,7 +19,7 @@ enabled = true
 
 # [channels.homebrew]
 tap = "nakajima/homebrew-tap"
-formula_name = "hyperlinks"
+formula_name = "hyperlinked"
 
 # [channels.cargo]
 # crate_name = "hyperlinks"
@@ -27,4 +27,4 @@ formula_name = "hyperlinks"
 # [channels.curl]
 
 # [channels.nix]
-flake_repo = "nakajima/hyperlinks"  # defaults to project repo
+flake_repo = "nakajima/hyperlinked"  # defaults to project repo
