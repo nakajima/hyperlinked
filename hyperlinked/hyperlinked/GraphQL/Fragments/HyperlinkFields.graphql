@@ -1,0 +1,22 @@
+fragment HyperlinkFields on Hyperlink {
+  id
+  title
+  url
+  rawUrl
+  ogDescription
+  discoveryDepth
+  clicksCount
+  lastClickedAt
+  createdAt
+  updatedAt
+  thumbnailUrl
+  thumbnailDarkUrl
+  screenshotUrl
+  screenshotDarkUrl
+  discoveredVia {
+    id
+    title
+    url
+    rawUrl
+  }
+}

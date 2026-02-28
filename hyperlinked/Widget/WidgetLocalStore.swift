@@ -74,15 +74,14 @@ struct WidgetLocalStore {
             return nil
         }
 
-        let hostRaw = Self.stringColumn(statement, index: 3)
-        let host = normalizedHost(rawHost: hostRaw, fallbackURL: visitURL)
+        let host = normalizedHost(fallbackURL: visitURL)
         let title = normalizeDisplayText(titleRaw).ifEmpty(host)
 
-        let oneLinerRaw = Self.stringColumn(statement, index: 4)
-        let oneLiner = normalizeDisplayText(oneLinerRaw ?? "").ifEmpty(host)
+        let descriptionRaw = Self.stringColumn(statement, index: 3)
+        let oneLiner = normalizeDisplayText(descriptionRaw ?? "").ifEmpty(host)
 
-        let thumbnailURL = Self.stringColumn(statement, index: 5).flatMap(URL.init(string:))
-        let thumbnailDarkURL = Self.stringColumn(statement, index: 6).flatMap(URL.init(string:))
+        let thumbnailURL = Self.stringColumn(statement, index: 4).flatMap(URL.init(string:))
+        let thumbnailDarkURL = Self.stringColumn(statement, index: 5).flatMap(URL.init(string:))
 
         return WidgetHyperlink(
             id: id,
@@ -98,17 +97,7 @@ struct WidgetLocalStore {
         )
     }
 
-    private func normalizedHost(rawHost: String?, fallbackURL: URL) -> String {
-        if let rawHost {
-            let normalizedRaw = normalizeDisplayText(rawHost).lowercased()
-            if !normalizedRaw.isEmpty {
-                if normalizedRaw.hasPrefix("www.") {
-                    return String(normalizedRaw.dropFirst(4))
-                }
-                return normalizedRaw
-            }
-        }
-
+    private func normalizedHost(fallbackURL: URL) -> String {
         let fallback = fallbackURL.host?.lowercased() ?? fallbackURL.absoluteString
         if fallback.hasPrefix("www.") {
             return String(fallback.dropFirst(4))
@@ -135,9 +124,9 @@ struct WidgetLocalStore {
 
         switch configuration.scope {
         case .rootOnly:
-            filters.append("discovery_depth = 0")
+            filters.append("COALESCE(discovery_depth, 0) = 0")
         case .discoveredOnly:
-            filters.append("discovery_depth > 0")
+            filters.append("COALESCE(discovery_depth, 0) > 0")
         case .all:
             break
         }
@@ -163,8 +152,7 @@ struct WidgetLocalStore {
                 id,
                 title,
                 url,
-                host,
-                one_liner,
+                og_description,
                 thumbnail_url,
                 thumbnail_dark_url
             FROM \(Self.tableName)

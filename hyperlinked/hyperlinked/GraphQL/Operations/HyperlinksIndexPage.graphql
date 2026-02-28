@@ -1,0 +1,10 @@
+query HyperlinksIndexPage($limit: Int!, $page: Int!) {
+  hyperlinks(
+    pagination: { page: { limit: $limit, page: $page } }
+    orderBy: { id: DESC }
+  ) {
+    nodes {
+      ...HyperlinkFields
+    }
+  }
+}

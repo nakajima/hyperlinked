@@ -1,3 +1,5 @@
+import Apollo
+import ApolloAPI
 import Foundation
 
 enum APIClientError: LocalizedError {
@@ -30,9 +32,26 @@ struct APIClient {
     let baseURL: URL
     let session: URLSession
 
+    private let apollo: ApolloClient
+
     init(baseURL: URL, session: URLSession = .shared) {
         self.baseURL = baseURL
         self.session = session
+        let store = ApolloStore(cache: InMemoryNormalizedCache())
+        let sessionClient = URLSessionClient(
+            sessionConfiguration: session.configuration,
+            callbackQueue: nil
+        )
+        let interceptorProvider = DefaultInterceptorProvider(
+            client: sessionClient,
+            shouldInvalidateClientOnDeinit: true,
+            store: store
+        )
+        let transport = RequestChainNetworkTransport(
+            interceptorProvider: interceptorProvider,
+            endpointURL: baseURL.appendingPathComponent("graphql")
+        )
+        self.apollo = ApolloClient(networkTransport: transport, store: store)
     }
 
     func testConnection() async throws {
@@ -47,10 +66,12 @@ struct APIClient {
         var seenIDs = Set<Int>()
 
         while page < maxPages {
-            let payload: GraphQLHyperlinksPayload = try await sendGraphQL(
-                query: Self.hyperlinksPageQuery(page: page, limit: pageSize)
+            let data = try await executeQuery(
+                HyperlinkedAPI.HyperlinksIndexPageQuery(limit: pageSize, page: page)
             )
-            let batch = payload.hyperlinks.nodes.map { $0.toHyperlink() }
+            let batch = data.hyperlinks.nodes.map {
+                toHyperlink(fields: $0.fragments.hyperlinkFields)
+            }
             if batch.isEmpty {
                 break
             }
@@ -77,24 +98,32 @@ struct APIClient {
             throw APIClientError.decodingFailed("updatedAt must not be empty.")
         }
 
-        let payload: GraphQLUpdatedHyperlinksRootPayload = try await sendGraphQL(
-            query: Self.updatedHyperlinksQuery,
-            variables: ["updatedAt": normalizedUpdatedAt]
+        let data = try await executeQuery(HyperlinkedAPI.UpdatedHyperlinksQuery(updatedAt: normalizedUpdatedAt))
+
+        let changes = try data.updatedHyperlinks.changes.map { change in
+            UpdatedHyperlinkChange(
+                id: change.id,
+                changeType: try toChangeType(change.changeType),
+                updatedAt: change.updatedAt,
+                hyperlink: change.hyperlink.map { toHyperlink(fields: $0.fragments.hyperlinkFields) }
+            )
+        }
+
+        return UpdatedHyperlinksBatch(
+            serverUpdatedAt: data.updatedHyperlinks.serverUpdatedAt,
+            changes: changes
         )
-        return payload.updatedHyperlinks.toBatch()
     }
 
     func fetchHyperlink(id: Int) async throws -> Hyperlink {
-        let payload: GraphQLHyperlinksPayload = try await sendGraphQL(
-            query: Self.hyperlinkByIDQuery(id: id)
-        )
-        guard let first = payload.hyperlinks.nodes.first else {
+        let data = try await executeQuery(HyperlinkedAPI.HyperlinkDetailQuery(id: id))
+        guard let first = data.hyperlinks.nodes.first else {
             throw APIClientError.unexpectedStatus(
                 code: 404,
                 message: "hyperlink \(id) not found"
             )
         }
-        return first.toHyperlink()
+        return toHyperlink(fields: first.fragments.hyperlinkFields)
     }
 
     func createHyperlink(title: String, url: String) async throws -> Hyperlink {
@@ -132,31 +161,88 @@ struct APIClient {
             .appendingPathComponent("inline")
     }
 
-    private func sendGraphQL<T: Decodable>(
-        query: String,
-        variables: [String: String]? = nil
-    ) async throws -> T {
-        var request = try makeRequest(path: "/graphql", method: "POST")
-        request.httpBody = try JSONEncoder().encode(
-            GraphQLRequestPayload(query: query, variables: variables)
-        )
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let data = try await send(request)
+    private func executeQuery<Query: GraphQLQuery>(_ query: Query) async throws -> Query.Data {
+        try await withCheckedThrowingContinuation { continuation in
+            _ = apollo.fetch(
+                query: query,
+                cachePolicy: .fetchIgnoringCacheCompletely,
+                queue: .global(qos: .userInitiated)
+            ) { result in
+                switch result {
+                case .success(let graphQLResult):
+                    if let errors = graphQLResult.errors, !errors.isEmpty {
+                        let message = errors
+                            .compactMap(\.message)
+                            .joined(separator: "\n")
+                        continuation.resume(
+                            throwing: APIClientError.graphqlError(
+                                message.isEmpty ? "Unknown GraphQL error" : message
+                            )
+                        )
+                        return
+                    }
 
-        do {
-            let decoded = try JSONDecoder().decode(GraphQLResponsePayload<T>.self, from: data)
-            if let message = decoded.errors?.first?.message, !message.isEmpty {
-                throw APIClientError.graphqlError(message)
+                    guard let data = graphQLResult.data else {
+                        continuation.resume(
+                            throwing: APIClientError.decodingFailed(
+                                "GraphQL payload is missing `data`."
+                            )
+                        )
+                        return
+                    }
+
+                    continuation.resume(returning: data)
+                case .failure(let error):
+                    continuation.resume(
+                        throwing: APIClientError.decodingFailed(error.localizedDescription)
+                    )
+                }
             }
-            guard let payload = decoded.data else {
-                throw APIClientError.decodingFailed("GraphQL payload is missing `data`.")
-            }
-            return payload
-        } catch let error as APIClientError {
-            throw error
-        } catch {
-            throw APIClientError.decodingFailed(error.localizedDescription)
         }
+    }
+
+    private func toChangeType(
+        _ value: GraphQLEnum<HyperlinkedAPI.HyperlinkChangeType>
+    ) throws -> UpdatedHyperlinkChange.ChangeType {
+        switch value.value {
+        case .updated:
+            return .updated
+        case .deleted:
+            return .deleted
+        case nil:
+            throw APIClientError.decodingFailed("Unknown changeType: \(value.rawValue)")
+        }
+    }
+
+    private func toHyperlink(fields: HyperlinkedAPI.HyperlinkFields) -> Hyperlink {
+        Hyperlink(
+            id: fields.id,
+            title: fields.title,
+            url: fields.url,
+            rawURL: fields.rawUrl,
+            ogDescription: fields.ogDescription,
+            isURLValid: nil,
+            discoveryDepth: fields.discoveryDepth,
+            clicksCount: fields.clicksCount,
+            lastClickedAt: fields.lastClickedAt,
+            processingState: "ready",
+            createdAt: fields.createdAt,
+            updatedAt: fields.updatedAt,
+            thumbnailURL: fields.thumbnailUrl,
+            thumbnailDarkURL: fields.thumbnailDarkUrl,
+            screenshotURL: fields.screenshotUrl,
+            screenshotDarkURL: fields.screenshotDarkUrl,
+            discoveredVia: fields.discoveredVia.map(toHyperlinkRef)
+        )
+    }
+
+    private func toHyperlinkRef(_ model: HyperlinkedAPI.HyperlinkFields.DiscoveredVium) -> HyperlinkRef {
+        HyperlinkRef(
+            id: model.id,
+            title: model.title,
+            url: model.url,
+            rawURL: model.rawUrl
+        )
     }
 
     private func makeRequest(path: String, method: String) throws -> URLRequest {
@@ -198,75 +284,6 @@ struct APIClient {
 
         return ""
     }
-
-    private static let hyperlinkFields = """
-      id
-      title
-      url
-      rawUrl
-      ogDescription
-      discoveryDepth
-      clicksCount
-      lastClickedAt
-      createdAt
-      updatedAt
-      thumbnailUrl
-      thumbnailDarkUrl
-      screenshotUrl
-      screenshotDarkUrl
-      discoveredVia {
-        id
-        title
-        url
-        rawUrl
-      }
-    """
-
-    private static func hyperlinksPageQuery(page: Int, limit: Int) -> String {
-        """
-        query HyperlinksIndexPage {
-          hyperlinks(
-            pagination: { page: { limit: \(limit), page: \(page) } }
-            orderBy: { id: DESC }
-          ) {
-            nodes {
-        \(hyperlinkFields)
-            }
-          }
-        }
-        """
-    }
-
-    private static let updatedHyperlinksQuery = """
-    query UpdatedHyperlinks($updatedAt: String!) {
-      updatedHyperlinks(updatedAt: $updatedAt) {
-        serverUpdatedAt
-        changes {
-          id
-          changeType
-          updatedAt
-          hyperlink {
-    \(hyperlinkFields)
-          }
-        }
-      }
-    }
-    """
-
-    private static func hyperlinkByIDQuery(id: Int) -> String {
-        """
-        query HyperlinkDetail {
-          hyperlinks(
-            filters: { id: { eq: \(id) } }
-            pagination: { page: { limit: 1, page: 0 } }
-          ) {
-            nodes {
-        \(hyperlinkFields)
-            }
-          }
-        }
-        """
-    }
 }
 
 struct UpdatedHyperlinksBatch {
@@ -284,109 +301,4 @@ struct UpdatedHyperlinkChange {
     let changeType: ChangeType
     let updatedAt: String
     let hyperlink: Hyperlink?
-}
-
-private struct GraphQLRequestPayload: Encodable {
-    let query: String
-    let variables: [String: String]?
-}
-
-private struct GraphQLResponsePayload<T: Decodable>: Decodable {
-    let data: T?
-    let errors: [GraphQLErrorPayload]?
-}
-
-private struct GraphQLErrorPayload: Decodable {
-    let message: String
-}
-
-private struct GraphQLHyperlinksPayload: Decodable {
-    let hyperlinks: GraphQLHyperlinksConnectionPayload
-}
-
-private struct GraphQLUpdatedHyperlinksRootPayload: Decodable {
-    let updatedHyperlinks: GraphQLUpdatedHyperlinksPayload
-}
-
-private struct GraphQLUpdatedHyperlinksPayload: Decodable {
-    let serverUpdatedAt: String
-    let changes: [GraphQLUpdatedHyperlinkChangePayload]
-
-    func toBatch() -> UpdatedHyperlinksBatch {
-        UpdatedHyperlinksBatch(
-            serverUpdatedAt: serverUpdatedAt,
-            changes: changes.map { $0.toChange() }
-        )
-    }
-}
-
-private struct GraphQLUpdatedHyperlinkChangePayload: Decodable {
-    let id: Int
-    let changeType: UpdatedHyperlinkChange.ChangeType
-    let updatedAt: String
-    let hyperlink: GraphQLHyperlinkNodePayload?
-
-    func toChange() -> UpdatedHyperlinkChange {
-        UpdatedHyperlinkChange(
-            id: id,
-            changeType: changeType,
-            updatedAt: updatedAt,
-            hyperlink: hyperlink?.toHyperlink()
-        )
-    }
-}
-
-private struct GraphQLHyperlinksConnectionPayload: Decodable {
-    let nodes: [GraphQLHyperlinkNodePayload]
-}
-
-private struct GraphQLHyperlinkNodePayload: Decodable {
-    let id: Int
-    let title: String
-    let url: String
-    let rawUrl: String
-    let ogDescription: String?
-    let discoveryDepth: Int?
-    let clicksCount: Int
-    let lastClickedAt: String?
-    let createdAt: String
-    let updatedAt: String
-    let thumbnailUrl: String?
-    let thumbnailDarkUrl: String?
-    let screenshotUrl: String?
-    let screenshotDarkUrl: String?
-    let discoveredVia: [GraphQLHyperlinkRefPayload]?
-
-    func toHyperlink() -> Hyperlink {
-        Hyperlink(
-            id: id,
-            title: title,
-            url: url,
-            rawURL: rawUrl,
-            ogDescription: ogDescription,
-            isURLValid: nil,
-            discoveryDepth: discoveryDepth,
-            clicksCount: clicksCount,
-            lastClickedAt: lastClickedAt,
-            processingState: "ready",
-            createdAt: createdAt,
-            updatedAt: updatedAt,
-            thumbnailURL: thumbnailUrl,
-            thumbnailDarkURL: thumbnailDarkUrl,
-            screenshotURL: screenshotUrl,
-            screenshotDarkURL: screenshotDarkUrl,
-            discoveredVia: discoveredVia?.map { $0.toHyperlinkRef() } ?? []
-        )
-    }
-}
-
-private struct GraphQLHyperlinkRefPayload: Decodable {
-    let id: Int
-    let title: String
-    let url: String
-    let rawUrl: String
-
-    func toHyperlinkRef() -> HyperlinkRef {
-        HyperlinkRef(id: id, title: title, url: url, rawURL: rawUrl)
-    }
 }

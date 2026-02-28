@@ -191,6 +191,61 @@ public struct DB {
             }
         }
 
+        migrator.registerMigration("reset_hyperlink_records_v2_single_model") { db in
+            try db.drop(table: hyperlinkTableName)
+
+            try db.create(table: hyperlinkTableName) { t in
+                t.column("id", .integer).primaryKey()
+                t.column("title", .text).notNull()
+                t.column("url", .text).notNull()
+                t.column("raw_url", .text).notNull()
+                t.column("og_description", .text)
+                t.column("is_url_valid", .boolean)
+                t.column("discovery_depth", .integer)
+                t.column("clicks_count", .integer).notNull().defaults(to: 0)
+                t.column("last_clicked_at", .text)
+                t.column("processing_state", .text).notNull().defaults(to: "ready")
+                t.column("created_at", .text).notNull()
+                t.column("updated_at", .text).notNull()
+                t.column("thumbnail_url", .text)
+                t.column("thumbnail_dark_url", .text)
+                t.column("screenshot_url", .text)
+                t.column("screenshot_dark_url", .text)
+                t.column("discovered_via_json", .text).notNull().defaults(to: "[]")
+            }
+
+            try db.create(
+                index: "idx_hyperlink_records_discovery_depth_created_at_id",
+                on: hyperlinkTableName,
+                columns: ["discovery_depth", "created_at", "id"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_hyperlink_records_clicks_count_created_at_id",
+                on: hyperlinkTableName,
+                columns: ["clicks_count", "created_at", "id"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_hyperlink_records_last_clicked_at_created_at_id",
+                on: hyperlinkTableName,
+                columns: ["last_clicked_at", "created_at", "id"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_hyperlink_records_updated_at_id",
+                on: hyperlinkTableName,
+                columns: ["updated_at", "id"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_hyperlink_records_created_at_id",
+                on: hyperlinkTableName,
+                columns: ["created_at", "id"],
+                ifNotExists: true
+            )
+        }
+
         try migrator.migrate(queue)
     }
 

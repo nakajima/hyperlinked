@@ -1,4 +1,5 @@
 use clap::{ArgAction, Parser, Subcommand};
+use std::fs;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, prelude::*};
@@ -67,6 +68,13 @@ enum Commands {
         batch_size: u64,
     },
     ReprocessAllSnapshots,
+    ExportGraphqlSchema {
+        #[arg(
+            long,
+            default_value = "hyperlinked/hyperlinked/GraphQL/Schema/schema.graphqls"
+        )]
+        out: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -132,6 +140,7 @@ async fn run() -> Result<i32, String> {
         }
         Commands::TitlesBackfill { batch_size } => run_titles_backfill(batch_size).await,
         Commands::ReprocessAllSnapshots => run_reprocess_all_snapshots().await,
+        Commands::ExportGraphqlSchema { out } => run_export_graphql_schema(out).await,
     }
 }
 
@@ -306,5 +315,28 @@ async fn run_reprocess_all_snapshots() -> Result<i32, String> {
         "snapshot reprocess: total_links={total_hyperlinks} queued={queued} skipped_active={skipped_active}"
     );
 
+    Ok(0)
+}
+
+async fn run_export_graphql_schema(out: PathBuf) -> Result<i32, String> {
+    let connection = hyperlinked::db::connection::init()
+        .await
+        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+
+    let sdl = hyperlinked::server::graphql::export_schema_sdl(connection)
+        .map_err(|err| format!("failed to export graphql schema: {err}"))?;
+
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create schema output directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+
+    fs::write(&out, sdl)
+        .map_err(|err| format!("failed to write schema file {}: {err}", out.display()))?;
+    println!("wrote graphql schema to {}", out.display());
     Ok(0)
 }

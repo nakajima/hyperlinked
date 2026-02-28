@@ -132,6 +132,14 @@ pub fn routes() -> Router<Context> {
     Router::new().route("/graphql", get(playground).post(execute))
 }
 
+pub fn export_schema_sdl(connection: DatabaseConnection) -> Result<String, SchemaError> {
+    schema(
+        connection,
+        GraphqlRequestBaseUrl("http://localhost:8765".to_string()),
+    )
+    .map(|built| built.sdl())
+}
+
 async fn playground() -> Html<String> {
     Html(graphiql_source("/graphql", None))
 }

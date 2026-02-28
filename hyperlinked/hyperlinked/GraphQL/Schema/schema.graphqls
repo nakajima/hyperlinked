@@ -1,0 +1,446 @@
+input BooleanFilterInput {
+	eq: Boolean
+	ne: Boolean
+	gt: Boolean
+	gte: Boolean
+	lt: Boolean
+	lte: Boolean
+	is_in: [Boolean!]
+	is_not_in: [Boolean!]
+	is_null: Boolean
+	is_not_null: Boolean
+}
+
+input CursorInput {
+	cursor: String
+	limit: Int!
+}
+
+input FloatFilterInput {
+	eq: Float
+	ne: Float
+	gt: Float
+	gte: Float
+	lt: Float
+	lte: Float
+	is_in: [Float!]
+	is_not_in: [Float!]
+	is_null: Float
+	is_not_null: Float
+	between: [Float!]
+	not_between: [Float!]
+}
+
+type Hyperlink {
+	id: Int!
+	title: String!
+	url: String!
+	rawUrl: String!
+	ogTitle: String
+	ogDescription: String
+	ogType: String
+	ogUrl: String
+	ogImageUrl: String
+	ogSiteName: String
+	discoveryDepth: Int!
+	clicksCount: Int!
+	lastClickedAt: String
+	createdAt: String!
+	updatedAt: String!
+	hyperlinkProcessingJob(filters: HyperlinkProcessingJobFilterInput, orderBy: HyperlinkProcessingJobOrderInput, pagination: PaginationInput): HyperlinkProcessingJobConnection!
+	hyperlinkArtifact(filters: HyperlinkArtifactFilterInput, orderBy: HyperlinkArtifactOrderInput, pagination: PaginationInput): HyperlinkArtifactConnection!
+	sublinks(filters: HyperlinkFilterInput, orderBy: HyperlinkOrderInput, pagination: PaginationInput): HyperlinkConnection!
+	discoveredVia: [HyperlinkRef!]!
+	screenshotUrl: String
+	screenshotDarkUrl: String
+	thumbnailUrl: String
+	thumbnailDarkUrl: String
+}
+
+type HyperlinkArtifact {
+	id: Int!
+	hyperlinkId: Int!
+	jobId: Int
+	kind: HyperlinkArtifactKindEnum!
+	payload: String!
+	storagePath: String
+	storageBackend: String
+	checksumSha256: String
+	contentType: String!
+	sizeBytes: Int!
+	createdAt: String!
+	hyperlink: Hyperlink
+	hyperlinkProcessingJob: HyperlinkProcessingJob
+}
+
+type HyperlinkArtifactConnection {
+	pageInfo: PageInfo!
+	paginationInfo: PaginationInfo
+	nodes: [HyperlinkArtifact!]!
+	edges: [HyperlinkArtifactEdge!]!
+}
+
+type HyperlinkArtifactEdge {
+	cursor: String!
+	node: HyperlinkArtifact!
+}
+
+input HyperlinkArtifactFilterInput {
+	id: IntegerFilterInput
+	hyperlinkId: IntegerFilterInput
+	jobId: IntegerFilterInput
+	kind: StringFilterInput
+	storagePath: StringFilterInput
+	storageBackend: StringFilterInput
+	checksumSha256: StringFilterInput
+	contentType: StringFilterInput
+	sizeBytes: IntegerFilterInput
+	createdAt: TextFilterInput
+	and: [HyperlinkArtifactFilterInput!]
+	or: [HyperlinkArtifactFilterInput!]
+}
+
+enum HyperlinkArtifactKindEnum {
+	snapshot_warc
+	pdf_source
+	snapshot_error
+	oembed_meta
+	oembed_error
+	og_meta
+	og_image
+	og_error
+	readable_text
+	readable_meta
+	readable_error
+	screenshot_webp
+	screenshot_thumb_webp
+	screenshot_dark_webp
+	screenshot_thumb_dark_webp
+	screenshot_error
+}
+
+input HyperlinkArtifactKindEnumFilterInput {
+	eq: HyperlinkArtifactKindEnum
+	ne: HyperlinkArtifactKindEnum
+	gt: HyperlinkArtifactKindEnum
+	gte: HyperlinkArtifactKindEnum
+	lt: HyperlinkArtifactKindEnum
+	lte: HyperlinkArtifactKindEnum
+	is_in: [HyperlinkArtifactKindEnum!]
+	is_not_in: [HyperlinkArtifactKindEnum!]
+	is_null: HyperlinkArtifactKindEnum
+	is_not_null: HyperlinkArtifactKindEnum
+}
+
+input HyperlinkArtifactOrderInput {
+	id: OrderByEnum
+	hyperlinkId: OrderByEnum
+	jobId: OrderByEnum
+	kind: OrderByEnum
+	payload: OrderByEnum
+	storagePath: OrderByEnum
+	storageBackend: OrderByEnum
+	checksumSha256: OrderByEnum
+	contentType: OrderByEnum
+	sizeBytes: OrderByEnum
+	createdAt: OrderByEnum
+}
+
+enum HyperlinkChangeType {
+	UPDATED
+	DELETED
+}
+
+type HyperlinkConnection {
+	pageInfo: PageInfo!
+	paginationInfo: PaginationInfo
+	nodes: [Hyperlink!]!
+	edges: [HyperlinkEdge!]!
+}
+
+type HyperlinkEdge {
+	cursor: String!
+	node: Hyperlink!
+}
+
+input HyperlinkFilterInput {
+	id: IntegerFilterInput
+	title: StringFilterInput
+	url: StringFilterInput
+	rawUrl: StringFilterInput
+	ogTitle: StringFilterInput
+	ogDescription: StringFilterInput
+	ogType: StringFilterInput
+	ogUrl: StringFilterInput
+	ogImageUrl: StringFilterInput
+	ogSiteName: StringFilterInput
+	discoveryDepth: IntegerFilterInput
+	clicksCount: IntegerFilterInput
+	lastClickedAt: TextFilterInput
+	createdAt: TextFilterInput
+	updatedAt: TextFilterInput
+	and: [HyperlinkFilterInput!]
+	or: [HyperlinkFilterInput!]
+}
+
+input HyperlinkOrderInput {
+	id: OrderByEnum
+	title: OrderByEnum
+	url: OrderByEnum
+	rawUrl: OrderByEnum
+	ogTitle: OrderByEnum
+	ogDescription: OrderByEnum
+	ogType: OrderByEnum
+	ogUrl: OrderByEnum
+	ogImageUrl: OrderByEnum
+	ogSiteName: OrderByEnum
+	discoveryDepth: OrderByEnum
+	clicksCount: OrderByEnum
+	lastClickedAt: OrderByEnum
+	createdAt: OrderByEnum
+	updatedAt: OrderByEnum
+}
+
+type HyperlinkProcessingJob {
+	id: Int!
+	hyperlinkId: Int!
+	kind: HyperlinkProcessingJobKindEnum!
+	state: HyperlinkProcessingJobStateEnum!
+	errorMessage: String
+	queuedAt: String!
+	startedAt: String
+	finishedAt: String
+	createdAt: String!
+	updatedAt: String!
+	hyperlink: Hyperlink
+	hyperlinkArtifact(filters: HyperlinkArtifactFilterInput, orderBy: HyperlinkArtifactOrderInput, pagination: PaginationInput): HyperlinkArtifactConnection!
+}
+
+type HyperlinkProcessingJobConnection {
+	pageInfo: PageInfo!
+	paginationInfo: PaginationInfo
+	nodes: [HyperlinkProcessingJob!]!
+	edges: [HyperlinkProcessingJobEdge!]!
+}
+
+type HyperlinkProcessingJobEdge {
+	cursor: String!
+	node: HyperlinkProcessingJob!
+}
+
+input HyperlinkProcessingJobFilterInput {
+	id: IntegerFilterInput
+	hyperlinkId: IntegerFilterInput
+	kind: StringFilterInput
+	state: StringFilterInput
+	errorMessage: StringFilterInput
+	queuedAt: TextFilterInput
+	startedAt: TextFilterInput
+	finishedAt: TextFilterInput
+	createdAt: TextFilterInput
+	updatedAt: TextFilterInput
+	and: [HyperlinkProcessingJobFilterInput!]
+	or: [HyperlinkProcessingJobFilterInput!]
+}
+
+enum HyperlinkProcessingJobKindEnum {
+	snapshot
+	og
+	oembed
+	readability
+	sublink_discovery
+}
+
+input HyperlinkProcessingJobKindEnumFilterInput {
+	eq: HyperlinkProcessingJobKindEnum
+	ne: HyperlinkProcessingJobKindEnum
+	gt: HyperlinkProcessingJobKindEnum
+	gte: HyperlinkProcessingJobKindEnum
+	lt: HyperlinkProcessingJobKindEnum
+	lte: HyperlinkProcessingJobKindEnum
+	is_in: [HyperlinkProcessingJobKindEnum!]
+	is_not_in: [HyperlinkProcessingJobKindEnum!]
+	is_null: HyperlinkProcessingJobKindEnum
+	is_not_null: HyperlinkProcessingJobKindEnum
+}
+
+input HyperlinkProcessingJobOrderInput {
+	id: OrderByEnum
+	hyperlinkId: OrderByEnum
+	kind: OrderByEnum
+	state: OrderByEnum
+	errorMessage: OrderByEnum
+	queuedAt: OrderByEnum
+	startedAt: OrderByEnum
+	finishedAt: OrderByEnum
+	createdAt: OrderByEnum
+	updatedAt: OrderByEnum
+}
+
+enum HyperlinkProcessingJobStateEnum {
+	queued
+	running
+	succeeded
+	failed
+}
+
+input HyperlinkProcessingJobStateEnumFilterInput {
+	eq: HyperlinkProcessingJobStateEnum
+	ne: HyperlinkProcessingJobStateEnum
+	gt: HyperlinkProcessingJobStateEnum
+	gte: HyperlinkProcessingJobStateEnum
+	lt: HyperlinkProcessingJobStateEnum
+	lte: HyperlinkProcessingJobStateEnum
+	is_in: [HyperlinkProcessingJobStateEnum!]
+	is_not_in: [HyperlinkProcessingJobStateEnum!]
+	is_null: HyperlinkProcessingJobStateEnum
+	is_not_null: HyperlinkProcessingJobStateEnum
+}
+
+type HyperlinkRef {
+	id: Int!
+	title: String!
+	url: String!
+	rawUrl: String!
+}
+
+input IdentityFilterInput {
+	eq: String
+	ne: String
+	gt: String
+	gte: String
+	lt: String
+	lte: String
+	is_in: [String!]
+	is_not_in: [String!]
+	is_null: String
+	is_not_null: String
+	between: [String!]
+	not_between: [String!]
+}
+
+input IntegerFilterInput {
+	eq: Int
+	ne: Int
+	gt: Int
+	gte: Int
+	lt: Int
+	lte: Int
+	is_in: [Int!]
+	is_not_in: [Int!]
+	is_null: Int
+	is_not_null: Int
+	between: [Int!]
+	not_between: [Int!]
+}
+
+type Mutation {
+	_ping: String
+}
+
+input OffsetInput {
+	limit: Int!
+	offset: Int!
+}
+
+enum OrderByEnum {
+	ASC
+	DESC
+}
+
+type PageInfo {
+	hasPreviousPage: Boolean!
+	hasNextPage: Boolean!
+	startCursor: String
+	endCursor: String
+}
+
+input PageInput {
+	limit: Int!
+	page: Int!
+}
+
+type PaginationInfo {
+	pages: Int!
+	current: Int!
+	offset: Int!
+	total: Int!
+}
+
+input PaginationInput @oneOf {
+	cursor: CursorInput
+	page: PageInput
+	offset: OffsetInput
+}
+
+type Query {
+	hyperlinks(filters: HyperlinkFilterInput, orderBy: HyperlinkOrderInput, pagination: PaginationInput, q: String): HyperlinkConnection!
+	updatedHyperlinks(updatedAt: String!): UpdatedHyperlinksPayload!
+	hyperlinkProcessingJob(filters: HyperlinkProcessingJobFilterInput, orderBy: HyperlinkProcessingJobOrderInput, pagination: PaginationInput): HyperlinkProcessingJobConnection!
+	hyperlinkArtifact(filters: HyperlinkArtifactFilterInput, orderBy: HyperlinkArtifactOrderInput, pagination: PaginationInput): HyperlinkArtifactConnection!
+	_sea_orm_entity_metadata(table_name: String!): String
+}
+
+input StringFilterInput {
+	eq: String
+	ne: String
+	gt: String
+	gte: String
+	lt: String
+	lte: String
+	is_in: [String!]
+	is_not_in: [String!]
+	is_null: String
+	is_not_null: String
+	contains: String
+	starts_with: String
+	ends_with: String
+	like: String
+	not_like: String
+	between: [String!]
+	not_between: [String!]
+}
+
+input TextFilterInput {
+	eq: String
+	ne: String
+	gt: String
+	gte: String
+	lt: String
+	lte: String
+	is_in: [String!]
+	is_not_in: [String!]
+	is_null: String
+	is_not_null: String
+	between: [String!]
+	not_between: [String!]
+}
+
+type UpdatedHyperlinkChange {
+	id: Int!
+	changeType: HyperlinkChangeType!
+	updatedAt: String!
+	hyperlink: Hyperlink
+}
+
+type UpdatedHyperlinksPayload {
+	serverUpdatedAt: String!
+	changes: [UpdatedHyperlinkChange!]!
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Indicates that an Input Object is a OneOf Input Object (and thus requires exactly one of its field be provided)
+"""
+directive @oneOf on INPUT_OBJECT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+schema {
+	query: Query
+	mutation: Mutation
+}

@@ -1,0 +1,10 @@
+query HyperlinkDetail($id: Int!) {
+  hyperlinks(
+    filters: { id: { eq: $id } }
+    pagination: { page: { limit: 1, page: 0 } }
+  ) {
+    nodes {
+      ...HyperlinkFields
+    }
+  }
+}

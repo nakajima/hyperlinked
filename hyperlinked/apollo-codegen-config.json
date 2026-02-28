@@ -1,0 +1,28 @@
+{
+  "schemaNamespace": "HyperlinkedAPI",
+  "input": {
+    "operationSearchPaths": [
+      "./hyperlinked/GraphQL/Operations/**/*.graphql",
+      "./hyperlinked/GraphQL/Fragments/**/*.graphql"
+    ],
+    "schemaSearchPaths": [
+      "./hyperlinked/GraphQL/Schema/**/*.graphqls"
+    ]
+  },
+  "output": {
+    "testMocks": {
+      "none": {}
+    },
+    "schemaTypes": {
+      "path": "./hyperlinked/GraphQL/Generated",
+      "moduleType": {
+        "embeddedInTarget": {
+          "name": "hyperlinked"
+        }
+      }
+    },
+    "operations": {
+      "inSchemaModule": {}
+    }
+  }
+}

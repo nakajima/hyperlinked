@@ -1,0 +1,13 @@
+query UpdatedHyperlinks($updatedAt: String!) {
+  updatedHyperlinks(updatedAt: $updatedAt) {
+    serverUpdatedAt
+    changes {
+      id
+      changeType
+      updatedAt
+      hyperlink {
+        ...HyperlinkFields
+      }
+    }
+  }
+}

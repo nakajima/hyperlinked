@@ -511,7 +511,7 @@ private struct HyperlinkListRowContent: View {
                     .foregroundStyle(.secondary)
 										.lineLimit(1)
 							
-							if let description = hyperlink.ogDescription, hyperlink.discoveredVia.isEmpty {
+							if let description = hyperlink.ogDescription {
 								Text(description)
 									.foregroundStyle(.secondary)
 									.font(.caption)
@@ -519,10 +519,13 @@ private struct HyperlinkListRowContent: View {
 							}
 
                 HStack(spacing: 12) {
-									if !hyperlink.discoveredVia.isEmpty {
-										Text("From \(hyperlink.discoveredVia[0].url)")
-											.foregroundStyle(.secondary)
-									}
+                    if let parent = hyperlink.discoveredVia.first {
+                        let discoveredLabel = parent.title.trimmingCharacters(
+                            in: .whitespacesAndNewlines
+                        ).isEmpty ? parent.url : parent.title
+                        Text("Discovered via \(discoveredLabel)")
+                            .foregroundStyle(.secondary)
+                    }
   
                     if hyperlink.isURLValid == false {
                         Text("Invalid URL")
