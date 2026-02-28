@@ -1,12 +1,22 @@
 import SwiftUI
 import UIKit
+import OSLog
+import WidgetKit
+import GRDBQuery
 
 struct HyperlinksListView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.colorScheme) private var colorScheme
+    private static let syncQuery = "scope:all order:newest"
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "fm.folder.hyperlinked",
+        category: "hyperlink-cache"
+    )
 
-    @State private var hyperlinks: [Hyperlink] = []
-    @State private var pendingOutboxItems: [ShareOutboxItemRecord] = []
+    @Query(CachedHyperlinksRequest(limit: 500))
+    private var cachedHyperlinks: [Hyperlink]
+    @Query(PendingShareOutboxItemsRequest(limit: 200))
+    private var pendingOutboxItems: [ShareOutboxItemRecord]
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var activeSheet: ActiveSheet?
@@ -16,7 +26,6 @@ struct HyperlinksListView: View {
     private var showDiscoveredLinks = false
     @AppStorage("hyperlinks.view_options.order_override")
     private var orderOverrideRawValue = ""
-    @State private var pendingFilterTask: Task<Void, Never>?
 
     private enum ActiveSheet: String, Identifiable {
         case add
@@ -78,16 +87,16 @@ struct HyperlinksListView: View {
         )
     }
 
-    private var queryString: String {
-        HyperlinksListQueryBuilder.build(
-            queryText: queryText,
-            showDiscoveredLinks: showDiscoveredLinks,
-            orderOverrideRawValue: orderOverride?.rawValue
-        )
+    private var visibleHyperlinks: [Hyperlink] {
+        let scoped = showDiscoveredLinks
+            ? cachedHyperlinks
+            : cachedHyperlinks.filter { ($0.discoveryDepth ?? 0) == 0 }
+        let filtered = filterHyperlinks(scoped, query: trimmedQueryText)
+        return sortHyperlinks(filtered, order: effectiveOrder, query: trimmedQueryText)
     }
 
     private var listRows: [ListRow] {
-        pendingOutboxItems.map(ListRow.pending) + hyperlinks.map(ListRow.hyperlink)
+        pendingOutboxItems.map(ListRow.pending) + visibleHyperlinks.map(ListRow.hyperlink)
     }
 
     var body: some View {
@@ -143,24 +152,16 @@ struct HyperlinksListView: View {
             await retryPendingOutboxLoop()
         }
         .refreshable {
+						WidgetCenter.shared.reloadAllTimelines()
             await loadHyperlinks()
         }
         .onSubmit(of: .search) {
-            Task {
-                await loadHyperlinks()
-            }
+            // Search is local over cached records.
         }
         .onChange(of: queryText) {
             if !hasFreeText, orderOverride == .relevance {
                 orderOverrideRawValue = ""
             }
-            scheduleFilterReload()
-        }
-        .onChange(of: showDiscoveredLinks) {
-            scheduleFilterReload()
-        }
-        .onChange(of: orderOverrideRawValue) {
-            scheduleFilterReload()
         }
         .onReceive(
             NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
@@ -173,8 +174,7 @@ struct HyperlinksListView: View {
             switch sheet {
             case .add:
                 AddHyperlinkView { created in
-                    hyperlinks.removeAll { $0.id == created.id }
-                    hyperlinks.insert(created, at: 0)
+                    persistHyperlinks(hyperlinks: [created])
                 }
                 .environmentObject(appModel)
             case .settings:
@@ -197,7 +197,7 @@ struct HyperlinksListView: View {
 
     private var listContent: some View {
         List {
-            if isLoading && hyperlinks.isEmpty && pendingOutboxItems.isEmpty {
+            if isLoading && visibleHyperlinks.isEmpty && pendingOutboxItems.isEmpty {
                 Section {
                     HStack {
                         Spacer()
@@ -207,7 +207,7 @@ struct HyperlinksListView: View {
                     .padding(.vertical, 24)
                     .listRowSeparator(.hidden)
                 }
-            } else if let errorMessage, hyperlinks.isEmpty && pendingOutboxItems.isEmpty {
+            } else if let errorMessage, visibleHyperlinks.isEmpty && pendingOutboxItems.isEmpty {
                 Section {
                     VStack(spacing: 12) {
                         Image(systemName: "wifi.slash")
@@ -231,7 +231,7 @@ struct HyperlinksListView: View {
                     .padding(.vertical, 24)
                     .listRowSeparator(.hidden)
                 }
-            } else if hyperlinks.isEmpty && pendingOutboxItems.isEmpty {
+            } else if visibleHyperlinks.isEmpty && pendingOutboxItems.isEmpty {
                 Section {
                     VStack(spacing: 12) {
                         Image(systemName: "link.badge.plus")
@@ -290,24 +290,8 @@ struct HyperlinksListView: View {
         .listStyle(.plain)
     }
 
-    private func scheduleFilterReload() {
-        pendingFilterTask?.cancel()
-        pendingFilterTask = Task {
-            try? await Task.sleep(nanoseconds: 120_000_000)
-            guard !Task.isCancelled else {
-                return
-            }
-            pendingFilterTask = nil
-            await loadHyperlinks()
-        }
-    }
-
     private func loadHyperlinks() async {
-        pendingFilterTask?.cancel()
-        await refreshPendingOutboxItems()
-
         guard let client = appModel.apiClient else {
-            hyperlinks = []
             errorMessage = "No server selected."
             return
         }
@@ -317,8 +301,8 @@ struct HyperlinksListView: View {
 
         do {
             await retryPendingOutbox(using: client)
-            await refreshPendingOutboxItems()
-            hyperlinks = try await client.listHyperlinks(q: queryString)
+            let fetched = try await client.listHyperlinks(q: Self.syncQuery)
+            persistHyperlinks(hyperlinks: fetched)
             errorMessage = nil
         } catch is CancellationError {
             return
@@ -335,29 +319,167 @@ struct HyperlinksListView: View {
                 return
             }
             await retryPendingOutbox(using: client)
-            await refreshPendingOutboxItems()
             try? await Task.sleep(nanoseconds: 30_000_000_000)
         }
     }
 
     private func retryPendingOutbox(using client: APIClient) async {
-        guard let store = try? ShareOutboxStore.openShared(appGroupID: AppModel.appGroupID) else {
+        guard let store = try? ShareOutboxStore.openShared() else {
             return
         }
         let coordinator = OutboxDeliveryCoordinator(store: store, client: client)
         _ = await coordinator.drainDueItems(limit: 20)
     }
 
-    private func refreshPendingOutboxItems() async {
-        guard let store = try? ShareOutboxStore.openShared(appGroupID: AppModel.appGroupID) else {
-            pendingOutboxItems = []
+    private func persistHyperlinks(hyperlinks: [Hyperlink]) {
+        guard !hyperlinks.isEmpty else {
             return
         }
-        if let items = try? store.pendingItems(limit: 200) {
-            pendingOutboxItems = items
-        } else {
-            pendingOutboxItems = []
+
+        do {
+            let store = try HyperlinkStore.openShared()
+            try store.upsert(hyperlinks: hyperlinks)
+        } catch {
+            Self.logger.debug("Failed to persist hyperlinks: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    private func filterHyperlinks(_ hyperlinks: [Hyperlink], query: String) -> [Hyperlink] {
+        let tokens = query
+            .lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        guard !tokens.isEmpty else {
+            return hyperlinks
+        }
+
+        return hyperlinks.filter { hyperlink in
+            let host = URL(string: hyperlink.url)?.host?.lowercased() ?? ""
+            let haystacks = [
+                hyperlink.title.lowercased(),
+                hyperlink.url.lowercased(),
+                hyperlink.rawURL.lowercased(),
+                host,
+            ]
+            return tokens.allSatisfy { token in
+                haystacks.contains { $0.contains(token) }
+            }
+        }
+    }
+
+    private func sortHyperlinks(
+        _ hyperlinks: [Hyperlink],
+        order: HyperlinkOrderFilter,
+        query: String
+    ) -> [Hyperlink] {
+        switch order {
+        case .newest:
+            return hyperlinks.sorted(by: newestFirst)
+        case .oldest:
+            return hyperlinks.sorted(by: oldestFirst)
+        case .mostClicked:
+            return hyperlinks.sorted(by: mostClickedFirst)
+        case .recentlyClicked:
+            return hyperlinks.sorted(by: recentlyClickedFirst)
+        case .random:
+            return randomlyOrdered(hyperlinks, querySeed: query)
+        case .relevance:
+            return relevanceOrdered(hyperlinks, query: query)
+        }
+    }
+
+    private func relevanceOrdered(_ hyperlinks: [Hyperlink], query: String) -> [Hyperlink] {
+        let tokens = query
+            .lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        guard !tokens.isEmpty else {
+            return hyperlinks.sorted(by: newestFirst)
+        }
+
+        return hyperlinks.sorted { lhs, rhs in
+            let leftScore = relevanceScore(hyperlink: lhs, tokens: tokens)
+            let rightScore = relevanceScore(hyperlink: rhs, tokens: tokens)
+            if leftScore != rightScore {
+                return leftScore > rightScore
+            }
+            return newestFirst(lhs: lhs, rhs: rhs)
+        }
+    }
+
+    private func relevanceScore(hyperlink: Hyperlink, tokens: [String]) -> Int {
+        let title = hyperlink.title.lowercased()
+        let url = hyperlink.url.lowercased()
+        let rawURL = hyperlink.rawURL.lowercased()
+        let host = URL(string: hyperlink.url)?.host?.lowercased() ?? ""
+
+        var score = 0
+        for token in tokens {
+            if title.contains(token) {
+                score += 6
+            }
+            if host.contains(token) {
+                score += 4
+            }
+            if url.contains(token) {
+                score += 2
+            }
+            if rawURL.contains(token) {
+                score += 1
+            }
+        }
+        return score
+    }
+
+    private func randomlyOrdered(_ hyperlinks: [Hyperlink], querySeed: String) -> [Hyperlink] {
+        let seed = stableSeed(from: querySeed)
+        return hyperlinks.sorted { lhs, rhs in
+            let lhsRank = (lhs.id &* 1_103_515_245) ^ seed
+            let rhsRank = (rhs.id &* 1_103_515_245) ^ seed
+            if lhsRank != rhsRank {
+                return lhsRank < rhsRank
+            }
+            return newestFirst(lhs: lhs, rhs: rhs)
+        }
+    }
+
+    private func stableSeed(from value: String) -> Int {
+        var hash = 2_166_136_261
+        for scalar in value.unicodeScalars {
+            hash ^= Int(scalar.value)
+            hash = hash &* 16_777_619
+        }
+        return hash
+    }
+
+    private func newestFirst(lhs: Hyperlink, rhs: Hyperlink) -> Bool {
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt > rhs.createdAt
+        }
+        return lhs.id > rhs.id
+    }
+
+    private func oldestFirst(lhs: Hyperlink, rhs: Hyperlink) -> Bool {
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt < rhs.createdAt
+        }
+        return lhs.id < rhs.id
+    }
+
+    private func mostClickedFirst(lhs: Hyperlink, rhs: Hyperlink) -> Bool {
+        if lhs.clicksCount != rhs.clicksCount {
+            return lhs.clicksCount > rhs.clicksCount
+        }
+        return newestFirst(lhs: lhs, rhs: rhs)
+    }
+
+    private func recentlyClickedFirst(lhs: Hyperlink, rhs: Hyperlink) -> Bool {
+        let lhsLastClicked = lhs.lastClickedAt ?? ""
+        let rhsLastClicked = rhs.lastClickedAt ?? ""
+        if lhsLastClicked != rhsLastClicked {
+            return lhsLastClicked > rhsLastClicked
+        }
+        return newestFirst(lhs: lhs, rhs: rhs)
     }
 
     @ViewBuilder
@@ -400,29 +522,6 @@ struct HyperlinksListView: View {
         }
         .padding(.vertical, 4)
         .opacity(0.78)
-    }
-}
-
-enum HyperlinksListQueryBuilder {
-    static func build(
-        queryText: String,
-        showDiscoveredLinks: Bool,
-        orderOverrideRawValue: String?
-    ) -> String {
-        var tokens = [showDiscoveredLinks ? "scope:all" : "scope:root"]
-        let trimmedQuery = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedQuery.isEmpty {
-            tokens.append(trimmedQuery)
-        }
-
-        if let orderOverrideRawValue {
-            let trimmedOrder = orderOverrideRawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedOrder.isEmpty {
-                tokens.append("order:\(trimmedOrder)")
-            }
-        }
-
-        return tokens.joined(separator: " ")
     }
 }
 

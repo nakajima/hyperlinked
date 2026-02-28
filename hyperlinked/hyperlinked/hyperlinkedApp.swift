@@ -5,6 +5,7 @@
 //  Created by Pat Nakajima on 2/23/26.
 //
 
+import GRDBQuery
 import SwiftUI
 
 @main
@@ -15,6 +16,7 @@ struct hyperlinkedApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appModel)
+                .databaseContext(DB.databaseContext())
         }
     }
 }

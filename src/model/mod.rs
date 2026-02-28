@@ -5,5 +5,7 @@ pub mod hyperlink_relation;
 pub mod hyperlink_search_doc;
 pub mod hyperlink_title;
 pub mod hyperlink_tombstone;
+pub mod kv_store;
 pub mod model_trait;
+pub mod settings;
 pub mod url_canonicalize;

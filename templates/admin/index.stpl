@@ -1,54 +1,129 @@
 <section class="flex flex-col gap-4" aria-labelledby="admin-heading">
   <article class="flex flex-col gap-[0.4rem]">
     <p class="text-sm">Site admin</p>
-    <h2 id="admin-heading">Admin tasks</h2>
-    <p class="text-sm">Maintenance operations for the processing pipeline.</p>
+    <h2 id="admin-heading" class="text-2xl font-semibold leading-8 tracking-tight">Admin tasks</h2>
+    <p class="text-sm text-tertiary">Maintenance operations for the processing pipeline.</p>
   </article>
+
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Artifact collection settings</h3>
+    <p class="text-sm text-tertiary">
+      Control which artifact pipelines run for future processing.
+    </p>
+    <form action="/admin/artifact-settings" method="post" class="flex flex-col gap-3 text-sm [&_label]:text-sm [&_label]:font-normal [&_input[type='checkbox']]:mt-0.5 [&_input[type='checkbox']]:h-4 [&_input[type='checkbox']]:w-4 [&_input[type='checkbox']]:shrink-0 [&_input[type='checkbox']]:rounded [&_input[type='checkbox']]:border [&_input[type='checkbox']]:border-form-control-border [&_input[type='checkbox']]:bg-form-control [&_input[type='checkbox']]:accent-accent [&_input[type='checkbox']]:focus:outline-none [&_input[type='checkbox']]:focus:ring-2 [&_input[type='checkbox']]:focus:ring-accent/30">
+      <div class="flex flex-col gap-[0.4rem]">
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="collect_source" value="1"<% if self.artifact_settings.collect_source { %> checked<% } %> />
+          <span>Collect source artifacts (snapshot warc / pdf source)</span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="collect_screenshots" value="1"<% if self.artifact_settings.collect_screenshots { %> checked<% } %> />
+          <span>Collect screenshot artifacts</span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="collect_screenshot_dark" value="1"<% if self.artifact_settings.collect_screenshot_dark { %> checked<% } %> />
+          <span>Collect dark-mode screenshot variants</span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="collect_og" value="1"<% if self.artifact_settings.collect_og { %> checked<% } %> />
+          <span>Collect Open Graph artifacts</span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="collect_readability" value="1"<% if self.artifact_settings.collect_readability { %> checked<% } %> />
+          <span>Collect readability artifacts</span>
+        </label>
+      </div>
+
+      <div class="flex flex-col gap-[0.4rem]">
+        <p class="text-sm text-tertiary">If a pipeline is being disabled, optionally delete existing artifacts:</p>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="delete_source_on_disable" value="1" />
+          <span>Also delete existing source artifacts</span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="delete_screenshots_on_disable" value="1" />
+          <span>Also delete existing screenshot artifacts</span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="delete_og_on_disable" value="1" />
+          <span>Also delete existing Open Graph artifacts</span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="delete_readability_on_disable" value="1" />
+          <span>Also delete existing readability artifacts</span>
+        </label>
+      </div>
+
+      <div class="flex flex-col gap-[0.4rem]">
+        <p class="text-sm text-tertiary">If a pipeline is being enabled, optionally queue missing backfill jobs:</p>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="queue_source_on_enable" value="1" />
+          <span>Queue missing source artifacts now</span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="queue_screenshots_on_enable" value="1" />
+          <span>Queue missing screenshots now</span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="queue_og_on_enable" value="1" />
+          <span>Queue missing Open Graph now</span>
+        </label>
+        <label class="flex items-start gap-2">
+          <input type="checkbox" name="queue_readability_on_enable" value="1" />
+          <span>Queue missing readability now</span>
+        </label>
+      </div>
+
+      <div>
+        <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Save artifact settings</button>
+      </div>
+    </form>
+  </section>
 
   <% if self.chromium.has_missing_binary() { %>
     <section class="flex flex-col gap-3 rounded-[0.4rem] border border-invalid bg-form-control px-3 py-3" aria-labelledby="chrome-setup-heading">
-      <h3 id="chrome-setup-heading" class="text-alert">Screenshot browser setup required</h3>
+      <h3 id="chrome-setup-heading" class="text-lg font-semibold leading-7 tracking-tight text-alert">Screenshot browser setup required</h3>
       <p class="text-sm">
         Chromium/Chrome was not found, so screenshot capture jobs will fail until this is fixed.
       </p>
       <p class="text-sm">
         Chromium binary:
-        <code><%= self.chromium.chromium_path %></code>
-        <% if self.chromium.chromium_found { %>(found at <code><%= self.chromium.chromium_resolved_path.as_deref().unwrap_or("") %></code>)<% } else { %>(not found)<% } %>
+        <code class="font-mono text-[0.9em]"><%= self.chromium.chromium_path %></code>
+        <% if self.chromium.chromium_found { %>(found at <code class="font-mono text-[0.9em]"><%= self.chromium.chromium_resolved_path.as_deref().unwrap_or("") %></code>)<% } else { %>(not found)<% } %>
       </p>
       <p class="text-sm">Set this and restart the server:</p>
-      <pre class="overflow-x-auto rounded-[0.4rem] border border-form-control bg-tertiary p-3 text-sm leading-5"><code>export CHROMIUM_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"</code></pre>
+      <pre class="overflow-x-auto rounded-[0.4rem] border border-form-control-border bg-tertiary p-3 text-sm leading-5"><code>export CHROMIUM_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"</code></pre>
       <p class="text-sm">After restarting, reprocess links that are missing screenshots.</p>
     </section>
   <% } %>
 
   <% if self.fonts.has_missing_fonts() { %>
     <section class="flex flex-col gap-3 rounded-[0.4rem] border border-invalid bg-form-control px-3 py-3" aria-labelledby="fonts-setup-heading">
-      <h3 id="fonts-setup-heading" class="text-alert">Screenshot font setup recommended</h3>
+      <h3 id="fonts-setup-heading" class="text-lg font-semibold leading-7 tracking-tight text-alert">Screenshot font setup recommended</h3>
       <p class="text-sm">
-        Screenshot capture is running on <code><%= self.fonts.platform.as_str() %></code> and required font families are missing.
+        Screenshot capture is running on <code class="font-mono text-[0.9em]"><%= self.fonts.platform.as_str() %></code> and required font families are missing.
       </p>
       <p class="text-sm">
         Required families:
-        <code><%= self.fonts.required_families.join(", ") %></code>
+        <code class="font-mono text-[0.9em]"><%= self.fonts.required_families.join(", ") %></code>
       </p>
       <% if !self.fonts.fontconfig_found { %>
         <p class="text-sm">
-          <code>fontconfig</code> was not detected.
+          <code class="font-mono text-[0.9em]">fontconfig</code> was not detected.
           <% if let Some(error) = self.fonts.fontconfig_error.as_deref() { %>
-            Last error: <code><%= error %></code>
+            Last error: <code class="font-mono text-[0.9em]"><%= error %></code>
           <% } %>
         </p>
       <% } %>
       <% if !self.fonts.missing_families.is_empty() { %>
         <p class="text-sm">
           Missing families:
-          <code><%= self.fonts.missing_families.join(", ") %></code>
+          <code class="font-mono text-[0.9em]"><%= self.fonts.missing_families.join(", ") %></code>
         </p>
       <% } %>
       <% if !self.fonts.resolved_matches.is_empty() { %>
         <div class="overflow-x-auto">
-          <table aria-label="Screenshot font matches">
+          <table class="min-w-max border-collapse bg-form-control text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top" aria-label="Screenshot font matches">
             <thead>
               <tr>
                 <th>Requested family</th>
@@ -58,8 +133,8 @@
             <tbody>
               <% for resolved in self.fonts.resolved_matches.iter() { %>
                 <tr>
-                  <td><code><%= resolved.family.as_str() %></code></td>
-                  <td><code><%= resolved.matched_font.as_deref().unwrap_or("not found") %></code></td>
+                  <td><code class="font-mono text-[0.9em]"><%= resolved.family.as_str() %></code></td>
+                  <td><code class="font-mono text-[0.9em]"><%= resolved.matched_font.as_deref().unwrap_or("not found") %></code></td>
                 </tr>
               <% } %>
             </tbody>
@@ -68,16 +143,16 @@
       <% } %>
       <% if let Some(install_hint) = self.fonts.install_hint.as_deref() { %>
         <p class="text-sm">Install packages and restart the server:</p>
-        <pre class="overflow-x-auto rounded-[0.4rem] border border-form-control bg-tertiary p-3 text-sm leading-5"><code><%= install_hint %></code></pre>
+        <pre class="overflow-x-auto rounded-[0.4rem] border border-form-control-border bg-tertiary p-3 text-sm leading-5"><code><%= install_hint %></code></pre>
       <% } %>
     </section>
   <% } %>
 
-  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
-    <h3>Process all missing artifacts</h3>
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Process all missing artifacts</h3>
     <div class="flex flex-col gap-3">
       <div class="overflow-x-auto" aria-label="Missing artifacts summary">
-        <table>
+        <table class="min-w-max border-collapse bg-form-control text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top">
           <thead>
             <tr>
               <th>Total links</th>
@@ -115,13 +190,13 @@
         class="flex flex-row flex-wrap items-center gap-[0.4rem]"
         data-confirm="Process all artifacts? This will queue snapshot, Open Graph, and readability jobs for every link missing required artifacts."
       >
-        <button type="submit"<% if !self.has_missing_artifacts_to_process { %> disabled<% } %>>Process all artifacts</button>
+        <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65"<% if !self.has_missing_artifacts_to_process { %> disabled<% } %>>Process all artifacts</button>
       </form>
     </div>
   </section>
 
-  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
-    <h3>Queue controls</h3>
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Queue controls</h3>
     <p class="text-sm text-tertiary">
       Clear queued processing rows. Running, completed, and failed rows are not changed.
     </p>
@@ -131,51 +206,51 @@
         method="post"
         data-confirm="Clear all queued queue rows? Running jobs are not affected."
       >
-        <button type="submit">Clear queue</button>
+        <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Clear queue</button>
       </form>
       <form
         action="/admin/pause-queue"
         method="post"
         data-confirm="Pause queue workers? Running tasks will finish, and new queued tasks will wait."
       >
-        <button type="submit">Pause queue</button>
+        <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Pause queue</button>
       </form>
       <form action="/admin/resume-queue" method="post">
-        <button type="submit">Resume queue</button>
+        <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Resume queue</button>
       </form>
-      <a href="/admin/jobs">Open jobs dashboard</a>
+      <a class="text-accent no-underline hover:text-accent/80" href="/admin/jobs">Open jobs dashboard</a>
     </div>
   </section>
 
-  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
-    <h3>Import / Export</h3>
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Import / Export</h3>
     <p class="text-sm text-tertiary">
       Download a full ZIP backup (including artifacts) or restore from a previously exported ZIP.
     </p>
     <div class="flex flex-col gap-[0.4rem]" data-admin-backup>
       <div class="flex flex-row flex-wrap items-center gap-[0.4rem]">
-        <button type="button" data-admin-backup-create>Create backup ZIP</button>
+        <button type="button" data-admin-backup-create class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Create backup ZIP</button>
         <form action="/admin/export/cancel" method="post">
-          <button type="submit" data-admin-backup-cancel class="hidden" disabled>Cancel backup</button>
+          <button type="submit" data-admin-backup-cancel class="hidden min-h-10 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65" disabled>Cancel backup</button>
         </form>
-        <a href="/admin/export/download" data-admin-backup-download class="hidden">Download backup ZIP</a>
+        <a href="/admin/export/download" data-admin-backup-download class="hidden text-accent no-underline hover:text-accent/80">Download backup ZIP</a>
       </div>
       <p class="text-sm text-tertiary" data-admin-backup-status aria-live="polite">Backup is idle.</p>
       <p class="text-sm text-tertiary hidden" data-admin-backup-progress aria-live="polite"></p>
     </div>
     <form action="/admin/import" method="post" enctype="multipart/form-data" class="flex flex-col gap-[0.4rem]">
-      <label for="admin-import-archive">Import backup ZIP</label>
-      <input id="admin-import-archive" name="archive" type="file" accept=".zip,application/zip" required />
+      <label for="admin-import-archive" class="text-sm font-normal">Import backup ZIP</label>
+      <input id="admin-import-archive" name="archive" type="file" accept=".zip,application/zip" required class="min-h-10 w-full min-w-0 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary file:mr-3 file:rounded-[0.3rem] file:border-0 file:bg-tertiary/40 file:px-3 file:py-1.5 file:text-accent/90 hover:file:bg-tertiary/60 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
       <div>
-        <button type="submit">Import backup ZIP</button>
+        <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Import backup ZIP</button>
       </div>
     </form>
   </section>
 
-  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
-    <h3>Storage utilization</h3>
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Storage utilization</h3>
     <div class="overflow-x-auto">
-      <table aria-label="Storage utilization summary">
+      <table class="min-w-max border-collapse bg-form-control text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top" aria-label="Storage utilization summary">
         <thead>
           <tr>
             <th>Metric</th>
@@ -209,7 +284,7 @@
     </div>
 
     <div class="overflow-x-auto">
-      <table aria-label="Artifact storage by type">
+      <table class="min-w-max border-collapse bg-form-control text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top" aria-label="Artifact storage by type">
         <thead>
           <tr>
             <th>Artifact type</th>
@@ -247,13 +322,13 @@
     </div>
   </section>
 
-  <details class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control bg-form-control px-3 py-3">
-    <summary class="font-bold">Diagnostics and examples</summary>
+  <details class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+    <summary class="cursor-pointer text-lg font-semibold leading-7 tracking-tight">Diagnostics and examples</summary>
 
     <section class="flex flex-col gap-[0.4rem]">
-      <h4>Dataset stats</h4>
+      <h4 class="text-base font-semibold leading-6">Dataset stats</h4>
       <div class="overflow-x-auto">
-        <table aria-label="Dataset stats">
+        <table class="min-w-max border-collapse bg-form-control text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top" aria-label="Dataset stats">
           <thead>
             <tr>
               <th>Total links</th>
@@ -279,7 +354,7 @@
     </section>
 
     <section class="flex flex-col gap-[0.4rem]">
-      <h4>Flash examples</h4>
+      <h4 class="text-base font-semibold leading-6">Flash examples</h4>
       <p class="rounded-[0.4rem] border border-notice-border bg-notice-bg px-3 py-[0.65rem] text-sm leading-5 text-notice" role="status">Notice example: Changes saved.</p>
       <p class="rounded-[0.4rem] border border-invalid bg-form-control px-3 py-[0.65rem] text-sm leading-5 text-alert" role="alert">Alert example: Something went wrong.</p>
       <p class="rounded-[0.4rem] border border-dev-alert-border bg-dev-alert-bg px-3 py-[0.65rem] text-sm leading-5 text-dev-alert" role="alert">Dev alert example: Restart failed.</p>

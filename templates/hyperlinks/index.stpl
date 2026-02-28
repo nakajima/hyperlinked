@@ -1,6 +1,6 @@
 <section class="flex flex-col gap-4" aria-labelledby="links-heading">
   <form method="get" action="/hyperlinks" class="flex flex-col gap-3">
-    <div class="url-intent-row">
+    <div class="flex flex-wrap items-center gap-[0.4rem] sm:flex-nowrap">
       <input
         id="hyperlinks-query"
         name="q"
@@ -9,20 +9,24 @@
         value="<%= self.query_input %>"
         placeholder="Search for something. Or enter a link to add. Go nuts."
         autocomplete="off"
-        class="min-w-0 flex-1"
+        class="min-h-10 min-w-0 flex-1 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary placeholder:text-secondary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:cursor-not-allowed disabled:opacity-65"
       />
-      <span data-url-intent-add-slot class="inline-reveal-slot shrink-0" aria-hidden="true">
+      <span
+        data-url-intent-add-slot
+        class="order-3 inline-grid shrink-0 basis-0 max-w-0 items-center overflow-hidden opacity-0 sm:order-2 data-[visible=true]:w-full data-[visible=true]:max-w-full data-[visible=true]:opacity-100 sm:data-[visible=true]:w-auto sm:data-[visible=true]:basis-[var(--inline-reveal-target-size)] sm:data-[visible=true]:max-w-[var(--inline-reveal-target-size)] motion-safe:data-[entering=true]:transition-[flex-basis,max-width,opacity] motion-safe:data-[entering=true]:duration-[240ms] motion-safe:data-[entering=true]:ease-[cubic-bezier(0.16,1,0.3,1)]"
+        aria-hidden="true"
+      >
         <button
           type="submit"
           form="hyperlinks-url-intent-add-form"
           data-url-intent-add-button
-          class="shrink-0 motion-safe:animate-pulse"
+          class="min-h-10 min-w-max scale-60 whitespace-nowrap rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent opacity-0 transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65 sm:data-[visible=true]:w-auto data-[visible=true]:w-full data-[visible=true]:scale-100 data-[visible=true]:opacity-100 motion-safe:animate-pulse motion-safe:data-[entering=true]:transition-[transform,opacity] motion-safe:data-[entering=true]:duration-[240ms] motion-safe:data-[entering=true]:ease-[cubic-bezier(0.16,1,0.3,1)]"
           disabled
         >
           Add
         </button>
       </span>
-      <a href="/hyperlinks" class="url-intent-clear shrink-0 text-sm text-subdued">Clear</a>
+      <a href="/hyperlinks" class="order-2 shrink-0 text-sm text-subdued no-underline hover:text-primary sm:order-3">Clear</a>
     </div>
 
     <div
@@ -45,7 +49,7 @@
     <% } else { %>
       <details class="group sm:hidden">
     <% } %>
-      <summary class="list-none inline-flex w-full items-center justify-between rounded-[0.4rem] px-3 py-1 text-sm text-subdued">
+      <summary class="list-none inline-flex w-full cursor-pointer items-center justify-between rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-2 text-sm text-subdued">
         <span>Filters</span>
         <svg
           aria-hidden="true"
@@ -83,20 +87,20 @@
     <input type="hidden" name="url" value="" data-url-intent-add-url />
   </form>
 
-  <hr>
+  <hr class="h-px border-0 bg-tertiary" />
 
   <% if self.has_free_text() { %>
-    <h3>
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">
       Search:
-      <em><%= self.free_text %></em>
+      <em class="rounded-[2px] bg-[rgb(244_251_200_/_0.2)] px-1 not-italic"><%= self.free_text %></em>
     </h3>
   <% } %>
 
   <% if self.links.is_empty() { %>
     <% if self.has_effective_filter() { %>
-      <p>No hyperlinks match the current filters.</p>
+      <p class="leading-6">No hyperlinks match the current filters.</p>
     <% } else { %>
-      <p>No hyperlinks yet.</p>
+      <p class="leading-6">No hyperlinks yet.</p>
     <% } %>
   <% } else { %>
     <ul class="flex flex-col gap-4">
@@ -111,13 +115,13 @@
   <% if self.total_pages > 1 { %>
     <nav class="flex flex-row items-center gap-[0.4rem] text-sm" aria-label="Hyperlinks pagination">
       <% if let Some(prev_href) = self.prev_page_href.as_ref() { %>
-        <a href="<%= prev_href %>">Previous</a>
+        <a class="text-accent no-underline hover:text-accent/80" href="<%= prev_href %>">Previous</a>
       <% } else { %>
         <span class="text-tertiary">Previous</span>
       <% } %>
       <span class="text-tertiary">Page <%= self.page %> of <%= self.total_pages %></span>
       <% if let Some(next_href) = self.next_page_href.as_ref() { %>
-        <a href="<%= next_href %>">Next</a>
+        <a class="text-accent no-underline hover:text-accent/80" href="<%= next_href %>">Next</a>
       <% } else { %>
         <span class="text-tertiary">Next</span>
       <% } %>

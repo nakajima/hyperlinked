@@ -2,7 +2,7 @@
   <p class="text-sm">No artifacts available yet.</p>
 <% } else { %>
   <div class="overflow-x-auto">
-    <table class="min-w-max font-mono text-sm">
+    <table class="min-w-max border-collapse bg-form-control font-mono text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top">
       <thead>
         <tr>
           <th scope="col">Artifact</th>
@@ -23,9 +23,9 @@
               <td><%= format_size_bytes(artifact.size_bytes) %></td>
               <td><%- render_relative_time(&artifact.created_at) %></td>
               <td>
-                <a href="<%= self.artifact_inline_path(kind) %>" target="_blank" rel="noopener noreferrer">View</a>
+                <a class="text-accent no-underline hover:text-accent/80" href="<%= self.artifact_inline_path(kind) %>" target="_blank" rel="noopener noreferrer">View</a>
                 |
-                <a href="<%= self.artifact_download_path(kind) %>">Download <%= slug %></a>
+                <a class="text-accent no-underline hover:text-accent/80" href="<%= self.artifact_download_path(kind) %>">Download <%= slug %></a>
               </td>
             </tr>
           <% } %>

@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import GRDBQuery
 
 enum ShareOutboxState: String, Codable {
     case pending
@@ -7,7 +8,7 @@ enum ShareOutboxState: String, Codable {
     case delivered
 }
 
-struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Identifiable {
+struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable {
     static let databaseTableName = "share_outbox_items"
 
     var id: String
@@ -45,20 +46,8 @@ struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Ident
     }
 }
 
-enum ShareOutboxStoreError: LocalizedError {
-    case appGroupContainerUnavailable
-
-    var errorDescription: String? {
-        switch self {
-        case .appGroupContainerUnavailable:
-            return "Could not access shared app group storage."
-        }
-    }
-}
-
 final class ShareOutboxStore {
-    static let appGroupID = "group.fm.folder.hyperlinked"
-    static let databaseFilename = "share_outbox.sqlite"
+    static let databaseFilename = DB.databaseFilename
 
     private let dbQueue: DatabaseQueue
 
@@ -66,33 +55,12 @@ final class ShareOutboxStore {
         self.dbQueue = dbQueue
     }
 
-    static func openShared(appGroupID: String = appGroupID) throws -> ShareOutboxStore {
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupID
-        ) else {
-            throw ShareOutboxStoreError.appGroupContainerUnavailable
-        }
+    static func openShared() throws -> ShareOutboxStore {
+        return ShareOutboxStore(dbQueue: try DB.databaseQueue())
+    }
 
-        let appSupportURL = containerURL
-            .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent("Application Support", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: appSupportURL,
-            withIntermediateDirectories: true
-        )
-
-        let dbURL = appSupportURL.appendingPathComponent(databaseFilename, isDirectory: false)
-        var configuration = Configuration()
-        configuration.busyMode = .timeout(5)
-        configuration.prepareDatabase { db in
-            try db.execute(sql: "PRAGMA foreign_keys = ON")
-            try db.execute(sql: "PRAGMA journal_mode = WAL")
-        }
-
-        let queue = try DatabaseQueue(path: dbURL.path, configuration: configuration)
-        let store = ShareOutboxStore(dbQueue: queue)
-        try store.migrateIfNeeded()
-        return store
+    static func databaseContext() -> DatabaseContext {
+        return DB.databaseContext()
     }
 
     func enqueue(url: String, title: String, now: Date = Date()) throws -> ShareOutboxItemRecord {
@@ -214,43 +182,6 @@ final class ShareOutboxStore {
         }
     }
 
-    private func migrateIfNeeded() throws {
-        var migrator = DatabaseMigrator()
-        migrator.registerMigration("create_share_outbox_items") { db in
-            try db.create(table: ShareOutboxItemRecord.databaseTableName, ifNotExists: true) { t in
-                t.column(ShareOutboxItemRecord.Columns.id.rawValue, .text).primaryKey()
-                t.column(ShareOutboxItemRecord.Columns.url.rawValue, .text).notNull()
-                t.column(ShareOutboxItemRecord.Columns.title.rawValue, .text).notNull()
-                    .defaults(to: "")
-                t.column(ShareOutboxItemRecord.Columns.createdAt.rawValue, .double).notNull()
-                t.column(ShareOutboxItemRecord.Columns.state.rawValue, .text).notNull()
-                t.column(ShareOutboxItemRecord.Columns.attemptCount.rawValue, .integer).notNull()
-                    .defaults(to: 0)
-                t.column(ShareOutboxItemRecord.Columns.nextAttemptAt.rawValue, .double).notNull()
-                t.column(ShareOutboxItemRecord.Columns.lastAttemptAt.rawValue, .double)
-                t.column(ShareOutboxItemRecord.Columns.lastError.rawValue, .text)
-                t.column(ShareOutboxItemRecord.Columns.deliveredAt.rawValue, .double)
-            }
-
-            try db.create(
-                index: "idx_share_outbox_pending_next_attempt",
-                on: ShareOutboxItemRecord.databaseTableName,
-                columns: [
-                    ShareOutboxItemRecord.Columns.state.rawValue,
-                    ShareOutboxItemRecord.Columns.nextAttemptAt.rawValue,
-                ],
-                ifNotExists: true
-            )
-            try db.create(
-                index: "idx_share_outbox_created_at",
-                on: ShareOutboxItemRecord.databaseTableName,
-                columns: [ShareOutboxItemRecord.Columns.createdAt.rawValue],
-                ifNotExists: true
-            )
-        }
-        try migrator.migrate(dbQueue)
-    }
-
     private static func nextAttemptTimestamp(
         attemptCount: Int,
         nowTimestamp: TimeInterval
@@ -259,5 +190,25 @@ final class ShareOutboxStore {
         let baseDelay = min(pow(2.0, Double(exponent)) * 5.0, 3600.0)
         let jitter = Double.random(in: 0...(baseDelay * 0.2))
         return nowTimestamp + baseDelay + jitter
+    }
+}
+
+struct PendingShareOutboxItemsRequest: ValueObservationQueryable {
+    static let defaultValue: [ShareOutboxItemRecord] = []
+
+    let limit: Int
+
+    func fetch(_ db: Database) throws -> [ShareOutboxItemRecord] {
+        try ShareOutboxItemRecord.fetchAll(
+            db,
+            sql: """
+                SELECT *
+                FROM \(ShareOutboxItemRecord.databaseTableName)
+                WHERE state != ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """,
+            arguments: [ShareOutboxState.delivered.rawValue, limit]
+        )
     }
 }

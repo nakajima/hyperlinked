@@ -95,6 +95,14 @@ struct APIClient {
         }
     }
 
+    func reportHyperlinkClick(hyperlinkID: Int) async throws {
+        let request = try makeRequest(
+            path: "/hyperlinks/\(hyperlinkID)/click",
+            method: "POST"
+        )
+        _ = try await send(request)
+    }
+
     func artifactInlineURL(hyperlinkID: Int, kind: String) -> URL {
         baseURL
             .appendingPathComponent("hyperlinks")
@@ -176,6 +184,8 @@ struct APIClient {
       title
       url
       rawUrl
+      ogDescription
+      discoveryDepth
       clicksCount
       lastClickedAt
       createdAt
@@ -314,6 +324,8 @@ private struct GraphQLHyperlinkNodePayload: Decodable {
     let title: String
     let url: String
     let rawUrl: String
+    let ogDescription: String?
+    let discoveryDepth: Int?
     let clicksCount: Int
     let lastClickedAt: String?
     let createdAt: String
@@ -330,6 +342,8 @@ private struct GraphQLHyperlinkNodePayload: Decodable {
             title: title,
             url: url,
             rawURL: rawUrl,
+            ogDescription: ogDescription,
+            discoveryDepth: discoveryDepth,
             clicksCount: clicksCount,
             lastClickedAt: lastClickedAt,
             processingState: hyperlinkProcessingJob?.nodes.first?.state ?? "idle",

@@ -2,7 +2,7 @@
   <p class="text-sm">No processing jobs yet.</p>
 <% } else { %>
   <div class="overflow-x-auto">
-    <table class="min-w-max font-mono text-sm">
+    <table class="min-w-max border-collapse bg-form-control font-mono text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top">
       <thead>
         <tr>
           <th scope="col">Kind</th>

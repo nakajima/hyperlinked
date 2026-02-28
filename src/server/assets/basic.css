@@ -135,7 +135,6 @@ textarea {
   background-color: var(--form-control-bg);
   color: var(--form-control-text);
   padding: var(--form-control-py) var(--form-control-px);
-  width: 100%;
 }
 
 select {

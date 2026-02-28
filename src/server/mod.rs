@@ -2,6 +2,7 @@ pub mod admin;
 pub(crate) mod admin_backup;
 pub mod admin_jobs;
 mod chromium_diagnostics;
+pub mod controllers;
 pub mod context;
 mod flash;
 pub(crate) mod font_diagnostics;
@@ -27,6 +28,15 @@ pub async fn start(host: &str, port: &str, mdns_options: MdnsOptions) -> Result<
     let connection = crate::db::connection::init()
         .await
         .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    match crate::model::hyperlink_processing_job::delete_stale_active_rows(&connection).await {
+        Ok(repaired) if repaired > 0 => {
+            tracing::info!(repaired, "deleted stale queued/running processing jobs");
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to delete stale queued/running processing jobs");
+        }
+    }
     let processing_queue = crate::queue::ProcessingQueue::connect(connection.clone()).await?;
     processing_queue.spawn_worker(connection.clone()).await?;
     let _artifact_gc_worker = crate::storage::gc::spawn(connection.clone());
@@ -44,10 +54,8 @@ pub async fn start(host: &str, port: &str, mdns_options: MdnsOptions) -> Result<
     let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/server/assets");
     let app = Router::<context::Context>::new()
         .route("/", get(|| async { Redirect::temporary("/hyperlinks") }))
-        .merge(admin::routes())
-        .merge(admin_jobs::routes())
+        .merge(controllers::routes())
         .merge(graphql::routes())
-        .merge(hyperlinks::links())
         .nest_service("/jobs", jobs_dashboard.into_service())
         .nest_service("/assets", ServeDir::new(assets_dir))
         .with_state(state);

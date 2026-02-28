@@ -306,7 +306,7 @@ fn build_server_binary() -> Result<(), String> {
     let status = Command::new("cargo")
         .arg("build")
         .arg("--bin")
-        .arg("main")
+        .arg("hyperlinked")
         .arg("--profile")
         .arg(DEV_PROFILE)
         .current_dir(manifest_dir())
@@ -446,7 +446,10 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn server_executable_path() -> PathBuf {
-    let mut executable = manifest_dir().join("target").join(DEV_PROFILE).join("main");
+    let mut executable = manifest_dir()
+        .join("target")
+        .join(DEV_PROFILE)
+        .join("hyperlinked");
     if cfg!(windows) {
         executable.set_extension("exe");
     }

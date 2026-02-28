@@ -1,5 +1,5 @@
-<section>
-  <h2><%= status_code %> <%= status_text %></h2>
-  <p><%= message %></p>
-  <p><a href="<%= back_href %>"><%= back_label %></a></p>
+<section class="flex flex-col gap-3">
+  <h2 class="text-2xl font-semibold leading-8 tracking-tight"><%= status_code %> <%= status_text %></h2>
+  <p class="leading-6"><%= message %></p>
+  <p><a class="text-accent no-underline hover:text-accent/80" href="<%= back_href %>"><%= back_label %></a></p>
 </section>

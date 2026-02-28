@@ -7,14 +7,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::{net::lookup_host, process::Command, time::sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::{
     entity::{hyperlink, hyperlink_artifact::HyperlinkArtifactKind},
-    model::hyperlink_artifact,
+    model::{hyperlink_artifact, settings},
     processors::processor::{ProcessingError, Processor},
     server::font_diagnostics::{self, ScreenshotFontDiagnostics},
 };
@@ -123,7 +123,16 @@ impl Processor for SnapshotFetcher {
                     screenshot_error_artifact_id: None,
                 };
 
-                match capture_screenshots(&source_url).await {
+                let collection_settings = settings::load(connection)
+                    .await
+                    .map_err(ProcessingError::DB)?;
+                if !collection_settings.collect_screenshots {
+                    return Ok(output);
+                }
+
+                match capture_screenshots(&source_url, collection_settings.collect_screenshot_dark)
+                    .await
+                {
                     Ok(capture) => {
                         let screenshot_artifact = hyperlink_artifact::insert(
                             connection,
@@ -939,7 +948,10 @@ async fn capture_html_with_chromium_response(
     })
 }
 
-async fn capture_screenshots(url: &str) -> Result<ScreenshotCapture, String> {
+async fn capture_screenshots(
+    url: &str,
+    collect_dark_variant: bool,
+) -> Result<ScreenshotCapture, String> {
     let parsed = Url::parse(url).map_err(|err| format!("invalid screenshot url: {err}"))?;
     ensure_fetchable_url(&parsed).await?;
 
@@ -954,7 +966,9 @@ async fn capture_screenshots(url: &str) -> Result<ScreenshotCapture, String> {
     let desktop_webp = desktop_capture.bytes;
     let thumbnail_webp = build_square_thumbnail(&desktop_webp, screenshot_thumbnail_size())?;
 
-    let (desktop_dark_webp, thumbnail_dark_webp) = if screenshot_dark_mode_enabled() {
+    let (desktop_dark_webp, thumbnail_dark_webp) = if collect_dark_variant
+        && screenshot_dark_mode_enabled()
+    {
         match capture_single_screenshot(parsed.as_str(), desktop_viewport, ScreenshotVariant::Dark)
             .await
         {
@@ -1381,7 +1395,8 @@ fn screenshot_temp_path() -> PathBuf {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     let jitter = jitter_ms();
-    std::env::temp_dir().join(format!("hyperlinked-screenshot-{nanos:x}-{jitter:x}.tmp"))
+    // Chromium --screenshot is most reliable when targeting a .png file.
+    std::env::temp_dir().join(format!("hyperlinked-screenshot-{nanos:x}-{jitter:x}.png"))
 }
 
 fn screenshot_profile_dir() -> PathBuf {
@@ -1404,10 +1419,42 @@ fn snapshot_content_chromium_path() -> String {
 }
 
 fn chromium_path() -> String {
-    std::env::var(CHROMIUM_PATH_ENV)
+    if let Some(path) = std::env::var(CHROMIUM_PATH_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "chromium".to_string())
+    {
+        return path;
+    }
+
+    for candidate in chromium_binary_candidates() {
+        if command_looks_available(candidate) {
+            return candidate.to_string();
+        }
+    }
+
+    "chromium".to_string()
+}
+
+fn chromium_binary_candidates() -> [&'static str; 5] {
+    [
+        "chromium",
+        "google-chrome",
+        "google-chrome-stable",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ]
+}
+
+fn command_looks_available(command: &str) -> bool {
+    if command.contains(std::path::MAIN_SEPARATOR) {
+        return Path::new(command).is_file();
+    }
+
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths)
+            .map(|path| path.join(command))
+            .any(|path| path.is_file())
+    })
 }
 
 fn snapshot_content_timeout() -> Duration {

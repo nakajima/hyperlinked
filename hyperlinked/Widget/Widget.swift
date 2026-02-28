@@ -13,77 +13,23 @@ import CoreImage
 @preconcurrency import LinkPresentation
 import UniformTypeIdentifiers
 import UIKit
+import OSLog
 
 private enum WidgetSharedConfig {
     static let appGroupID = "group.fm.folder.hyperlinked"
-    static let selectedServerURLKey = "selected_server_base_url"
-
-    static func selectedServerURL() -> URL? {
-        guard let defaults = UserDefaults(suiteName: appGroupID),
-              let rawValue = defaults.string(forKey: selectedServerURLKey) else {
-            return nil
-        }
-        return normalizedServerURL(from: rawValue)
-    }
-
-    private static func normalizedServerURL(from rawValue: String) -> URL? {
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return nil
-        }
-
-        let candidate = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
-        guard var components = URLComponents(string: candidate),
-              let scheme = components.scheme?.lowercased(),
-              (scheme == "http" || scheme == "https"),
-              let host = components.host,
-              !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-
-        components.user = nil
-        components.password = nil
-        components.path = ""
-        components.query = nil
-        components.fragment = nil
-
-        guard let url = components.url else {
-            return nil
-        }
-
-        let absolute = url.absoluteString
-        if absolute.hasSuffix("/") {
-            return URL(string: String(absolute.dropLast()))
-        }
-        return url
-    }
-}
-
-private enum WidgetQueryBuilder {
-    static func build(for configuration: ConfigurationAppIntent) -> String {
-        var tokens = [
-            "scope:\(configuration.scope.queryToken)",
-            "order:\(configuration.sortOrder.queryToken)",
-        ]
-
-        if configuration.unclickedOnly {
-            tokens.append("clicks:unclicked")
-        }
-
-        return tokens.joined(separator: " ")
-    }
 }
 
 private enum WidgetTapURLBuilder {
-    static func destinationURL(for visitURL: URL) -> URL {
+    static func destinationURL(for hyperlink: WidgetHyperlink) -> URL {
         var components = URLComponents()
         components.scheme = "hyperlinked"
         components.host = "widget"
         components.path = "/visit"
         components.queryItems = [
-            URLQueryItem(name: "target", value: visitURL.absoluteString),
+            URLQueryItem(name: "target", value: hyperlink.visitURL.absoluteString),
+            URLQueryItem(name: "id", value: String(hyperlink.id)),
         ]
-        return components.url ?? visitURL
+        return components.url ?? hyperlink.visitURL
     }
 }
 
@@ -183,6 +129,27 @@ private enum WidgetTextNormalizer {
     }
 }
 
+private enum WidgetDiagnostics {
+    static let favicon = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "fm.folder.hyperlinked.Widget",
+        category: "favicon"
+    )
+    static let cache = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "fm.folder.hyperlinked.Widget",
+        category: "local-cache"
+    )
+
+    static func sanitizedURL(_ url: URL) -> String {
+        if url.isFileURL {
+            return "file://\(url.lastPathComponent)"
+        }
+
+        let host = url.host?.lowercased() ?? "unknown-host"
+        let path = url.path.isEmpty ? "/" : url.path
+        return "\(host)\(path)"
+    }
+}
+
 struct WidgetHyperlink: Identifiable {
     let id: Int
     let title: String
@@ -265,95 +232,206 @@ struct HyperlinksEntry: TimelineEntry {
         HyperlinksEntry(
             date: .now,
             configuration: .previewNewestRoot,
-            hyperlinks: sampleHyperlinks,
+            hyperlinks: WidgetPreviewData.hyperlinks(for: .recent),
             status: .loaded
         )
     }
 
-    static func preview(configuration: ConfigurationAppIntent) -> HyperlinksEntry {
+    static func preview(
+        configuration: ConfigurationAppIntent,
+        dataset: WidgetPreviewDataset = .recent
+    ) -> HyperlinksEntry {
         HyperlinksEntry(
             date: .now,
             configuration: configuration,
-            hyperlinks: sampleHyperlinks,
+            hyperlinks: WidgetPreviewData.hyperlinks(for: dataset),
             status: .loaded
         )
     }
+}
 
-    private static var sampleHyperlinks: [WidgetHyperlink] {
-        [
-            WidgetHyperlink(
-                id: 1,
-                title: "Rust 2025 Roadmap and Language Team Priorities",
-                url: "https://blog.rust-lang.org/",
-                host: "blog.rust-lang.org",
-                oneLiner: "Language updates, ergonomics work, and compiler priorities.",
-                visitURL: URL(string: "https://example.com/hyperlinks/1/visit")!,
-                faviconURL: URL(string: "https://blog.rust-lang.org/favicon.ico"),
-                thumbnailURL: nil,
-                thumbnailDarkURL: nil,
-                fallbackColor: nil
-            ),
-            WidgetHyperlink(
-                id: 2,
-                title: "SQLite Query Optimizer Notes",
-                url: "https://sqlite.org/",
-                host: "sqlite.org",
-                oneLiner: "Planner behavior and practical indexing strategies.",
-                visitURL: URL(string: "https://example.com/hyperlinks/2/visit")!,
-                faviconURL: URL(string: "https://sqlite.org/favicon.ico"),
-                thumbnailURL: nil,
-                thumbnailDarkURL: nil,
-                fallbackColor: nil
-            ),
-            WidgetHyperlink(
-                id: 3,
-                title: "SwiftUI Widget Layout Guide",
-                url: "https://developer.apple.com/",
-                host: "developer.apple.com",
-                oneLiner: "Widget composition patterns and family-specific layout guidance.",
-                visitURL: URL(string: "https://example.com/hyperlinks/3/visit")!,
-                faviconURL: URL(string: "https://developer.apple.com/favicon.ico"),
-                thumbnailURL: nil,
-                thumbnailDarkURL: nil,
-                fallbackColor: nil
-            ),
-            WidgetHyperlink(
-                id: 4,
-                title: "Production Observability Patterns",
-                url: "https://example.com/obs",
-                host: "example.com",
-                oneLiner: "Metrics, logs, and traces across distributed systems.",
-                visitURL: URL(string: "https://example.com/hyperlinks/4/visit")!,
-                faviconURL: URL(string: "https://example.com/favicon.ico"),
-                thumbnailURL: nil,
-                thumbnailDarkURL: nil,
-                fallbackColor: nil
-            ),
-            WidgetHyperlink(
-                id: 5,
-                title: "Postgres Tuning for Mixed Workloads",
-                url: "https://postgresql.org/",
-                host: "postgresql.org",
-                oneLiner: "Configuration and index tradeoffs for OLTP + analytics.",
-                visitURL: URL(string: "https://example.com/hyperlinks/5/visit")!,
-                faviconURL: URL(string: "https://postgresql.org/favicon.ico"),
-                thumbnailURL: nil,
-                thumbnailDarkURL: nil,
-                fallbackColor: nil
-            ),
-            WidgetHyperlink(
-                id: 6,
-                title: "Build Tooling Notes",
-                url: "https://example.com/build",
-                host: "example.com",
-                oneLiner: "Faster incremental builds and CI cache hygiene.",
-                visitURL: URL(string: "https://example.com/hyperlinks/6/visit")!,
-                faviconURL: URL(string: "https://example.com/favicon.ico"),
-                thumbnailURL: nil,
-                thumbnailDarkURL: nil,
-                fallbackColor: nil
-            ),
-        ]
+enum WidgetPreviewDataset {
+    case recent
+    case mixed
+    case longTitles
+    case sparseDescriptions
+}
+
+private enum WidgetPreviewData {
+    private static let maxOneLinerLength = 92
+
+    private struct Record {
+        let id: Int
+        let title: String
+        let url: String
+        let ogDescription: String?
+    }
+
+    private static let records: [Record] = [
+        Record(
+            id: 2159,
+            title: "nakajima/LiveModelDemo",
+            url: "https://github.com/nakajima/LiveModelDemo",
+            ogDescription: "Contribute to nakajima/LiveModelDemo development by creating an account on GitHub."
+        ),
+        Record(
+            id: 2158,
+            title: "Blackbird/Sources/Blackbird/BlackbirdSwiftUI.swift at 076827d5be06c3a1cf686b2012e8f3853cba7b38 - marcoarment/Blackbird",
+            url: "https://github.com/marcoarment/Blackbird/blob/076827d5be06c3a1cf686b2012e8f3853cba7b38/Sources/Blackbird/BlackbirdSwiftUI.swift",
+            ogDescription: "Contribute to marcoarment/Blackbird development by creating an account on GitHub."
+        ),
+        Record(
+            id: 2157,
+            title: "fatbobman/SwiftDataKit: SwiftDataKit allows SwiftData developers to access Core Data objects corresponding to SwiftData elements.",
+            url: "https://github.com/fatbobman/SwiftDataKit",
+            ogDescription: "SwiftDataKit allows SwiftData developers to access Core Data objects corresponding to SwiftData elements. - fatbobman/SwiftDataKit"
+        ),
+        Record(
+            id: 2156,
+            title: "SwiftDataKit - Unleashing Advanced Core Data Features in SwiftData",
+            url: "https://fatbobman.com/en/posts/use-core-data-features-in-swiftdata-by-swiftdatakit/",
+            ogDescription: "Explore how to use Core Data's advanced features in SwiftData with SwiftDataKit, bypassing the Core Data stack. Enhance SwiftData with grouped counts and subqueries."
+        ),
+        Record(
+            id: 2155,
+            title: "`@LiveModel` in SwiftData",
+            url: "https://patstechweblog.com/posts/2-live-model/",
+            ogDescription: "Keep a `SwiftData` model up to date."
+        ),
+        Record(
+            id: 2154,
+            title: "Par Part 1: Sequent Calculus",
+            url: "https://ryanbrewer.dev/posts/sequent-calculus/",
+            ogDescription: nil
+        ),
+        Record(
+            id: 2153,
+            title: "Par Part 3: Par, Continued",
+            url: "https://ryanbrewer.dev/posts/par",
+            ogDescription: nil
+        ),
+        Record(
+            id: 2152,
+            title: "Par Part 2: Linear Logic",
+            url: "https://ryanbrewer.dev/posts/linear-logic",
+            ogDescription: nil
+        ),
+        Record(
+            id: 2148,
+            title: "Frama by Pangram Pangram - A Precise Geometric Typeface",
+            url: "https://pp-frama.com",
+            ogDescription: "Frama is a geometric typeface by Pangram Pangram, built for clarity, structure, and performance across text, display, and variable font systems."
+        ),
+        Record(
+            id: 2143,
+            title: "The HoTT Book",
+            url: "https://homotopytypetheory.org/book/",
+            ogDescription: "Homotopy Type Theory: Univalent Foundations of Mathematics."
+        ),
+        Record(
+            id: 2142,
+            title: "cargo publish - The Cargo Book",
+            url: "https://doc.rust-lang.org/cargo/commands/cargo-publish.html",
+            ogDescription: nil
+        ),
+        Record(
+            id: 2137,
+            title: "rust-lang/rust-clippy: A bunch of lints to catch common mistakes and improve your Rust code.",
+            url: "https://github.com/rust-lang/rust-clippy",
+            ogDescription: "A bunch of lints to catch common mistakes and improve your Rust code."
+        ),
+        Record(
+            id: 2127,
+            title: "Stylistic Sets Guide",
+            url: "https://extraset.ch/stylistic-sets-guide/",
+            ogDescription: "Extraset publishes professional typefaces made by graphic designers for graphic designers."
+        ),
+        Record(
+            id: 2117,
+            title: "Rust AST Explorer",
+            url: "https://carlkcarlk.github.io/rust-ast-explorer/",
+            ogDescription: nil
+        ),
+    ]
+
+    static func hyperlinks(for dataset: WidgetPreviewDataset) -> [WidgetHyperlink] {
+        selectedRecords(for: dataset).compactMap(hyperlink(from:))
+    }
+
+    private static func selectedRecords(for dataset: WidgetPreviewDataset) -> [Record] {
+        switch dataset {
+        case .recent:
+            return Array(records.prefix(8))
+        case .mixed:
+            return Array(records.prefix(12))
+        case .longTitles:
+            return records.filter { $0.title.count >= 68 }
+        case .sparseDescriptions:
+            return records.filter { ($0.ogDescription ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+    }
+
+    private static func hyperlink(from record: Record) -> WidgetHyperlink? {
+        guard let pageURL = URL(string: record.url),
+              let host = normalizedHost(from: pageURL) else {
+            return nil
+        }
+
+        return WidgetHyperlink(
+            id: record.id,
+            title: WidgetTextNormalizer.normalizeDisplayText(record.title),
+            url: record.url,
+            host: host,
+            oneLiner: oneLiner(ogDescription: record.ogDescription, host: host),
+            visitURL: previewVisitURL(for: record.url),
+            faviconURL: previewFaviconURL(for: pageURL),
+            thumbnailURL: nil,
+            thumbnailDarkURL: nil,
+            fallbackColor: nil
+        )
+    }
+
+    private static func normalizedHost(from url: URL) -> String? {
+        guard let host = url.host?.lowercased(),
+              !host.isEmpty else {
+            return nil
+        }
+        if host.hasPrefix("www.") {
+            return String(host.dropFirst(4))
+        }
+        return host
+    }
+
+    private static func previewVisitURL(for urlString: String) -> URL {
+        URL(string: urlString) ?? URL(string: "https://example.com")!
+    }
+
+    private static func previewFaviconURL(for pageURL: URL) -> URL? {
+        guard let host = pageURL.host?.lowercased() else {
+            return nil
+        }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.path = "/favicon.ico"
+        return components.url
+    }
+
+    private static func oneLiner(ogDescription: String?, host: String) -> String {
+        guard let ogDescription else {
+            return host
+        }
+
+        let normalized = WidgetTextNormalizer.normalizeDisplayText(ogDescription)
+        guard !normalized.isEmpty else {
+            return host
+        }
+
+        guard normalized.count > maxOneLinerLength else {
+            return normalized
+        }
+        let cutoff = normalized.index(normalized.startIndex, offsetBy: maxOneLinerLength - 3)
+        return String(normalized[..<cutoff]).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
     }
 }
 
@@ -381,18 +459,20 @@ struct HyperlinksProvider: AppIntentTimelineProvider {
     }
 
     private static func loadEntry(configuration: ConfigurationAppIntent) async -> HyperlinksEntry {
-        guard let baseURL = WidgetSharedConfig.selectedServerURL() else {
-            return .noServer(configuration: configuration)
-        }
-
         do {
-            let query = WidgetQueryBuilder.build(for: configuration)
-            let client = WidgetAPIClient(baseURL: baseURL)
-            let hyperlinks = try await client.listHyperlinks(q: query, limit: maxHyperlinks)
-            if hyperlinks.isEmpty {
+            let localStore = WidgetLocalStore()
+            let baseHyperlinks = try localStore.listHyperlinks(
+                configuration: configuration,
+                limit: maxHyperlinks
+            )
+            if baseHyperlinks.isEmpty {
                 return .empty(configuration: configuration)
             }
 
+            let hyperlinks = await WidgetVisualResolver.decorate(
+                hyperlinks: baseHyperlinks,
+                session: .shared
+            )
             return HyperlinksEntry(
                 date: .now,
                 configuration: configuration,
@@ -400,113 +480,11 @@ struct HyperlinksProvider: AppIntentTimelineProvider {
                 status: .loaded
             )
         } catch {
+            WidgetDiagnostics.cache.debug(
+                "Failed to load widget links from local cache: \(error.localizedDescription, privacy: .public)"
+            )
             return .error(configuration: configuration)
         }
-    }
-}
-
-private enum WidgetAPIClientError: Error {
-    case invalidResponse
-    case unexpectedStatus
-    case missingData
-    case graphql(String)
-}
-
-private struct WidgetAPIClient {
-    let baseURL: URL
-    let session: URLSession
-
-    init(baseURL: URL, session: URLSession = .shared) {
-        self.baseURL = baseURL
-        self.session = session
-    }
-
-    func listHyperlinks(q: String, limit: Int) async throws -> [WidgetHyperlink] {
-        var request = URLRequest(url: baseURL.appendingPathComponent("graphql"))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 15
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let payload = GraphQLRequestPayload(
-            query: Self.hyperlinksQuery(limit: limit),
-            variables: ["q": q]
-        )
-        request.httpBody = try JSONEncoder().encode(payload)
-
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw WidgetAPIClientError.invalidResponse
-        }
-        guard (200...299).contains(http.statusCode) else {
-            throw WidgetAPIClientError.unexpectedStatus
-        }
-
-        let decoded = try JSONDecoder().decode(GraphQLResponsePayload<GraphQLHyperlinksPayload>.self, from: data)
-        if let message = decoded.errors?.first?.message,
-           !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw WidgetAPIClientError.graphql(message)
-        }
-
-        guard let responseData = decoded.data else {
-            throw WidgetAPIClientError.missingData
-        }
-
-        let baseHyperlinks = responseData.hyperlinks.nodes.map { node in
-            let parsedURL = URL(string: node.url)
-            let rawHost = parsedURL?.host ?? node.url
-            let host = WidgetTextNormalizer.normalizeDisplayText(rawHost)
-            let title = WidgetTextNormalizer.normalizeDisplayText(node.title)
-            let normalizedDescription = node.ogDescription.map(WidgetTextNormalizer.normalizeDisplayText)
-            let oneLiner = Self.oneLiner(ogDescription: normalizedDescription, host: host)
-            let thumbnailURL = node.thumbnailUrl.flatMap(URL.init(string:))
-            let thumbnailDarkURL = node.thumbnailDarkUrl.flatMap(URL.init(string:))
-            let visitURL = baseURL
-                .appendingPathComponent("hyperlinks")
-                .appendingPathComponent(String(node.id))
-                .appendingPathComponent("visit")
-            return WidgetHyperlink(
-                id: node.id,
-                title: title,
-                url: node.url,
-                host: host,
-                oneLiner: oneLiner,
-                visitURL: visitURL,
-                faviconURL: nil,
-                thumbnailURL: thumbnailURL,
-                thumbnailDarkURL: thumbnailDarkURL,
-                fallbackColor: nil
-            )
-        }
-        return await WidgetVisualResolver.decorate(hyperlinks: baseHyperlinks, session: session)
-    }
-
-    private static func oneLiner(ogDescription: String?, host: String) -> String {
-        if let description = ogDescription,
-           !description.isEmpty {
-            return description
-        }
-        return host
-    }
-
-    private static func hyperlinksQuery(limit: Int) -> String {
-        """
-        query WidgetHyperlinks($q: String) {
-          hyperlinks(
-            q: $q
-            pagination: { page: { limit: \(limit), page: 0 } }
-          ) {
-            nodes {
-              id
-              title
-              url
-              ogDescription
-              thumbnailUrl
-              thumbnailDarkUrl
-            }
-          }
-        }
-        """
     }
 }
 
@@ -551,6 +529,7 @@ private actor WidgetResourceCache {
 
     private let fileManager = FileManager.default
     private let defaults = UserDefaults(suiteName: WidgetSharedConfig.appGroupID)
+    private let faviconLogger = WidgetDiagnostics.favicon
     private var hasLoaded = false
     private var index = CacheIndex()
 
@@ -569,13 +548,19 @@ private actor WidgetResourceCache {
         case .remote:
             guard let rawURL = entry.remoteURL,
                   let url = URL(string: rawURL) else {
+                index.faviconEntries.removeValue(forKey: key)
+                persist()
                 return .none
             }
             return .resolved(url)
         case .local:
             guard let fileName = entry.localFileName,
                   let fileURL = iconFileURL(fileName: fileName),
-                  fileManager.fileExists(atPath: fileURL.path) else {
+                  fileManager.fileExists(atPath: fileURL.path),
+                  fileManager.isReadableFile(atPath: fileURL.path) else {
+                faviconLogger.debug("Evicting unreadable local favicon cache key=\(key, privacy: .public)")
+                index.faviconEntries.removeValue(forKey: key)
+                persist()
                 return .none
             }
             return .resolved(fileURL)
@@ -785,6 +770,9 @@ private enum WidgetVisualResolver {
     private static func resolveFaviconURL(for hyperlink: WidgetHyperlink, session: URLSession) async -> URL? {
         guard let rawURL = URL(string: hyperlink.url),
               let pageURL = normalizedPageURL(from: rawURL) else {
+            WidgetDiagnostics.favicon.debug(
+                "Skipping favicon resolution for invalid URL: \(hyperlink.url, privacy: .public)"
+            )
             return nil
         }
         let cacheKey = faviconCacheKey(for: pageURL)
@@ -808,6 +796,9 @@ private enum WidgetVisualResolver {
             return fileURL
         }
 
+        WidgetDiagnostics.favicon.debug(
+            "No favicon resolved for \(WidgetDiagnostics.sanitizedURL(pageURL), privacy: .public); falling back"
+        )
         await WidgetResourceCache.shared.storeFaviconMiss(for: cacheKey)
         return nil
     }
@@ -819,8 +810,13 @@ private enum WidgetVisualResolver {
         }
 
         for candidate in prioritizeCandidates(dedupeCandidates(candidates)) {
-            guard let data = await fetchCandidateIconData(from: candidate, session: session),
-                  let normalized = renderableImageData(from: data) else {
+            guard let data = await fetchCandidateIconData(from: candidate, session: session) else {
+                continue
+            }
+            guard let normalized = renderableImageData(from: data) else {
+                WidgetDiagnostics.favicon.debug(
+                    "Discarding favicon candidate with undecodable image \(WidgetDiagnostics.sanitizedURL(candidate), privacy: .public)"
+                )
                 continue
             }
             return normalized
@@ -1006,21 +1002,51 @@ private enum WidgetVisualResolver {
         request.setValue("image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
 
         guard let (data, response) = try? await session.data(for: request),
-              let http = response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode),
-              !data.isEmpty,
-              data.count <= maxFetchedIconBytes else {
+              let http = response as? HTTPURLResponse else {
+            WidgetDiagnostics.favicon.debug(
+                "Favicon fetch failed for \(WidgetDiagnostics.sanitizedURL(url), privacy: .public): request error"
+            )
+            return nil
+        }
+
+        guard (200...299).contains(http.statusCode) else {
+            WidgetDiagnostics.favicon.debug(
+                "Favicon fetch rejected for \(WidgetDiagnostics.sanitizedURL(url), privacy: .public): status \(http.statusCode, privacy: .public)"
+            )
+            return nil
+        }
+
+        guard !data.isEmpty else {
+            WidgetDiagnostics.favicon.debug(
+                "Favicon fetch rejected for \(WidgetDiagnostics.sanitizedURL(url), privacy: .public): empty payload"
+            )
+            return nil
+        }
+
+        guard data.count <= maxFetchedIconBytes else {
+            WidgetDiagnostics.favicon.debug(
+                "Favicon fetch rejected for \(WidgetDiagnostics.sanitizedURL(url), privacy: .public): payload too large (\(data.count, privacy: .public) bytes)"
+            )
             return nil
         }
 
         if let contentType = http.value(forHTTPHeaderField: "Content-Type") {
             guard isImageContentType(contentType) || looksLikeImageData(data) else {
+                WidgetDiagnostics.favicon.debug(
+                    "Favicon fetch rejected for \(WidgetDiagnostics.sanitizedURL(url), privacy: .public): non-image content type \(contentType, privacy: .public)"
+                )
                 return nil
             }
             return data
         }
 
-        return looksLikeImageData(data) ? data : nil
+        guard looksLikeImageData(data) else {
+            WidgetDiagnostics.favicon.debug(
+                "Favicon fetch rejected for \(WidgetDiagnostics.sanitizedURL(url), privacy: .public): unknown payload format"
+            )
+            return nil
+        }
+        return data
     }
 
     private static func renderableImageData(from data: Data) -> Data? {
@@ -1205,37 +1231,6 @@ private extension NSItemProvider {
     }
 }
 
-private struct GraphQLRequestPayload: Encodable {
-    let query: String
-    let variables: [String: String]?
-}
-
-private struct GraphQLResponsePayload<T: Decodable>: Decodable {
-    let data: T?
-    let errors: [GraphQLErrorPayload]?
-}
-
-private struct GraphQLErrorPayload: Decodable {
-    let message: String
-}
-
-private struct GraphQLHyperlinksPayload: Decodable {
-    let hyperlinks: GraphQLHyperlinksConnectionPayload
-}
-
-private struct GraphQLHyperlinksConnectionPayload: Decodable {
-    let nodes: [GraphQLHyperlinkNodePayload]
-}
-
-private struct GraphQLHyperlinkNodePayload: Decodable {
-    let id: Int
-    let title: String
-    let url: String
-    let ogDescription: String?
-    let thumbnailUrl: String?
-    let thumbnailDarkUrl: String?
-}
-
 private struct HyperlinksWidgetEntryView: View {
     @Environment(\.widgetFamily) private var widgetFamily
 
@@ -1247,18 +1242,18 @@ private struct HyperlinksWidgetEntryView: View {
             loadedView
         case .noServer:
             messageView(
-                title: "No Server Selected",
-                subtitle: "Open hyperlinked and choose a server URL."
+                title: "No Cached Links",
+                subtitle: "Open hyperlinked to sync links for the widget."
             )
         case .empty:
             messageView(
-                title: "No Matching Links",
+                title: "No matching links",
                 subtitle: "Try changing widget options."
             )
         case .error:
             messageView(
-                title: "Couldn’t Refresh",
-                subtitle: "Widget will retry automatically."
+                title: "Couldn’t refresh links.",
+                subtitle: "We’ll try again soon, I promise."
             )
         }
     }
@@ -1274,7 +1269,7 @@ private struct HyperlinksWidgetEntryView: View {
             )
         } else if widgetFamily == .systemSmall {
             let first = links[0]
-            Link(destination: WidgetTapURLBuilder.destinationURL(for: first.visitURL)) {
+            Link(destination: WidgetTapURLBuilder.destinationURL(for: first)) {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
                         WidgetFaviconView(hyperlink: first, size: 14)
@@ -1301,7 +1296,7 @@ private struct HyperlinksWidgetEntryView: View {
                 Spacer(minLength: 0)
 
                 ForEach(Array(links.enumerated()), id: \.element.id) { index, hyperlink in
-                    Link(destination: WidgetTapURLBuilder.destinationURL(for: hyperlink.visitURL)) {
+                    Link(destination: WidgetTapURLBuilder.destinationURL(for: hyperlink)) {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             WidgetFaviconView(hyperlink: hyperlink, size: 16)
                                 .alignmentGuide(.firstTextBaseline) { dimensions in
@@ -1335,10 +1330,12 @@ private struct HyperlinksWidgetEntryView: View {
 
     private func messageView(title: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+						Spacer()
             Text(title)
                 .font(.headline)
                 .multilineTextAlignment(.leading)
                 .lineLimit(2)
+
             Text(subtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1366,20 +1363,12 @@ private struct HyperlinksWidgetEntryView: View {
 private struct WidgetFaviconView: View {
     let hyperlink: WidgetHyperlink
     let size: CGFloat
+    private static let logger = WidgetDiagnostics.favicon
 
     var body: some View {
         Group {
             if let faviconURL = hyperlink.faviconURL {
-                AsyncImage(url: faviconURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    default:
-                        fallbackDot
-                    }
-                }
+                faviconContent(for: faviconURL)
             } else {
                 fallbackDot
             }
@@ -1387,6 +1376,75 @@ private struct WidgetFaviconView: View {
         .frame(width: size, height: size)
         .clipShape(Circle())
         .overlay(Circle().stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
+    }
+
+    @ViewBuilder
+    private func faviconContent(for faviconURL: URL) -> some View {
+        if faviconURL.isFileURL {
+            if let localImage = Self.loadLocalImage(from: faviconURL) {
+                Image(uiImage: localImage)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                fallbackDot
+            }
+        } else {
+            AsyncImage(url: faviconURL) { phase in
+                switch phase {
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                case .failure:
+                    fallbackDot
+                        .onAppear {
+                            Self.logger.debug(
+                                "Remote favicon render failed \(Self.sanitizedURLString(faviconURL), privacy: .public)"
+                            )
+                        }
+                case .empty:
+                    fallbackDot
+                @unknown default:
+                    fallbackDot
+                }
+            }
+        }
+    }
+
+    private static func loadLocalImage(from fileURL: URL) -> UIImage? {
+        guard fileURL.isFileURL else {
+            return nil
+        }
+
+        let path = fileURL.path
+        guard !path.isEmpty else {
+            logger.debug("Local favicon path was empty")
+            return nil
+        }
+        guard FileManager.default.fileExists(atPath: path),
+              FileManager.default.isReadableFile(atPath: path) else {
+            logger.debug(
+                "Local favicon file missing or unreadable \(sanitizedURLString(fileURL), privacy: .public)"
+            )
+            return nil
+        }
+
+        if let image = UIImage(contentsOfFile: path) {
+            return image
+        }
+
+        guard let data = try? Data(contentsOf: fileURL),
+              let image = UIImage(data: data) else {
+            logger.debug(
+                "Failed to decode local favicon image \(sanitizedURLString(fileURL), privacy: .public)"
+            )
+            return nil
+        }
+        return image
+    }
+
+    private static func sanitizedURLString(_ url: URL) -> String {
+        WidgetDiagnostics.sanitizedURL(url)
     }
 
     private var fallbackDot: some View {
@@ -1422,20 +1480,86 @@ struct HyperlinksWidget: Widget {
     }
 }
 
-#Preview(as: .systemSmall) {
+#Preview("Small - Real Recent", as: .systemSmall) {
     HyperlinksWidget()
 } timeline: {
-    HyperlinksEntry.preview(configuration: .previewNewestRoot)
+    HyperlinksEntry.preview(configuration: .previewNewestRoot, dataset: .recent)
 }
 
-#Preview(as: .systemMedium) {
+#Preview("Small - Real Long Titles", as: .systemSmall) {
     HyperlinksWidget()
 } timeline: {
-    HyperlinksEntry.preview(configuration: .previewRandomAllUnclicked)
+    HyperlinksEntry.preview(configuration: .previewNewestRoot, dataset: .longTitles)
 }
 
-#Preview(as: .systemLarge) {
+#Preview("Medium - Real Recent", as: .systemMedium) {
     HyperlinksWidget()
 } timeline: {
-    HyperlinksEntry.preview(configuration: .previewNewestRoot)
+    HyperlinksEntry.preview(configuration: .previewRandomAllUnclicked, dataset: .recent)
+}
+
+#Preview("Medium - Sparse Metadata", as: .systemMedium) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.preview(configuration: .previewNewestRoot, dataset: .sparseDescriptions)
+}
+
+#Preview("Large - Real Mixed", as: .systemLarge) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.preview(configuration: .previewNewestRoot, dataset: .mixed)
+}
+
+#Preview("Small - No Server", as: .systemSmall) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.noServer(configuration: .previewNewestRoot)
+}
+
+#Preview("Small - No Matching Links", as: .systemSmall) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.empty(configuration: .previewNewestRoot)
+}
+
+#Preview("Small - Refresh Error", as: .systemSmall) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.error(configuration: .previewNewestRoot)
+}
+
+#Preview("Medium - No Server", as: .systemMedium) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.noServer(configuration: .previewNewestRoot)
+}
+
+#Preview("Medium - No Matching Links", as: .systemMedium) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.empty(configuration: .previewNewestRoot)
+}
+
+#Preview("Medium - Refresh Error", as: .systemMedium) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.error(configuration: .previewNewestRoot)
+}
+
+#Preview("Large - No Server", as: .systemLarge) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.noServer(configuration: .previewNewestRoot)
+}
+
+#Preview("Large - No Matching Links", as: .systemLarge) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.empty(configuration: .previewNewestRoot)
+}
+
+#Preview("Large - Refresh Error", as: .systemLarge) {
+    HyperlinksWidget()
+} timeline: {
+    HyperlinksEntry.error(configuration: .previewNewestRoot)
 }

@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title><%= self.title %></title>
     <link rel="stylesheet" href="https://use.typekit.net/bpw6fxi.css" />
-    <link rel="stylesheet" href="/assets/reset.css" />
+    <link rel="stylesheet" href="/assets/fonts.css" />
     <link rel="stylesheet" href="/assets/app.css" />
     <script type="module" src="https://cdn.jsdelivr.net/npm/@github/relative-time-element/+esm"></script>
     <script src="/assets/app.js" defer></script>
   </head>
-  <body>
+  <body class="min-h-svh bg-page font-sans text-primary antialiased [font-synthesis:none]">
     <% include!("../shared/_header.stpl"); %>
-    <main class="flex flex-col gap-3">
+    <main class="mx-auto flex w-full max-w-[75rem] flex-col gap-3 px-3 pb-4 sm:px-6">
       <% if let Some(dev_restart_alert) = self.dev_restart_alert.as_ref() { %>
         <p class="mb-2 rounded-[0.4rem] border border-dev-alert-border bg-dev-alert-bg px-3 py-[0.65rem] text-sm leading-5 text-dev-alert" role="alert"><%= dev_restart_alert %></p>
       <% } %>

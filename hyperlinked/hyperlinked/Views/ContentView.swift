@@ -23,18 +23,29 @@ struct ContentView: View {
     }
 
     private func handleIncomingURL(_ url: URL) {
-        guard let targetURL = WidgetDeepLink.parseVisitURL(
-            incomingURL: url,
-            selectedServerURL: appModel.selectedServerURL
-        ) else {
+        guard let payload = WidgetDeepLink.parseVisitPayload(incomingURL: url) else {
             return
         }
-        openURL(targetURL)
+        openURL(payload.targetURL)
+
+        guard let hyperlinkID = payload.hyperlinkID,
+              let client = appModel.apiClient else {
+            return
+        }
+
+        Task {
+            try? await client.reportHyperlinkClick(hyperlinkID: hyperlinkID)
+        }
     }
 }
 
 private enum WidgetDeepLink {
-    static func parseVisitURL(incomingURL: URL, selectedServerURL: URL?) -> URL? {
+    struct Payload {
+        let targetURL: URL
+        let hyperlinkID: Int?
+    }
+
+    static func parseVisitPayload(incomingURL: URL) -> Payload? {
         guard incomingURL.scheme?.lowercased() == "hyperlinked",
               incomingURL.host?.lowercased() == "widget",
               incomingURL.path == "/visit",
@@ -42,34 +53,14 @@ private enum WidgetDeepLink {
               let targetRaw = components.queryItems?.first(where: { $0.name == "target" })?.value,
               let targetURL = URL(string: targetRaw),
               let scheme = targetURL.scheme?.lowercased(),
-              (scheme == "http" || scheme == "https"),
-              isVisitPath(targetURL.path) else {
+              (scheme == "http" || scheme == "https") else {
             return nil
         }
+        let hyperlinkID = components.queryItems?
+            .first(where: { $0.name == "id" })?
+            .value
+            .flatMap(Int.init)
 
-        if let selectedServerURL {
-            let selectedHost = selectedServerURL.host?.lowercased()
-            let targetHost = targetURL.host?.lowercased()
-            if selectedHost != targetHost {
-                return nil
-            }
-
-            if selectedServerURL.port != targetURL.port {
-                return nil
-            }
-        }
-
-        return targetURL
-    }
-
-    private static func isVisitPath(_ path: String) -> Bool {
-        let components = path.split(separator: "/", omittingEmptySubsequences: true)
-        guard components.count == 3,
-              components[0] == "hyperlinks",
-              Int(components[1]) != nil,
-              components[2] == "visit" else {
-            return false
-        }
-        return true
+        return Payload(targetURL: targetURL, hyperlinkID: hyperlinkID)
     }
 }

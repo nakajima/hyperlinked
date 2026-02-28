@@ -5,6 +5,8 @@ struct Hyperlink: Codable, Equatable, Hashable, Identifiable {
     let title: String
     let url: String
     let rawURL: String
+    let ogDescription: String?
+    let discoveryDepth: Int?
     let clicksCount: Int
     let lastClickedAt: String?
     let processingState: String
@@ -20,6 +22,8 @@ struct Hyperlink: Codable, Equatable, Hashable, Identifiable {
         case title
         case url
         case rawURL = "raw_url"
+        case ogDescription = "og_description"
+        case discoveryDepth = "discovery_depth"
         case clicksCount = "clicks_count"
         case lastClickedAt = "last_clicked_at"
         case processingState = "processing_state"

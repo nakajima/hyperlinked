@@ -12,7 +12,7 @@ use crate::{
     entity::hyperlink,
     model::{
         hyperlink_processing_job::{self, ProcessingQueueSender},
-        url_canonicalize,
+        settings, url_canonicalize,
     },
 };
 
@@ -200,16 +200,22 @@ pub async fn enqueue_reprocess_by_id(
     connection: &DatabaseConnection,
     id: i32,
     processing_queue: Option<&ProcessingQueueSender>,
-) -> Result<Option<hyperlink::Model>, sea_orm::DbErr> {
+) -> Result<Option<(hyperlink::Model, bool)>, sea_orm::DbErr> {
     let Some(model) = hyperlink::Entity::find_by_id(id).one(connection).await? else {
         return Ok(None);
     };
 
+    let settings = settings::load(connection).await?;
+    let mut queued = false;
     if let Some(queue) = processing_queue {
-        hyperlink_processing_job::enqueue_for_hyperlink(connection, model.id, Some(queue)).await?;
+        if settings.collect_source {
+            hyperlink_processing_job::enqueue_for_hyperlink(connection, model.id, Some(queue))
+                .await?;
+            queued = true;
+        }
     }
 
-    Ok(Some(model))
+    Ok(Some((model, queued)))
 }
 
 pub async fn upsert_by_url(
@@ -350,8 +356,11 @@ async fn enqueue_processing_if_enabled(
     hyperlink_id: i32,
 ) -> Result<(), sea_orm::DbErr> {
     if let Some(queue) = processing_queue {
-        hyperlink_processing_job::enqueue_for_hyperlink(connection, hyperlink_id, Some(queue))
-            .await?;
+        let settings = settings::load(connection).await?;
+        if settings.collect_source {
+            hyperlink_processing_job::enqueue_for_hyperlink(connection, hyperlink_id, Some(queue))
+                .await?;
+        }
     }
     Ok(())
 }
