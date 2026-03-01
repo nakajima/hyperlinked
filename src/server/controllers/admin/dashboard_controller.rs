@@ -1113,13 +1113,30 @@ fn write_zip_binary_file_with_compression<W: Write + Seek>(
 }
 
 async fn read_uploaded_backup_archive(multipart: &mut Multipart) -> Result<PathBuf, String> {
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| format!("failed to read multipart form: {err}"))?
-    {
+    let mut seen_field_names: Vec<String> = Vec::new();
+
+    while let Some(mut field) = multipart.next_field().await.map_err(|err| {
+        tracing::warn!(error = %err, "failed to read multipart form for admin import");
+        format!("failed to read multipart form: {err}")
+    })? {
         let field_name = field.name().map(ToString::to_string);
+        let file_name = field.file_name().map(ToString::to_string);
+        let field_content_type = field.content_type().map(ToString::to_string);
+        let field_name_label = field_name.as_deref().unwrap_or("<none>");
+
+        seen_field_names.push(field_name_label.to_string());
+        tracing::info!(
+            field_name = %field_name_label,
+            file_name = %file_name.as_deref().unwrap_or(""),
+            field_content_type = %field_content_type.as_deref().unwrap_or(""),
+            "received multipart field for admin import"
+        );
+
         if field_name.as_deref() != Some("archive") {
+            tracing::info!(
+                field_name = %field_name_label,
+                "ignoring multipart field for admin import because it is not `archive`"
+            );
             continue;
         }
 
@@ -1146,13 +1163,28 @@ async fn read_uploaded_backup_archive(multipart: &mut Multipart) -> Result<PathB
         }
 
         if bytes_written == 0 {
+            tracing::warn!(
+                field_name = %field_name_label,
+                file_name = %file_name.as_deref().unwrap_or(""),
+                "uploaded admin import archive file is empty"
+            );
             remove_uploaded_backup_file(&upload_path).await;
             return Err("uploaded backup ZIP file is empty".to_string());
         }
 
+        tracing::info!(
+            field_name = %field_name_label,
+            file_name = %file_name.as_deref().unwrap_or(""),
+            bytes_written,
+            "accepted backup archive upload for admin import"
+        );
         return Ok(upload_path);
     }
 
+    tracing::warn!(
+        seen_field_names = %seen_field_names.join(","),
+        "admin import upload did not include required multipart field `archive`"
+    );
     Err("no backup ZIP file uploaded (expected form field `archive`)".to_string())
 }
 

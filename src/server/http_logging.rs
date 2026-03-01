@@ -46,6 +46,7 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
         uri = %uri,
         query = %query,
         request_content_type = %content_type.as_deref().unwrap_or(""),
+        request_content_length = ?content_length,
         request_body = %body_summary,
         status = response.status().as_u16(),
         latency_ms,
