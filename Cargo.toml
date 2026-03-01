@@ -1,13 +1,13 @@
 [package]
 name = "hyperlinked"
-version = "0.1.1"
+version = "0.1.5"
 edition = "2024"
 
 [[bin]]
 name = "hyperlinked"
 
 [dependencies]
-lilqueue = { path = "../lilqueue" }
+lilqueue = { git = "https://github.com/nakajima/lilqueue" }
 async-trait = "0.1.89"
 axum = { version = "0.8.8", features = ["macros", "multipart", "ws"] }
 base64 = "0.22.1"

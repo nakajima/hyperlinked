@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "hyperlinked"
-version = "0.1.1"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -2254,6 +2254,7 @@ dependencies = [
 [[package]]
 name = "lilqueue"
 version = "0.1.0"
+source = "git+https://github.com/nakajima/lilqueue#494678341adba2b8c665b3cde1a78c02befdc264"
 dependencies = [
  "async-trait",
  "axum",
