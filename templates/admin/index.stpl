@@ -3,6 +3,7 @@
     <p class="text-sm">Site admin</p>
     <h2 id="admin-heading" class="text-2xl font-semibold leading-8 tracking-tight">Admin tasks</h2>
     <p class="text-sm text-tertiary">Maintenance operations for the processing pipeline.</p>
+    <p class="text-sm text-tertiary" data-admin-version>Version <code class="font-mono text-[0.9em]"><%= self.app_version %></code></p>
   </article>
 
   <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">

@@ -65,6 +65,7 @@ const BACKUP_ARTIFACTS_PATH: &str = "artifacts.json";
 const BACKUP_ARTIFACTS_DIR: &str = "artifacts";
 const BACKUP_ARTIFACT_READ_CONCURRENCY: usize = 4;
 const BACKUP_DEFLATE_LEVEL_BEST: i32 = 9;
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn routes() -> Router<Context> {
     Router::new()
@@ -2204,6 +2205,7 @@ fn file_size_bytes(path: &Path) -> Result<u64, DbErr> {
 #[derive(Template)]
 #[template(path = "admin/index.stpl")]
 struct AdminIndexTemplate<'a> {
+    app_version: &'a str,
     summary: &'a MissingArtifactsSummary,
     stats: &'a AdminDatasetStats,
     artifact_settings: &'a ArtifactCollectionSettings,
@@ -2238,6 +2240,7 @@ fn render_index(
     fonts: &FontDiagnostics,
 ) -> Result<String, sailfish::RenderError> {
     AdminIndexTemplate {
+        app_version: APP_VERSION,
         summary,
         stats,
         artifact_settings,
@@ -2684,6 +2687,8 @@ mod tests {
         assert!(body.contains("data-admin-backup-create"));
         assert!(body.contains("data-admin-backup-cancel"));
         assert!(body.contains("data-admin-backup-download"));
+        assert!(body.contains("data-admin-version"));
+        assert!(body.contains(APP_VERSION));
         assert!(body.contains("data-admin-import"));
         assert!(body.contains("data-admin-import-form"));
         assert!(body.contains("data-admin-import-submit"));
