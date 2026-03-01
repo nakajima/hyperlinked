@@ -71,6 +71,7 @@ pub async fn start(
         .merge(controllers::routes())
         .merge(graphql::routes())
         .nest_service("/jobs", jobs_dashboard.into_service())
+        .route("/favicon.ico", get(serve_favicon))
         .route("/assets/{*path}", get(serve_asset))
         .layer(axum::middleware::from_fn(http_logging::log_requests))
         .with_state(state);
@@ -134,6 +135,14 @@ async fn serve_asset(Path(requested_path): Path<String>) -> Response {
     let Some(relative_path) = sanitize_asset_path(&requested_path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    serve_asset_by_relative_path(relative_path).await
+}
+
+async fn serve_favicon() -> Response {
+    serve_asset_by_relative_path(PathBuf::from("favicon.png")).await
+}
+
+async fn serve_asset_by_relative_path(relative_path: PathBuf) -> Response {
     for root in ASSET_ROOTS.iter() {
         let candidate = root.join(&relative_path);
         if let Ok(bytes) = tokio::fs::read(&candidate).await {
@@ -199,6 +208,8 @@ fn asset_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body;
+    use axum::http::header::CONTENT_TYPE;
 
     #[test]
     fn embedded_assets_include_core_files() {
@@ -219,5 +230,21 @@ mod tests {
         let path = sanitize_asset_path("Barlow/Barlow-Regular.woff2")
             .expect("safe asset path should be accepted");
         assert_eq!(path, PathBuf::from("Barlow/Barlow-Regular.woff2"));
+    }
+
+    #[tokio::test]
+    async fn favicon_route_serves_png_content() {
+        let response = serve_favicon().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok());
+        assert_eq!(content_type, Some("image/png"));
+
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("favicon body should be readable");
+        assert!(!body.is_empty());
     }
 }

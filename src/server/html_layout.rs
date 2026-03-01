@@ -120,4 +120,14 @@ mod tests {
         assert!(html.contains("href=\"/admin/jobs\""));
         assert!(html.contains("data-queue-pending-badge"));
     }
+
+    #[test]
+    fn includes_favicon_link_tags() {
+        let mut flash = Flash::default();
+        let html = page_with_flags("Title", "<p>Body</p>", &mut flash, None, false)
+            .expect("layout should render")
+            .0;
+        assert!(html.contains("href=\"/assets/favicon.png\""));
+        assert!(html.contains("href=\"/favicon.ico\""));
+    }
 }
