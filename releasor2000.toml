@@ -2,6 +2,7 @@
 name = "hyperlinked"
 binary = "hyperlinked"  # defaults to project name
 repo = "nakajima/hyperlinked"
+auto-tag = true
 # version_command = "git describe --tags --abbrev=0"
 
 [build]
