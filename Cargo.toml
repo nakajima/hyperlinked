@@ -23,6 +23,7 @@ image = { version = "0.25.8", default-features = false, features = [
   "png",
   "webp",
 ] }
+include_dir = "0.7.4"
 migration = { path = "migration" }
 notify = "8.2.0"
 pdf-extract = "0.7"
@@ -51,7 +52,6 @@ sqlx = { version = "0.8.6", default-features = false, features = [
 tokio = { version = "1.49.0", features = ["full"] }
 tokio-tungstenite = "0.28.0"
 tokio-util = { version = "0.7.16", features = ["io"] }
-tower-http = { version = "0.6.6", features = ["fs"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 tracing-tree = "0.4.0"

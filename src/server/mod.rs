@@ -2,28 +2,37 @@ pub mod admin;
 pub(crate) mod admin_backup;
 pub mod admin_jobs;
 mod chromium_diagnostics;
-pub mod controllers;
 pub mod context;
+pub mod controllers;
 mod flash;
 pub(crate) mod font_diagnostics;
 pub mod graphql;
 mod html_layout;
-mod hyperlink_fetcher;
 mod http_logging;
+mod hyperlink_fetcher;
 mod mdns;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod views;
 
 use axum::{Router, response::Redirect, routing::get};
+use axum::{
+    body::Body,
+    extract::Path,
+    http::{HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use include_dir::{Dir, include_dir};
 use sea_orm::DatabaseConnection;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tower_http::services::ServeDir;
+use std::path::{Component, Path as StdPath, PathBuf};
+use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 
 pub mod hyperlinks;
 pub use mdns::MdnsOptions;
+
+static EMBEDDED_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/server/assets");
+static ASSET_ROOTS: LazyLock<Vec<PathBuf>> = LazyLock::new(asset_roots);
 
 #[instrument(level = tracing::Level::TRACE)]
 pub async fn start(
@@ -55,13 +64,12 @@ pub async fn start(
         processing_queue: Some(processing_queue),
         backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
     };
-    let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/server/assets");
     let app = Router::<context::Context>::new()
         .route("/", get(|| async { Redirect::temporary("/hyperlinks") }))
         .merge(controllers::routes())
         .merge(graphql::routes())
         .nest_service("/jobs", jobs_dashboard.into_service())
-        .nest_service("/assets", ServeDir::new(assets_dir))
+        .route("/assets/{*path}", get(serve_asset))
         .layer(axum::middleware::from_fn(http_logging::log_requests))
         .with_state(state);
     let addr = [host, port].join(":");
@@ -103,4 +111,111 @@ pub async fn start(
         .await
         .map_err(|err| format!("server error on {addr}: {err}"))?;
     Ok(())
+}
+
+fn asset_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/server/assets");
+    roots.push(source_root);
+    if let Ok(executable_path) = std::env::current_exe()
+        && let Some(parent) = executable_path.parent()
+    {
+        let sibling_assets = parent.join("assets");
+        if sibling_assets != roots[0] {
+            roots.push(sibling_assets);
+        }
+    }
+    roots
+}
+
+async fn serve_asset(Path(requested_path): Path<String>) -> Response {
+    let Some(relative_path) = sanitize_asset_path(&requested_path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    for root in ASSET_ROOTS.iter() {
+        let candidate = root.join(&relative_path);
+        if let Ok(bytes) = tokio::fs::read(&candidate).await {
+            let content_type = content_type_for_path(relative_path.to_str().unwrap_or(""));
+            return asset_response(bytes, content_type);
+        }
+    }
+
+    let embedded_lookup = relative_path.to_string_lossy();
+    let Some(file) = EMBEDDED_ASSETS.get_file(embedded_lookup.as_ref()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let content_type = content_type_for_path(&embedded_lookup);
+    asset_response(file.contents().to_vec(), content_type)
+}
+
+fn sanitize_asset_path(value: &str) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in StdPath::new(value).components() {
+        match component {
+            Component::Normal(segment) => normalized.push(segment),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    let extension = StdPath::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "css" => "text/css; charset=utf-8",
+        "js" => "application/javascript; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "json" => "application/json; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+fn asset_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
+    let mut response = Response::new(Body::from(bytes));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_assets_include_core_files() {
+        assert!(EMBEDDED_ASSETS.get_file("app.css").is_some());
+        assert!(EMBEDDED_ASSETS.get_file("fonts.css").is_some());
+        assert!(EMBEDDED_ASSETS.get_file("app.js").is_some());
+    }
+
+    #[test]
+    fn sanitize_asset_path_rejects_parent_segments() {
+        assert!(sanitize_asset_path("../app.css").is_none());
+        assert!(sanitize_asset_path("Barlow/../../app.css").is_none());
+        assert!(sanitize_asset_path("/app.css").is_none());
+    }
+
+    #[test]
+    fn sanitize_asset_path_accepts_safe_nested_paths() {
+        let path = sanitize_asset_path("Barlow/Barlow-Regular.woff2")
+            .expect("safe asset path should be accepted");
+        assert_eq!(path, PathBuf::from("Barlow/Barlow-Regular.woff2"));
+    }
 }
