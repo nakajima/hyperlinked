@@ -44,6 +44,28 @@ struct hyperlinkedTests {
         #expect(decoded.id == 42)
         #expect(decoded.rawURL == "https://example.com/?utm_source=test")
         #expect(decoded.processingState == "idle")
+        #expect(decoded.lastShownInWidget == nil)
+    }
+
+    @Test
+    func decodesHyperlinkWithLastShownInWidget() throws {
+        let payload = """
+        {
+          "id": 7,
+          "title": "Example",
+          "url": "https://example.com",
+          "raw_url": "https://example.com",
+          "clicks_count": 0,
+          "last_clicked_at": null,
+          "processing_state": "ready",
+          "created_at": "2026-02-22T10:00:00Z",
+          "updated_at": "2026-02-22T11:00:00Z",
+          "last_shown_in_widget": "2026-03-01T09:40:00Z"
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(Hyperlink.self, from: payload)
+        #expect(decoded.lastShownInWidget == "2026-03-01T09:40:00Z")
     }
 
     @Test

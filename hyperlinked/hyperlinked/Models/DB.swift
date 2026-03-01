@@ -207,6 +207,7 @@ public struct DB {
                 t.column("processing_state", .text).notNull().defaults(to: "ready")
                 t.column("created_at", .text).notNull()
                 t.column("updated_at", .text).notNull()
+                t.column("last_shown_in_widget", .text)
                 t.column("thumbnail_url", .text)
                 t.column("thumbnail_dark_url", .text)
                 t.column("screenshot_url", .text)
@@ -242,6 +243,34 @@ public struct DB {
                 index: "idx_hyperlink_records_created_at_id",
                 on: hyperlinkTableName,
                 columns: ["created_at", "id"],
+                ifNotExists: true
+            )
+            try db.create(
+                index: "idx_hyperlink_records_last_shown_in_widget_created_at_id",
+                on: hyperlinkTableName,
+                columns: ["last_shown_in_widget", "created_at", "id"],
+                ifNotExists: true
+            )
+        }
+
+        migrator.registerMigration("add_hyperlink_records_last_shown_in_widget_v1") { db in
+            guard try tableExists(hyperlinkTableName, in: db) else {
+                return
+            }
+
+            if try !columnExists("last_shown_in_widget", in: hyperlinkTableName, db: db) {
+                try db.execute(
+                    sql: """
+                        ALTER TABLE \(hyperlinkTableName)
+                        ADD COLUMN last_shown_in_widget TEXT
+                    """
+                )
+            }
+
+            try db.create(
+                index: "idx_hyperlink_records_last_shown_in_widget_created_at_id",
+                on: hyperlinkTableName,
+                columns: ["last_shown_in_widget", "created_at", "id"],
                 ifNotExists: true
             )
         }

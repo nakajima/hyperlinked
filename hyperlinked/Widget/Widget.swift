@@ -436,8 +436,7 @@ private enum WidgetPreviewData {
 }
 
 struct HyperlinksProvider: AppIntentTimelineProvider {
-    private static let refreshInterval: TimeInterval = 30 * 60
-    private static let maxHyperlinks = 6
+    private static let refreshInterval: TimeInterval = 20 * 60
 
     func placeholder(in context: Context) -> HyperlinksEntry {
         .placeholder
@@ -447,23 +446,27 @@ struct HyperlinksProvider: AppIntentTimelineProvider {
         if context.isPreview {
             return .preview(configuration: configuration)
         }
-        return await Self.loadEntry(configuration: configuration)
+        return await Self.loadEntry(configuration: configuration, family: context.family)
     }
 
     func timeline(for configuration: ConfigurationAppIntent, in context: Context) async -> Timeline<HyperlinksEntry> {
-        let entry = await Self.loadEntry(configuration: configuration)
+        let entry = await Self.loadEntry(configuration: configuration, family: context.family)
         return Timeline(
             entries: [entry],
             policy: .after(Date().addingTimeInterval(Self.refreshInterval))
         )
     }
 
-    private static func loadEntry(configuration: ConfigurationAppIntent) async -> HyperlinksEntry {
+    private static func loadEntry(
+        configuration: ConfigurationAppIntent,
+        family: WidgetFamily
+    ) async -> HyperlinksEntry {
         do {
             let localStore = WidgetLocalStore()
+            let displayLimit = limit(for: family)
             let baseHyperlinks = try localStore.listHyperlinks(
                 configuration: configuration,
-                limit: maxHyperlinks
+                limit: displayLimit
             )
             if baseHyperlinks.isEmpty {
                 return .empty(configuration: configuration)
@@ -484,6 +487,19 @@ struct HyperlinksProvider: AppIntentTimelineProvider {
                 "Failed to load widget links from local cache: \(error.localizedDescription, privacy: .public)"
             )
             return .error(configuration: configuration)
+        }
+    }
+
+    private static func limit(for family: WidgetFamily) -> Int {
+        switch family {
+        case .systemSmall:
+            return 1
+        case .systemMedium:
+            return 3
+        case .systemLarge:
+            return 6
+        default:
+            return 3
         }
     }
 }

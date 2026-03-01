@@ -71,9 +71,9 @@ struct HyperlinksListView: View {
 
     private var orderOptions: [HyperlinkOrderFilter] {
         if hasFreeText {
-            return [.newest, .relevance, .oldest, .mostClicked, .recentlyClicked, .random]
+            return [.newest, .relevance, .oldest, .mostClicked, .recentlyClicked, .recentlyShownInWidget, .random]
         }
-        return [.newest, .oldest, .mostClicked, .recentlyClicked, .random]
+        return [.newest, .oldest, .mostClicked, .recentlyClicked, .recentlyShownInWidget, .random]
     }
 
     private var orderBinding: Binding<HyperlinkOrderFilter> {
@@ -364,6 +364,8 @@ struct HyperlinksListView: View {
             return hyperlinks.sorted(by: mostClickedFirst)
         case .recentlyClicked:
             return hyperlinks.sorted(by: recentlyClickedFirst)
+        case .recentlyShownInWidget:
+            return hyperlinks.sorted(by: recentlyShownInWidgetFirst)
         case .random:
             return randomlyOrdered(hyperlinks, querySeed: query)
         case .relevance:
@@ -464,6 +466,22 @@ struct HyperlinksListView: View {
         }
         return newestFirst(lhs: lhs, rhs: rhs)
     }
+
+    private func recentlyShownInWidgetFirst(lhs: Hyperlink, rhs: Hyperlink) -> Bool {
+        switch (lhs.lastShownInWidget, rhs.lastShownInWidget) {
+        case let (.some(lhsShownAt), .some(rhsShownAt)):
+            if lhsShownAt != rhsShownAt {
+                return lhsShownAt > rhsShownAt
+            }
+        case (.some, .none):
+            return true
+        case (.none, .some):
+            return false
+        case (.none, .none):
+            break
+        }
+        return newestFirst(lhs: lhs, rhs: rhs)
+    }
 }
 
 private enum HyperlinkOrderFilter: String, Identifiable {
@@ -472,6 +490,7 @@ private enum HyperlinkOrderFilter: String, Identifiable {
     case oldest
     case mostClicked = "most-clicked"
     case recentlyClicked = "recently-clicked"
+    case recentlyShownInWidget = "recently-shown-in-widget"
     case random
 
     var id: String { rawValue }
@@ -488,6 +507,8 @@ private enum HyperlinkOrderFilter: String, Identifiable {
             return "Most Clicked"
         case .recentlyClicked:
             return "Recently Clicked"
+        case .recentlyShownInWidget:
+            return "Recently Shown in Widget"
         case .random:
             return "Random"
         }

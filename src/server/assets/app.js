@@ -753,7 +753,9 @@ function initializeAdminImportControls() {
     cancelButton.disabled = !isRunning;
     cancelButton.classList.toggle("hidden", !isRunning);
     if (fileInput instanceof HTMLInputElement) {
-      fileInput.disabled = uploadInFlight || isRunning;
+      // Keep the file input enabled during submit so the browser includes
+      // the selected file part in multipart form serialization.
+      fileInput.disabled = isRunning;
     }
 
     if (state === "running") {

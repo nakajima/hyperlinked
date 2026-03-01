@@ -28,6 +28,7 @@ struct Hyperlink: Decodable, Equatable, Hashable, Identifiable {
     let processingState: String
     let createdAt: String
     let updatedAt: String
+    let lastShownInWidget: String?
     let thumbnailURL: String?
     let thumbnailDarkURL: String?
     let screenshotURL: String?
@@ -47,6 +48,7 @@ struct Hyperlink: Decodable, Equatable, Hashable, Identifiable {
         case processingState = "processing_state"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case lastShownInWidget = "last_shown_in_widget"
         case thumbnailURL = "thumbnail_url"
         case thumbnailDarkURL = "thumbnail_dark_url"
         case screenshotURL = "screenshot_url"
@@ -67,6 +69,7 @@ struct Hyperlink: Decodable, Equatable, Hashable, Identifiable {
         processingState: String,
         createdAt: String,
         updatedAt: String,
+        lastShownInWidget: String? = nil,
         thumbnailURL: String?,
         thumbnailDarkURL: String?,
         screenshotURL: String?,
@@ -85,6 +88,7 @@ struct Hyperlink: Decodable, Equatable, Hashable, Identifiable {
         self.processingState = processingState
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.lastShownInWidget = lastShownInWidget
         self.thumbnailURL = thumbnailURL
         self.thumbnailDarkURL = thumbnailDarkURL
         self.screenshotURL = screenshotURL
@@ -106,6 +110,7 @@ struct Hyperlink: Decodable, Equatable, Hashable, Identifiable {
         processingState = try container.decode(String.self, forKey: .processingState)
         createdAt = try container.decode(String.self, forKey: .createdAt)
         updatedAt = try container.decode(String.self, forKey: .updatedAt)
+        lastShownInWidget = try container.decodeIfPresent(String.self, forKey: .lastShownInWidget)
         thumbnailURL = try container.decodeIfPresent(String.self, forKey: .thumbnailURL)
         thumbnailDarkURL = try container.decodeIfPresent(String.self, forKey: .thumbnailDarkURL)
         screenshotURL = try container.decodeIfPresent(String.self, forKey: .screenshotURL)
@@ -131,6 +136,7 @@ extension Hyperlink: FetchableRecord, PersistableRecord, TableRecord {
         case processingState = "processing_state"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case lastShownInWidget = "last_shown_in_widget"
         case thumbnailURL = "thumbnail_url"
         case thumbnailDarkURL = "thumbnail_dark_url"
         case screenshotURL = "screenshot_url"
@@ -176,6 +182,9 @@ extension Hyperlink: FetchableRecord, PersistableRecord, TableRecord {
             processingState: processingState,
             createdAt: row[Columns.createdAt],
             updatedAt: row[Columns.updatedAt],
+            lastShownInWidget: row.hasColumn("last_shown_in_widget")
+                ? row[Columns.lastShownInWidget]
+                : nil,
             thumbnailURL: row[Columns.thumbnailURL],
             thumbnailDarkURL: row[Columns.thumbnailDarkURL],
             screenshotURL: row[Columns.screenshotURL],
@@ -197,6 +206,7 @@ extension Hyperlink: FetchableRecord, PersistableRecord, TableRecord {
         container[Columns.processingState] = processingState
         container[Columns.createdAt] = createdAt
         container[Columns.updatedAt] = updatedAt
+        // Keep widget display metadata local-only so server sync upserts don't overwrite it.
         container[Columns.thumbnailURL] = thumbnailURL
         container[Columns.thumbnailDarkURL] = thumbnailDarkURL
         container[Columns.screenshotURL] = screenshotURL

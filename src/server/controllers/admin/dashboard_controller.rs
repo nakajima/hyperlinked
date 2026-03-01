@@ -1183,6 +1183,7 @@ async fn read_uploaded_backup_archive(multipart: &mut Multipart) -> Result<PathB
 
     tracing::warn!(
         seen_field_names = %seen_field_names.join(","),
+        hint = "multipart body did not include an `archive` file part; ensure the upload input is enabled when submitting",
         "admin import upload did not include required multipart field `archive`"
     );
     Err("no backup ZIP file uploaded (expected form field `archive`)".to_string())
@@ -3112,6 +3113,21 @@ mod tests {
         status.assert_status_ok();
         let payload: AdminStatusResponse = status.json();
         assert_ne!(payload.backup.state, "running");
+    }
+
+    #[tokio::test]
+    async fn admin_import_rejects_multipart_without_archive_field() {
+        let (server, _) = new_server("").await;
+
+        let multipart = MultipartForm::new().add_part("not_archive", Part::text("ignored"));
+        let import = server.post("/admin/import").multipart(multipart).await;
+        import.assert_status_see_other();
+        import.assert_header("location", "/admin");
+
+        let status = server.get("/admin/status").await;
+        status.assert_status_ok();
+        let payload: AdminStatusResponse = status.json();
+        assert_eq!(payload.import.state, "idle");
     }
 
     #[tokio::test]

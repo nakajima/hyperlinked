@@ -31,7 +31,7 @@ enum WidgetSortOrder: String, AppEnum, CaseIterable {
 }
 
 enum WidgetScope: String, AppEnum, CaseIterable {
-    case rootOnly
+    case saved
     case discoveredOnly
     case all
 
@@ -41,7 +41,7 @@ enum WidgetScope: String, AppEnum, CaseIterable {
 
     static var caseDisplayRepresentations: [WidgetScope: DisplayRepresentation] {
         [
-            .rootOnly: DisplayRepresentation(title: "Root Only"),
+            .saved: DisplayRepresentation(title: "Saved"),
             .discoveredOnly: DisplayRepresentation(title: "Discovered Only"),
             .all: DisplayRepresentation(title: "All"),
         ]
@@ -49,8 +49,8 @@ enum WidgetScope: String, AppEnum, CaseIterable {
 
     var queryToken: String {
         switch self {
-        case .rootOnly:
-            return "root"
+        case .saved:
+            return "saved"
         case .discoveredOnly:
             return "discovered"
         case .all:
@@ -62,21 +62,24 @@ enum WidgetScope: String, AppEnum, CaseIterable {
 struct ConfigurationAppIntent: WidgetConfigurationIntent {
     static var title: LocalizedStringResource { "Hyperlinks Configuration" }
     static var description: IntentDescription {
-        "Configure sort order and filters for your hyperlinks widget."
+        "Configure sort order, filters, and rotation for your hyperlinks widget."
     }
 
-    @Parameter(title: "Sort Order", default: .newest)
+    @Parameter(title: "Sort By", default: .newest)
     var sortOrder: WidgetSortOrder
 
-    @Parameter(title: "Scope", default: .rootOnly)
+    @Parameter(title: "Filter", default: .saved)
     var scope: WidgetScope
 
-    @Parameter(title: "Only Unclicked", default: false)
+    @Parameter(title: "Only Unvisited", default: false)
     var unclickedOnly: Bool
+
+    @Parameter(title: "Rotate links", default: false)
+    var rotateSlowly: Bool
 
     static var parameterSummary: some ParameterSummary {
         Summary(
-            "Show \(\.$scope), sort by \(\.$sortOrder), unclicked only \(\.$unclickedOnly)"
+            "Show \(\.$scope), sort by \(\.$sortOrder), unclicked only \(\.$unclickedOnly), rotate \(\.$rotateSlowly)"
         )
     }
 }
@@ -85,8 +88,9 @@ extension ConfigurationAppIntent {
     static var previewNewestRoot: ConfigurationAppIntent {
         let intent = ConfigurationAppIntent()
         intent.sortOrder = .oldest
-        intent.scope = .rootOnly
+        intent.scope = .saved
         intent.unclickedOnly = false
+        intent.rotateSlowly = false
         return intent
     }
 
@@ -95,6 +99,7 @@ extension ConfigurationAppIntent {
         intent.sortOrder = .random
         intent.scope = .all
         intent.unclickedOnly = true
+        intent.rotateSlowly = true
         return intent
     }
 }
