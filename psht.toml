@@ -1,6 +1,7 @@
 # url = "https://github.com/nakajima/hyperlinked/releases/download/v0.1.4/hyperlinked-0.1.4-x86_64-unknown-linux-gnu.tar.gz"
 # start = "./hyperlinked serve"
 app = "hyperlinked"
+start = "./target/release/hyperlinked serve"
 apt_packages = [
     "chromium-browser",
     "fontconfig",
