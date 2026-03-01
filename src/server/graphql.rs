@@ -833,6 +833,7 @@ mod tests {
                 connection,
                 processing_queue: None,
                 backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
+                backup_imports: crate::server::admin_import::AdminImportManager::default(),
             });
 
         TestServer::new(app).expect("test server should initialize")

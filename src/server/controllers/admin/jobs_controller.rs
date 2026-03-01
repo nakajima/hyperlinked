@@ -894,6 +894,7 @@ mod tests {
                 connection: connection.clone(),
                 processing_queue: None,
                 backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
+                backup_imports: crate::server::admin_import::AdminImportManager::default(),
             });
 
         (

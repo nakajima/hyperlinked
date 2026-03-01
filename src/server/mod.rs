@@ -1,5 +1,6 @@
 pub mod admin;
 pub(crate) mod admin_backup;
+pub(crate) mod admin_import;
 pub mod admin_jobs;
 mod chromium_diagnostics;
 pub mod context;
@@ -63,6 +64,7 @@ pub async fn start(
         connection,
         processing_queue: Some(processing_queue),
         backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
+        backup_imports: crate::server::admin_import::AdminImportManager::default(),
     };
     let app = Router::<context::Context>::new()
         .route("/", get(|| async { Redirect::temporary("/hyperlinks") }))

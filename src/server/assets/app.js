@@ -564,6 +564,25 @@ function formatBackupStageLabel(stage) {
   return "Working";
 }
 
+function formatImportStageLabel(stage) {
+  if (stage === "validating") {
+    return "Validating backup";
+  }
+  if (stage === "restoring_hyperlinks") {
+    return "Restoring hyperlinks";
+  }
+  if (stage === "restoring_relations") {
+    return "Restoring relations";
+  }
+  if (stage === "restoring_artifacts") {
+    return "Restoring artifacts";
+  }
+  if (stage === "finalizing") {
+    return "Finalizing import";
+  }
+  return "Working";
+}
+
 function initializeAdminBackupControls() {
   const container = document.querySelector("[data-admin-backup]");
   if (!(container instanceof HTMLElement)) {
@@ -699,11 +718,141 @@ function initializeAdminBackupControls() {
   return true;
 }
 
+function initializeAdminImportControls() {
+  const container = document.querySelector("[data-admin-import]");
+  if (!(container instanceof HTMLElement)) {
+    return false;
+  }
+
+  const form = container.querySelector("[data-admin-import-form]");
+  const submitButton = container.querySelector("[data-admin-import-submit]");
+  const cancelButton = container.querySelector("[data-admin-import-cancel]");
+  const statusText = container.querySelector("[data-admin-import-status]");
+  const progressText = container.querySelector("[data-admin-import-progress]");
+  const fileInput = container.querySelector("#admin-import-archive");
+
+  if (
+    !(form instanceof HTMLFormElement) ||
+    !(submitButton instanceof HTMLButtonElement) ||
+    !(cancelButton instanceof HTMLButtonElement) ||
+    !(statusText instanceof HTMLElement) ||
+    !(progressText instanceof HTMLElement)
+  ) {
+    return false;
+  }
+
+  let uploadInFlight = false;
+  let latestImport = null;
+
+  const applyImportStatus = (status) => {
+    latestImport = status;
+    const state = typeof status?.state === "string" ? status.state : "idle";
+    const isRunning = state === "running";
+
+    submitButton.disabled = uploadInFlight || isRunning;
+    cancelButton.disabled = !isRunning;
+    cancelButton.classList.toggle("hidden", !isRunning);
+    if (fileInput instanceof HTMLInputElement) {
+      fileInput.disabled = uploadInFlight || isRunning;
+    }
+
+    if (state === "running") {
+      const stage = typeof status?.stage === "string" ? status.stage : "";
+      const stageLabel = formatImportStageLabel(stage);
+      statusText.textContent = "Importing backup ZIP...";
+
+      if (stage === "restoring_hyperlinks") {
+        const done = Number(status?.hyperlinks_done);
+        const total = Number(status?.hyperlinks_total);
+        if (Number.isFinite(done) && Number.isFinite(total) && total >= 0) {
+          progressText.textContent = `${stageLabel}: ${done}/${total}`;
+        } else {
+          progressText.textContent = stageLabel;
+        }
+      } else if (stage === "restoring_relations") {
+        const done = Number(status?.relations_done);
+        const total = Number(status?.relations_total);
+        if (Number.isFinite(done) && Number.isFinite(total) && total >= 0) {
+          progressText.textContent = `${stageLabel}: ${done}/${total}`;
+        } else {
+          progressText.textContent = stageLabel;
+        }
+      } else if (stage === "restoring_artifacts") {
+        const done = Number(status?.artifacts_done);
+        const total = Number(status?.artifacts_total);
+        if (Number.isFinite(done) && Number.isFinite(total) && total >= 0) {
+          progressText.textContent = `${stageLabel}: ${done}/${total}`;
+        } else {
+          progressText.textContent = stageLabel;
+        }
+      } else {
+        progressText.textContent = stageLabel;
+      }
+
+      progressText.classList.remove("hidden");
+      return;
+    }
+
+    progressText.classList.add("hidden");
+    progressText.textContent = "";
+
+    if (state === "ready") {
+      const hyperlinks = Number(status?.hyperlinks);
+      const relations = Number(status?.relations);
+      const artifacts = Number(status?.artifacts);
+      if (
+        Number.isFinite(hyperlinks) &&
+        Number.isFinite(relations) &&
+        Number.isFinite(artifacts)
+      ) {
+        statusText.textContent = `Import complete (${hyperlinks} links, ${relations} relations, ${artifacts} artifacts).`;
+      } else {
+        statusText.textContent = "Import complete.";
+      }
+      return;
+    }
+
+    if (state === "failed") {
+      const error =
+        typeof status?.error === "string" && status.error.trim().length > 0
+          ? status.error.trim()
+          : "unknown error";
+      statusText.textContent = `Import failed: ${error}`;
+      return;
+    }
+
+    if (state === "cancelled") {
+      statusText.textContent = "Import canceled.";
+      return;
+    }
+
+    statusText.textContent = "Import is idle.";
+  };
+
+  form.addEventListener("submit", () => {
+    uploadInFlight = true;
+    applyImportStatus(latestImport);
+    statusText.textContent = "Uploading backup ZIP...";
+  });
+
+  window.addEventListener(ADMIN_STATUS_EVENT, (event) => {
+    if (!(event instanceof CustomEvent)) {
+      return;
+    }
+    const status = event.detail?.import;
+    applyImportStatus(status);
+  });
+
+  applyImportStatus(null);
+  return true;
+}
+
 function initializeAdminStatusPolling() {
   const hasQueueBadge = document.querySelector("[data-queue-pending-badge]");
   const hasBackupControls = initializeAdminBackupControls();
+  const hasImportControls = initializeAdminImportControls();
 
-  if (!hasQueueBadge && !hasBackupControls) {
+  if (!hasQueueBadge && !hasBackupControls && !hasImportControls) {
     return;
   }
 

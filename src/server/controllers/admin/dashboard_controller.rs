@@ -1,13 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::{Cursor, ErrorKind, Read, Seek, Write},
+    io::{ErrorKind, Read, Seek, Write},
     path::{Component, Path, PathBuf},
 };
 
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Form, Multipart, State},
+    extract::{DefaultBodyLimit, Form, Multipart, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing,
@@ -18,6 +18,7 @@ use sea_orm::{
     EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Statement,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 
@@ -38,6 +39,10 @@ use crate::{
         admin_backup::{
             BackupCompletionSummary, BackupDownloadError, BackupProgress, BackupProgressStage,
             BackupStatusResponse,
+        },
+        admin_import::{
+            ImportCompletionSummary, ImportProgress, ImportProgressStage, ImportStatusResponse,
+            next_import_upload_path,
         },
         chromium_diagnostics::ChromiumDiagnostics,
         context::Context,
@@ -72,7 +77,11 @@ pub fn routes() -> Router<Context> {
         )
         .route("/admin/export/start", routing::post(start_backup_export))
         .route("/admin/export/cancel", routing::post(cancel_backup_export))
-        .route("/admin/import", routing::post(import_hyperlinks))
+        .route(
+            "/admin/import",
+            routing::post(import_hyperlinks).layer(DefaultBodyLimit::disable()),
+        )
+        .route("/admin/import/cancel", routing::post(cancel_backup_import))
         .route("/admin/clear-queue", routing::post(clear_queue))
         .route("/admin/pause-queue", routing::post(pause_queue))
         .route("/admin/resume-queue", routing::post(resume_queue))
@@ -254,13 +263,13 @@ struct AdminBackupArchive {
     hyperlinks: Vec<HyperlinkBackupRow>,
     relations: Vec<HyperlinkRelationBackupRow>,
     artifacts: Vec<HyperlinkArtifactBackupRow>,
-    artifact_payloads: HashMap<i32, Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct AdminStatusResponse {
     queue: crate::server::admin_jobs::QueuePendingCounts,
     backup: BackupStatusResponse,
+    import: ImportStatusResponse,
     server_time: String,
 }
 
@@ -331,6 +340,7 @@ async fn status(State(state): State<Context>) -> Response {
     Json(AdminStatusResponse {
         queue,
         backup: state.backup_exports.snapshot(),
+        import: state.backup_imports.snapshot(),
         server_time: format_datetime(&now_utc()),
     })
     .into_response()
@@ -429,8 +439,8 @@ async fn import_hyperlinks(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
-    let archive_bytes = match read_uploaded_backup_archive(&mut multipart).await {
-        Ok(bytes) => bytes,
+    let archive_path = match read_uploaded_backup_archive(&mut multipart).await {
+        Ok(path) => path,
         Err(message) => {
             return redirect_with_flash(
                 &headers,
@@ -441,26 +451,64 @@ async fn import_hyperlinks(
         }
     };
 
-    let summary = match import_backup_zip(&state.connection, archive_bytes).await {
-        Ok(summary) => summary,
-        Err(message) => {
-            return redirect_with_flash(
-                &headers,
-                "/admin",
-                FlashName::Alert,
-                format!("Import failed: {message}"),
-            );
-        }
-    };
+    let import_manager = state.backup_imports.clone();
+    let import_manager_for_job = import_manager.clone();
+    let connection = state.connection.clone();
 
+    let started = import_manager.start_job(archive_path, move |job_id, archive_path| {
+        let import_manager = import_manager_for_job.clone();
+        tokio::spawn(async move {
+            let result = import_backup_zip(&connection, &archive_path, |progress| {
+                import_manager.update_progress(job_id, progress);
+            })
+            .await;
+
+            match result {
+                Ok(summary) => {
+                    import_manager.mark_ready(
+                        job_id,
+                        ImportCompletionSummary {
+                            hyperlinks: summary.hyperlinks,
+                            relations: summary.relations,
+                            artifacts: summary.artifacts,
+                        },
+                    );
+                }
+                Err(message) => {
+                    import_manager.mark_failed(job_id, message);
+                }
+            }
+        })
+    });
+
+    if started.started {
+        redirect_with_flash(
+            &headers,
+            "/admin",
+            FlashName::Notice,
+            "Import started. Refresh this page to follow progress.",
+        )
+    } else {
+        let state_label = started.status.state;
+        redirect_with_flash(
+            &headers,
+            "/admin",
+            FlashName::Notice,
+            format!("Import already in progress ({state_label})."),
+        )
+    }
+}
+
+async fn cancel_backup_import(State(state): State<Context>, headers: HeaderMap) -> Response {
+    let canceled = state.backup_imports.cancel_running();
+    if canceled {
+        return redirect_with_flash(&headers, "/admin", FlashName::Notice, "Import canceled.");
+    }
     redirect_with_flash(
         &headers,
         "/admin",
         FlashName::Notice,
-        format!(
-            "Import complete: restored {} hyperlinks, {} relations, and {} artifacts.",
-            summary.hyperlinks, summary.relations, summary.artifacts
-        ),
+        "No import in progress.",
     )
 }
 
@@ -1063,8 +1111,8 @@ fn write_zip_binary_file_with_compression<W: Write + Seek>(
     Ok(())
 }
 
-async fn read_uploaded_backup_archive(multipart: &mut Multipart) -> Result<Vec<u8>, String> {
-    while let Some(field) = multipart
+async fn read_uploaded_backup_archive(multipart: &mut Multipart) -> Result<PathBuf, String> {
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|err| format!("failed to read multipart form: {err}"))?
@@ -1073,32 +1121,76 @@ async fn read_uploaded_backup_archive(multipart: &mut Multipart) -> Result<Vec<u
         if field_name.as_deref() != Some("archive") {
             continue;
         }
-        let bytes = field
-            .bytes()
+
+        let upload_path = next_import_upload_path();
+        let mut file = tokio::fs::File::create(&upload_path)
             .await
-            .map_err(|err| format!("failed to read uploaded zip file: {err}"))?;
-        if bytes.is_empty() {
+            .map_err(|err| format!("failed to open temporary upload file: {err}"))?;
+
+        let mut bytes_written: u64 = 0;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|err| format!("failed to read uploaded zip file chunk: {err}"))?
+        {
+            file.write_all(&chunk)
+                .await
+                .map_err(|err| format!("failed to write uploaded zip file chunk: {err}"))?;
+            bytes_written = bytes_written.saturating_add(chunk.len() as u64);
+        }
+
+        if let Err(err) = file.flush().await {
+            remove_uploaded_backup_file(&upload_path).await;
+            return Err(format!("failed to finalize uploaded zip file: {err}"));
+        }
+
+        if bytes_written == 0 {
+            remove_uploaded_backup_file(&upload_path).await;
             return Err("uploaded backup ZIP file is empty".to_string());
         }
-        return Ok(bytes.to_vec());
+
+        return Ok(upload_path);
     }
 
     Err("no backup ZIP file uploaded (expected form field `archive`)".to_string())
 }
 
-async fn import_backup_zip(
-    connection: &DatabaseConnection,
-    archive_bytes: Vec<u8>,
-) -> Result<AdminImportSummary, String> {
-    let archive = parse_backup_zip(archive_bytes)?;
-    restore_backup_archive(connection, archive).await
+async fn remove_uploaded_backup_file(path: &Path) {
+    if let Err(error) = tokio::fs::remove_file(path).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "failed to remove uploaded backup file"
+        );
+    }
 }
 
-fn parse_backup_zip(archive_bytes: Vec<u8>) -> Result<AdminBackupArchive, String> {
-    let mut archive = ZipArchive::new(Cursor::new(archive_bytes))
-        .map_err(|err| format!("invalid zip archive: {err}"))?;
+async fn import_backup_zip<F>(
+    connection: &DatabaseConnection,
+    archive_path: &Path,
+    mut report_progress: F,
+) -> Result<AdminImportSummary, String>
+where
+    F: FnMut(ImportProgress),
+{
+    let file = std::fs::File::open(archive_path)
+        .map_err(|err| format!("failed to open uploaded zip archive: {err}"))?;
+    let mut zip_archive =
+        ZipArchive::new(file).map_err(|err| format!("invalid zip archive: {err}"))?;
 
-    let manifest: BackupManifest = read_zip_json_file(&mut archive, BACKUP_MANIFEST_PATH)?;
+    report_progress(ImportProgress {
+        stage: ImportProgressStage::Validating,
+        hyperlinks_done: 0,
+        hyperlinks_total: 0,
+        relations_done: 0,
+        relations_total: 0,
+        artifacts_done: 0,
+        artifacts_total: 0,
+    });
+
+    let manifest: BackupManifest = read_zip_json_file(&mut zip_archive, BACKUP_MANIFEST_PATH)?;
     if manifest.version != BACKUP_VERSION {
         return Err(format!(
             "unsupported backup version {}; expected {}",
@@ -1107,11 +1199,11 @@ fn parse_backup_zip(archive_bytes: Vec<u8>) -> Result<AdminBackupArchive, String
     }
 
     let hyperlinks: Vec<HyperlinkBackupRow> =
-        read_zip_json_file(&mut archive, BACKUP_HYPERLINKS_PATH)?;
+        read_zip_json_file(&mut zip_archive, BACKUP_HYPERLINKS_PATH)?;
     let relations: Vec<HyperlinkRelationBackupRow> =
-        read_zip_json_file(&mut archive, BACKUP_RELATIONS_PATH)?;
+        read_zip_json_file(&mut zip_archive, BACKUP_RELATIONS_PATH)?;
     let artifacts: Vec<HyperlinkArtifactBackupRow> =
-        read_zip_json_file(&mut archive, BACKUP_ARTIFACTS_PATH)?;
+        read_zip_json_file(&mut zip_archive, BACKUP_ARTIFACTS_PATH)?;
 
     if hyperlinks.len() != manifest.hyperlinks {
         return Err(format!(
@@ -1135,28 +1227,37 @@ fn parse_backup_zip(archive_bytes: Vec<u8>) -> Result<AdminBackupArchive, String
         ));
     }
 
-    let mut artifact_payloads = HashMap::with_capacity(artifacts.len());
+    let mut seen_artifact_ids = HashSet::with_capacity(artifacts.len());
     for artifact in &artifacts {
-        validate_archive_entry_path(&artifact.payload_path)?;
-        let payload = read_zip_binary_file(&mut archive, &artifact.payload_path)?;
-        if artifact_payloads.insert(artifact.id, payload).is_some() {
+        if !seen_artifact_ids.insert(artifact.id) {
             return Err(format!(
                 "duplicate artifact id {} in artifacts.json",
                 artifact.id
             ));
         }
+        validate_archive_entry_path(&artifact.payload_path)?;
+        let _entry = zip_archive
+            .by_name(&artifact.payload_path)
+            .map_err(|err| format!("missing {} in backup zip: {err}", artifact.payload_path))?;
     }
 
-    Ok(AdminBackupArchive {
+    let parsed_archive = AdminBackupArchive {
         hyperlinks,
         relations,
         artifacts,
-        artifact_payloads,
-    })
+    };
+
+    restore_backup_archive(
+        connection,
+        &mut zip_archive,
+        parsed_archive,
+        report_progress,
+    )
+    .await
 }
 
-fn read_zip_json_file<T: DeserializeOwned>(
-    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+fn read_zip_json_file<T: DeserializeOwned, R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
     path: &str,
 ) -> Result<T, String> {
     let mut entry = archive
@@ -1170,8 +1271,8 @@ fn read_zip_json_file<T: DeserializeOwned>(
         .map_err(|err| format!("failed to parse {path} from backup zip: {err}"))
 }
 
-fn read_zip_binary_file(
-    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+fn read_zip_binary_file<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
     path: &str,
 ) -> Result<Vec<u8>, String> {
     let mut entry = archive
@@ -1184,36 +1285,106 @@ fn read_zip_binary_file(
     Ok(payload)
 }
 
-async fn restore_backup_archive(
+async fn restore_backup_archive<F, R>(
     connection: &DatabaseConnection,
+    zip_archive: &mut ZipArchive<R>,
     archive: AdminBackupArchive,
-) -> Result<AdminImportSummary, String> {
+    mut report_progress: F,
+) -> Result<AdminImportSummary, String>
+where
+    F: FnMut(ImportProgress),
+    R: Read + Seek,
+{
+    let hyperlink_total = archive.hyperlinks.len();
+    let relation_total = archive.relations.len();
+    let artifact_total = archive.artifacts.len();
     let mut summary = AdminImportSummary::default();
 
     let mut hyperlinks = archive.hyperlinks;
     hyperlinks.sort_by_key(|row| row.id);
-    for row in &hyperlinks {
+    report_progress(ImportProgress {
+        stage: ImportProgressStage::RestoringHyperlinks,
+        hyperlinks_done: 0,
+        hyperlinks_total: hyperlink_total,
+        relations_done: 0,
+        relations_total: relation_total,
+        artifacts_done: 0,
+        artifacts_total: artifact_total,
+    });
+    for (index, row) in hyperlinks.iter().enumerate() {
         restore_hyperlink_row(connection, row).await?;
         summary.hyperlinks += 1;
+        report_progress(ImportProgress {
+            stage: ImportProgressStage::RestoringHyperlinks,
+            hyperlinks_done: index + 1,
+            hyperlinks_total: hyperlink_total,
+            relations_done: 0,
+            relations_total: relation_total,
+            artifacts_done: 0,
+            artifacts_total: artifact_total,
+        });
     }
 
     let mut relations = archive.relations;
     relations.sort_by_key(|row| row.id);
-    for row in &relations {
+    report_progress(ImportProgress {
+        stage: ImportProgressStage::RestoringRelations,
+        hyperlinks_done: summary.hyperlinks,
+        hyperlinks_total: hyperlink_total,
+        relations_done: 0,
+        relations_total: relation_total,
+        artifacts_done: 0,
+        artifacts_total: artifact_total,
+    });
+    for (index, row) in relations.iter().enumerate() {
         restore_relation_row(connection, row).await?;
         summary.relations += 1;
+        report_progress(ImportProgress {
+            stage: ImportProgressStage::RestoringRelations,
+            hyperlinks_done: summary.hyperlinks,
+            hyperlinks_total: hyperlink_total,
+            relations_done: index + 1,
+            relations_total: relation_total,
+            artifacts_done: 0,
+            artifacts_total: artifact_total,
+        });
     }
 
     let mut artifacts = archive.artifacts;
     artifacts.sort_by_key(|row| row.id);
-    for row in &artifacts {
-        let payload = archive
-            .artifact_payloads
-            .get(&row.id)
-            .ok_or_else(|| format!("missing payload bytes for artifact {}", row.id))?;
-        restore_artifact_row(connection, row, payload).await?;
+    report_progress(ImportProgress {
+        stage: ImportProgressStage::RestoringArtifacts,
+        hyperlinks_done: summary.hyperlinks,
+        hyperlinks_total: hyperlink_total,
+        relations_done: summary.relations,
+        relations_total: relation_total,
+        artifacts_done: 0,
+        artifacts_total: artifact_total,
+    });
+    for (index, row) in artifacts.iter().enumerate() {
+        let payload = read_zip_binary_file(zip_archive, &row.payload_path)?;
+        restore_artifact_row(connection, row, &payload).await?;
         summary.artifacts += 1;
+        report_progress(ImportProgress {
+            stage: ImportProgressStage::RestoringArtifacts,
+            hyperlinks_done: summary.hyperlinks,
+            hyperlinks_total: hyperlink_total,
+            relations_done: summary.relations,
+            relations_total: relation_total,
+            artifacts_done: index + 1,
+            artifacts_total: artifact_total,
+        });
     }
+
+    report_progress(ImportProgress {
+        stage: ImportProgressStage::Finalizing,
+        hyperlinks_done: summary.hyperlinks,
+        hyperlinks_total: hyperlink_total,
+        relations_done: summary.relations,
+        relations_total: relation_total,
+        artifacts_done: summary.artifacts,
+        artifacts_total: artifact_total,
+    });
 
     Ok(summary)
 }
@@ -2308,6 +2479,7 @@ mod tests {
                 connection: connection.clone(),
                 processing_queue: None,
                 backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
+                backup_imports: crate::server::admin_import::AdminImportManager::default(),
             });
         (
             axum_test::TestServer::new(app).expect("test server should initialize"),
@@ -2328,6 +2500,58 @@ mod tests {
         }
 
         panic!("timed out waiting for backup export to become ready");
+    }
+
+    async fn wait_for_import_ready(server: &axum_test::TestServer) -> AdminStatusResponse {
+        for _ in 0..300 {
+            let status = server.get("/admin/status").await;
+            status.assert_status_ok();
+            let payload: AdminStatusResponse = status.json();
+            if payload.import.state == "ready" {
+                return payload;
+            }
+            assert_ne!(payload.import.state, "failed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        panic!("timed out waiting for backup import to become ready");
+    }
+
+    async fn wait_for_import_running(server: &axum_test::TestServer) -> AdminStatusResponse {
+        for _ in 0..300 {
+            let status = server.get("/admin/status").await;
+            status.assert_status_ok();
+            let payload: AdminStatusResponse = status.json();
+            if payload.import.state == "running" {
+                return payload;
+            }
+            if payload.import.state == "failed" {
+                panic!(
+                    "import failed before cancel request: {}",
+                    payload.import.error.unwrap_or_else(|| "unknown error".to_string())
+                );
+            }
+            if payload.import.state == "ready" {
+                panic!("import completed before cancel request");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        panic!("timed out waiting for backup import to start running");
+    }
+
+    async fn wait_for_import_terminal(server: &axum_test::TestServer) -> AdminStatusResponse {
+        for _ in 0..300 {
+            let status = server.get("/admin/status").await;
+            status.assert_status_ok();
+            let payload: AdminStatusResponse = status.json();
+            if payload.import.state != "running" {
+                return payload;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        panic!("timed out waiting for backup import to leave running state");
     }
 
     async fn insert_queue_job(
@@ -2460,6 +2684,10 @@ mod tests {
         assert!(body.contains("data-admin-backup-create"));
         assert!(body.contains("data-admin-backup-cancel"));
         assert!(body.contains("data-admin-backup-download"));
+        assert!(body.contains("data-admin-import"));
+        assert!(body.contains("data-admin-import-form"));
+        assert!(body.contains("data-admin-import-submit"));
+        assert!(body.contains("data-admin-import-status"));
     }
 
     #[tokio::test]
@@ -2819,6 +3047,7 @@ mod tests {
         assert_eq!(payload.queue.processing, 0);
         assert_eq!(payload.backup.state, "idle");
         assert!(!payload.backup.download_ready);
+        assert_eq!(payload.import.state, "idle");
         assert!(!payload.server_time.is_empty());
     }
 
@@ -2945,6 +3174,8 @@ mod tests {
         let import = server.post("/admin/import").multipart(multipart).await;
         import.assert_status_see_other();
         import.assert_header("location", "/admin");
+        let import_status = wait_for_import_ready(&server).await;
+        assert_eq!(import_status.import.state, "ready");
 
         let count = hyperlink::Entity::find()
             .count(&connection)
@@ -3062,6 +3293,8 @@ mod tests {
         let import = server.post("/admin/import").multipart(multipart).await;
         import.assert_status_see_other();
         import.assert_header("location", "/admin");
+        let import_status = wait_for_import_ready(&server).await;
+        assert_eq!(import_status.import.state, "ready");
 
         let artifact = hyperlink_artifact::Entity::find_by_id(202)
             .one(&connection)
@@ -3085,5 +3318,99 @@ mod tests {
             .await
             .expect("processing payload should decode");
         assert_eq!(processing_payload, raw_warc);
+    }
+
+    #[tokio::test]
+    async fn admin_import_cancel_stops_running_import_job() {
+        let (server, _) = new_server("").await;
+
+        let hyperlinks = vec![HyperlinkBackupRow {
+            id: 501,
+            title: "Import cancel target".to_string(),
+            url: "https://example.com/cancel".to_string(),
+            raw_url: "https://example.com/cancel".to_string(),
+            og_title: None,
+            og_description: None,
+            og_type: None,
+            og_url: None,
+            og_image_url: None,
+            og_site_name: None,
+            discovery_depth: 0,
+            clicks_count: 0,
+            last_clicked_at: None,
+            created_at: "2026-02-22T00:00:00Z".to_string(),
+            updated_at: "2026-02-22T00:00:00Z".to_string(),
+        }];
+        let relations: Vec<HyperlinkRelationBackupRow> = Vec::new();
+
+        let artifact_count = 64usize;
+        let payload_size = 256 * 1024usize;
+        let payload = vec![0x5Au8; payload_size];
+        let artifacts: Vec<HyperlinkArtifactBackupRow> = (0..artifact_count)
+            .map(|offset| {
+                let id = 7000 + offset as i32;
+                HyperlinkArtifactBackupRow {
+                    id,
+                    hyperlink_id: 501,
+                    kind: HyperlinkArtifactKind::ScreenshotWebp,
+                    content_type: "image/webp".to_string(),
+                    size_bytes: payload_size as i32,
+                    created_at: "2026-02-22T00:10:00Z".to_string(),
+                    job_id: None,
+                    checksum_sha256: None,
+                    payload_path: format!("artifacts/{id}.bin"),
+                }
+            })
+            .collect();
+        let manifest = BackupManifest {
+            version: BACKUP_VERSION,
+            exported_at: "2026-02-22T00:40:00Z".to_string(),
+            hyperlinks: hyperlinks.len(),
+            relations: relations.len(),
+            artifacts: artifacts.len(),
+        };
+
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        write_zip_json_file(&mut writer, BACKUP_MANIFEST_PATH, &manifest)
+            .expect("manifest should write");
+        write_zip_json_file(&mut writer, BACKUP_HYPERLINKS_PATH, &hyperlinks)
+            .expect("hyperlinks should write");
+        write_zip_json_file(&mut writer, BACKUP_RELATIONS_PATH, &relations)
+            .expect("relations should write");
+        for artifact in &artifacts {
+            write_zip_binary_file_with_compression(
+                &mut writer,
+                &artifact.payload_path,
+                &payload,
+                CompressionMethod::Stored,
+            )
+            .expect("artifact payload should write");
+        }
+        write_zip_json_file(&mut writer, BACKUP_ARTIFACTS_PATH, &artifacts)
+            .expect("artifacts should write");
+        let archive_payload = writer
+            .finish()
+            .expect("zip writer should finish")
+            .into_inner();
+
+        let multipart = MultipartForm::new().add_part(
+            "archive",
+            Part::bytes(archive_payload)
+                .file_name("backup.zip")
+                .mime_type("application/zip"),
+        );
+        let import = server.post("/admin/import").multipart(multipart).await;
+        import.assert_status_see_other();
+        import.assert_header("location", "/admin");
+
+        let running = wait_for_import_running(&server).await;
+        assert_eq!(running.import.state, "running");
+
+        let cancel = server.post("/admin/import/cancel").await;
+        cancel.assert_status_see_other();
+        cancel.assert_header("location", "/admin");
+
+        let terminal = wait_for_import_terminal(&server).await;
+        assert_eq!(terminal.import.state, "cancelled");
     }
 }
