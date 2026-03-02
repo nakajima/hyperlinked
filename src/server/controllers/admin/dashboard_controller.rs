@@ -29,6 +29,7 @@ use crate::{
         hyperlink_processing_job::{self, HyperlinkProcessingJobKind, HyperlinkProcessingJobState},
         hyperlink_relation,
     },
+    integrations::mathpix::MathpixStatus,
     model::{
         hyperlink_artifact as hyperlink_artifact_model,
         hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
@@ -316,10 +317,18 @@ async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
     };
     let chromium = crate::server::chromium_diagnostics::current();
     let fonts = crate::server::font_diagnostics::current();
+    let mathpix = crate::integrations::mathpix::current_status();
 
     views::render_html_page_with_flash(
         "Admin",
-        render_index(&plan.summary, &stats, &artifact_settings, &chromium, &fonts),
+        render_index(
+            &plan.summary,
+            &stats,
+            &artifact_settings,
+            &chromium,
+            &fonts,
+            &mathpix,
+        ),
         Flash::from_headers(&headers),
     )
 }
@@ -2245,6 +2254,7 @@ struct AdminIndexTemplate<'a> {
     has_missing_artifacts_to_process: bool,
     chromium: &'a ChromiumDiagnostics,
     fonts: &'a FontDiagnostics,
+    mathpix: &'a MathpixStatus,
 }
 
 impl AdminIndexTemplate<'_> {
@@ -2271,6 +2281,7 @@ fn render_index(
     artifact_settings: &ArtifactCollectionSettings,
     chromium: &ChromiumDiagnostics,
     fonts: &FontDiagnostics,
+    mathpix: &MathpixStatus,
 ) -> Result<String, sailfish::RenderError> {
     AdminIndexTemplate {
         app_version: APP_VERSION,
@@ -2282,6 +2293,7 @@ fn render_index(
             || summary.readability_will_queue > 0,
         chromium,
         fonts,
+        mathpix,
     }
     .render()
 }
@@ -2332,6 +2344,13 @@ mod tests {
     use super::*;
     use crate::server::test_support;
 
+    fn default_mathpix_status() -> MathpixStatus {
+        MathpixStatus {
+            enabled: false,
+            reason: "disabled: MATHPIX_API_TOKEN not set".to_string(),
+        }
+    }
+
     #[test]
     fn render_index_shows_chromium_setup_when_missing() {
         let summary = MissingArtifactsSummary::default();
@@ -2342,6 +2361,7 @@ mod tests {
             chromium_found: false,
         };
         let fonts = FontDiagnostics::default();
+        let mathpix = default_mathpix_status();
 
         let html = render_index(
             &summary,
@@ -2349,6 +2369,7 @@ mod tests {
             &ArtifactCollectionSettings::default(),
             &chromium,
             &fonts,
+            &mathpix,
         )
         .expect("admin template should render");
         assert!(html.contains("Screenshot browser setup required"));
@@ -2365,6 +2386,7 @@ mod tests {
             chromium_found: true,
         };
         let fonts = FontDiagnostics::default();
+        let mathpix = default_mathpix_status();
 
         let html = render_index(
             &summary,
@@ -2372,6 +2394,7 @@ mod tests {
             &ArtifactCollectionSettings::default(),
             &chromium,
             &fonts,
+            &mathpix,
         )
         .expect("admin template should render");
         assert!(!html.contains("Screenshot browser setup required"));
@@ -2405,6 +2428,7 @@ mod tests {
             ),
             fontconfig_error: None,
         };
+        let mathpix = default_mathpix_status();
 
         let html = render_index(
             &summary,
@@ -2412,11 +2436,69 @@ mod tests {
             &ArtifactCollectionSettings::default(),
             &chromium,
             &fonts,
+            &mathpix,
         )
         .expect("admin template should render");
         assert!(html.contains("Screenshot font setup recommended"));
         assert!(html.contains("Noto Color Emoji"));
         assert!(html.contains("fontconfig"));
+    }
+
+    #[test]
+    fn render_index_shows_mathpix_enabled_status() {
+        let summary = MissingArtifactsSummary::default();
+        let stats = AdminDatasetStats::default();
+        let chromium = ChromiumDiagnostics {
+            chromium_path: "/usr/bin/chromium".to_string(),
+            chromium_resolved_path: Some("/usr/bin/chromium".to_string()),
+            chromium_found: true,
+        };
+        let fonts = FontDiagnostics::default();
+        let mathpix = MathpixStatus {
+            enabled: true,
+            reason: "enabled".to_string(),
+        };
+
+        let html = render_index(
+            &summary,
+            &stats,
+            &ArtifactCollectionSettings::default(),
+            &chromium,
+            &fonts,
+            &mathpix,
+        )
+        .expect("admin template should render");
+        assert!(html.contains("PDF Mathpix parsing"));
+        assert!(html.contains("Enabled"));
+    }
+
+    #[test]
+    fn render_index_shows_mathpix_disabled_reason() {
+        let summary = MissingArtifactsSummary::default();
+        let stats = AdminDatasetStats::default();
+        let chromium = ChromiumDiagnostics {
+            chromium_path: "/usr/bin/chromium".to_string(),
+            chromium_resolved_path: Some("/usr/bin/chromium".to_string()),
+            chromium_found: true,
+        };
+        let fonts = FontDiagnostics::default();
+        let mathpix = MathpixStatus {
+            enabled: false,
+            reason: "disabled: MATHPIX_APP_ID not set".to_string(),
+        };
+
+        let html = render_index(
+            &summary,
+            &stats,
+            &ArtifactCollectionSettings::default(),
+            &chromium,
+            &fonts,
+            &mathpix,
+        )
+        .expect("admin template should render");
+        assert!(html.contains("PDF Mathpix parsing"));
+        assert!(html.contains("Disabled"));
+        assert!(html.contains("MATHPIX_APP_ID"));
     }
 
     #[tokio::test]
@@ -2564,7 +2646,10 @@ mod tests {
             if payload.import.state == "failed" {
                 panic!(
                     "import failed before cancel request: {}",
-                    payload.import.error.unwrap_or_else(|| "unknown error".to_string())
+                    payload
+                        .import
+                        .error
+                        .unwrap_or_else(|| "unknown error".to_string())
                 );
             }
             if payload.import.state == "ready" {

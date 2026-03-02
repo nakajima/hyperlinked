@@ -1,12 +1,16 @@
+use async_trait::async_trait;
 use dom_smoothie::Readability;
+use reqwest::{StatusCode, header::HeaderValue};
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
+use std::time::Instant;
 
 use crate::{
     entity::{
         hyperlink,
         hyperlink_artifact::{self as hyperlink_artifact_entity, HyperlinkArtifactKind},
     },
+    integrations::mathpix::{self, MathpixConfig, MathpixMode},
     model::{
         hyperlink_artifact as hyperlink_artifact_model,
         hyperlink_search_doc as hyperlink_search_doc_model,
@@ -17,10 +21,13 @@ use crate::{
 const READABLE_TEXT_CONTENT_TYPE: &str = "text/markdown; charset=utf-8";
 const READABLE_META_CONTENT_TYPE: &str = "application/json";
 const READABLE_ERROR_CONTENT_TYPE: &str = "application/json";
+const MATHPIX_BASE_URL: &str = "https://api.mathpix.com";
+const MATHPIX_SUBMIT_PDF_PATH: &str = "/v3/pdf";
 
 pub struct ReadabilityFetcher {
     job_id: i32,
     pdf_extractor: Box<dyn PdfTextExtractor>,
+    mathpix_pdf_extractor: Option<Box<dyn PdfTextExtractor>>,
 }
 
 pub struct ReadabilityFetchOutput {
@@ -34,11 +41,13 @@ enum ReadabilitySource {
     Pdf(hyperlink_artifact_entity::Model),
 }
 
+#[async_trait]
 trait PdfTextExtractor: Send + Sync {
     fn name(&self) -> &'static str;
-    fn extract(&self, payload: &[u8]) -> Result<PdfExtraction, String>;
+    async fn extract(&self, payload: &[u8]) -> Result<PdfExtraction, String>;
 }
 
+#[derive(Clone, Debug)]
 struct PdfExtraction {
     markdown: String,
     page_count: Option<usize>,
@@ -46,12 +55,31 @@ struct PdfExtraction {
 
 struct RustPdfExtractor;
 
+struct MathpixPdfExtractor {
+    client: reqwest::Client,
+    app_id: String,
+    app_key: String,
+    poll_interval: std::time::Duration,
+    poll_timeout: std::time::Duration,
+}
+
+#[derive(Clone, Debug)]
+struct MathpixSubmitResponse {
+    pdf_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct MathpixPollResult {
+    page_count: Option<usize>,
+}
+
+#[async_trait]
 impl PdfTextExtractor for RustPdfExtractor {
     fn name(&self) -> &'static str {
         "pdf_extract"
     }
 
-    fn extract(&self, payload: &[u8]) -> Result<PdfExtraction, String> {
+    async fn extract(&self, payload: &[u8]) -> Result<PdfExtraction, String> {
         let text = pdf_extract::extract_text_from_mem(payload)
             .map_err(|error| format!("pdf extraction failed: {error}"))?;
         let page_count = estimate_pdf_page_count(&text);
@@ -66,15 +94,227 @@ impl PdfTextExtractor for RustPdfExtractor {
     }
 }
 
-impl ReadabilityFetcher {
-    pub fn new(job_id: i32) -> Self {
-        Self::with_pdf_extractor(job_id, Box::new(RustPdfExtractor))
+impl MathpixPdfExtractor {
+    fn new(config: MathpixConfig) -> Result<Self, String> {
+        let client = reqwest::Client::builder()
+            .timeout(config.request_timeout)
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .build()
+            .map_err(|error| format!("failed to build mathpix client: {error}"))?;
+        Ok(Self {
+            client,
+            app_id: config.app_id,
+            app_key: config.app_key,
+            poll_interval: config.poll_interval,
+            poll_timeout: config.poll_timeout,
+        })
     }
 
-    fn with_pdf_extractor(job_id: i32, pdf_extractor: Box<dyn PdfTextExtractor>) -> Self {
+    fn set_auth_headers(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let app_id = HeaderValue::from_str(&self.app_id)
+            .map_err(|error| format!("invalid mathpix app_id header value: {error}"))?;
+        let app_key = HeaderValue::from_str(&self.app_key)
+            .map_err(|error| format!("invalid mathpix app_key header value: {error}"))?;
+        Ok(request.header("app_id", app_id).header("app_key", app_key))
+    }
+
+    async fn submit_pdf(&self, payload: &[u8]) -> Result<MathpixSubmitResponse, String> {
+        let file_part = reqwest::multipart::Part::bytes(payload.to_vec())
+            .file_name("document.pdf")
+            .mime_str("application/pdf")
+            .map_err(|error| format!("failed to build mathpix upload payload: {error}"))?;
+        let options_part = reqwest::multipart::Part::text(
+            r#"{"conversion_formats":{"md":true},"math_inline_delimiters":["$","$"]}"#,
+        )
+        .mime_str("application/json")
+        .map_err(|error| format!("failed to build mathpix options payload: {error}"))?;
+        let form = reqwest::multipart::Form::new()
+            .part("file", file_part)
+            .part("options_json", options_part);
+
+        let request = self
+            .client
+            .post(format!("{MATHPIX_BASE_URL}{MATHPIX_SUBMIT_PDF_PATH}"))
+            .multipart(form);
+        let request = self.set_auth_headers(request)?;
+
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("failed to submit pdf to mathpix: {error}"))?;
+        parse_mathpix_submit_response(response).await
+    }
+
+    async fn poll_until_complete(&self, pdf_id: &str) -> Result<MathpixPollResult, String> {
+        let status_url = format!("{MATHPIX_BASE_URL}/v3/pdf/{pdf_id}");
+        let deadline = Instant::now() + self.poll_timeout;
+
+        loop {
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "mathpix processing timed out after {}s",
+                    self.poll_timeout.as_secs()
+                ));
+            }
+
+            let request = self.client.get(status_url.clone());
+            let request = self.set_auth_headers(request)?;
+            let response = request.send().await.map_err(|error| {
+                format!("failed to poll mathpix status for pdf_id {pdf_id}: {error}")
+            })?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(format!(
+                    "mathpix status poll failed for pdf_id {pdf_id}: status {} ({})",
+                    status,
+                    summarize_api_error(&body)
+                ));
+            }
+
+            let body_text = response
+                .text()
+                .await
+                .map_err(|error| format!("failed to decode mathpix poll response: {error}"))?;
+            let body: serde_json::Value = serde_json::from_str(&body_text)
+                .map_err(|error| format!("failed to parse mathpix poll response: {error}"))?;
+            let status = body
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if is_mathpix_completed_status(&status) {
+                return Ok(MathpixPollResult {
+                    page_count: infer_mathpix_page_count(&body),
+                });
+            }
+            if is_mathpix_failed_status(&status) {
+                let reason = body
+                    .get("error")
+                    .and_then(|value| value.as_str())
+                    .or_else(|| body.get("error_info").and_then(|value| value.as_str()))
+                    .or_else(|| body.get("message").and_then(|value| value.as_str()))
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("unknown error");
+                return Err(format!(
+                    "mathpix reported failure for pdf_id {pdf_id} (status={status}): {reason}"
+                ));
+            }
+
+            tokio::time::sleep(self.poll_interval).await;
+        }
+    }
+
+    async fn fetch_markdown(&self, pdf_id: &str) -> Result<String, String> {
+        // Mathpix may expose either `.mmd` or `.md` depending on account/output settings.
+        let mut failures = Vec::new();
+        for suffix in [".mmd", ".md"] {
+            let url = format!("{MATHPIX_BASE_URL}/v3/pdf/{pdf_id}{suffix}");
+            let request = self.client.get(url);
+            let request = self.set_auth_headers(request)?;
+            let response = request
+                .send()
+                .await
+                .map_err(|error| format!("failed to fetch mathpix markdown: {error}"))?;
+
+            if response.status() == StatusCode::NOT_FOUND {
+                failures.push(format!("{suffix}: not found"));
+                continue;
+            }
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                failures.push(format!(
+                    "{suffix}: status {} ({})",
+                    status,
+                    summarize_api_error(&body)
+                ));
+                continue;
+            }
+
+            let markdown = response
+                .text()
+                .await
+                .map_err(|error| format!("failed to decode mathpix markdown payload: {error}"))?;
+            let normalized = normalize_pdf_markdown(&markdown);
+            if normalized.trim().is_empty() {
+                failures.push(format!("{suffix}: markdown output was empty"));
+                continue;
+            }
+
+            return Ok(normalized);
+        }
+
+        Err(format!(
+            "mathpix markdown fetch failed for pdf_id {pdf_id}: {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+#[async_trait]
+impl PdfTextExtractor for MathpixPdfExtractor {
+    fn name(&self) -> &'static str {
+        "mathpix"
+    }
+
+    async fn extract(&self, payload: &[u8]) -> Result<PdfExtraction, String> {
+        if payload.is_empty() {
+            return Err("mathpix payload was empty".to_string());
+        }
+        let submit = self.submit_pdf(payload).await?;
+        let poll = self.poll_until_complete(&submit.pdf_id).await?;
+        let markdown = self.fetch_markdown(&submit.pdf_id).await?;
+        Ok(PdfExtraction {
+            markdown,
+            page_count: poll.page_count,
+        })
+    }
+}
+
+impl ReadabilityFetcher {
+    pub fn new(job_id: i32) -> Self {
+        let mathpix_pdf_extractor = match mathpix::load_mode_from_env() {
+            MathpixMode::Enabled(config) => match MathpixPdfExtractor::new(config) {
+                Ok(extractor) => Some(Box::new(extractor) as Box<dyn PdfTextExtractor>),
+                Err(error) => {
+                    tracing::warn!(
+                        job_id,
+                        error = %error,
+                        "mathpix pdf extractor is enabled but failed to initialize; falling back to pdf_extract"
+                    );
+                    None
+                }
+            },
+            mode => {
+                if mode.disabled_missing_app_id() {
+                    tracing::warn!(
+                        job_id,
+                        "MATHPIX_API_TOKEN is set but MATHPIX_APP_ID is missing; falling back to pdf_extract"
+                    );
+                }
+                None
+            }
+        };
+
+        Self::with_pdf_extractors(job_id, Box::new(RustPdfExtractor), mathpix_pdf_extractor)
+    }
+
+    fn with_pdf_extractors(
+        job_id: i32,
+        pdf_extractor: Box<dyn PdfTextExtractor>,
+        mathpix_pdf_extractor: Option<Box<dyn PdfTextExtractor>>,
+    ) -> Self {
         Self {
             job_id,
             pdf_extractor,
+            mathpix_pdf_extractor,
         }
     }
 }
@@ -160,12 +400,14 @@ impl Processor for ReadabilityFetcher {
                 let pdf_payload = hyperlink_artifact_model::load_payload(&pdf_source)
                     .await
                     .map_err(ProcessingError::DB)?;
-                extract_from_pdf(
+                extract_from_pdf_with_fallback(
+                    self.mathpix_pdf_extractor.as_deref(),
                     self.pdf_extractor.as_ref(),
                     hyperlink.title.as_ref(),
                     hyperlink.url.as_ref(),
                     &pdf_payload,
                 )
+                .await
             }
         };
 
@@ -321,7 +563,42 @@ fn extract_from_html(html: &str) -> Result<(Vec<u8>, Vec<u8>), (String, String)>
     Ok((text_payload, meta_payload))
 }
 
-fn extract_from_pdf(
+async fn extract_from_pdf_with_fallback(
+    primary_extractor: Option<&dyn PdfTextExtractor>,
+    fallback_extractor: &dyn PdfTextExtractor,
+    hyperlink_title: &str,
+    source_url: &str,
+    payload: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), (String, String)> {
+    let Some(primary_extractor) = primary_extractor else {
+        return extract_from_pdf(fallback_extractor, hyperlink_title, source_url, payload).await;
+    };
+
+    match extract_from_pdf(primary_extractor, hyperlink_title, source_url, payload).await {
+        Ok(extraction) => Ok(extraction),
+        Err((_stage, primary_error)) => {
+            tracing::warn!(
+                extractor = primary_extractor.name(),
+                error = %primary_error,
+                fallback = fallback_extractor.name(),
+                "primary pdf extraction failed; attempting fallback extractor"
+            );
+            match extract_from_pdf(fallback_extractor, hyperlink_title, source_url, payload).await {
+                Ok(extraction) => Ok(extraction),
+                Err((stage, fallback_error)) => Err((
+                    stage,
+                    format!(
+                        "{} failed: {primary_error}; fallback {} failed: {fallback_error}",
+                        primary_extractor.name(),
+                        fallback_extractor.name()
+                    ),
+                )),
+            }
+        }
+    }
+}
+
+async fn extract_from_pdf(
     extractor: &dyn PdfTextExtractor,
     hyperlink_title: &str,
     source_url: &str,
@@ -329,6 +606,7 @@ fn extract_from_pdf(
 ) -> Result<(Vec<u8>, Vec<u8>), (String, String)> {
     let extraction = extractor
         .extract(payload)
+        .await
         .map_err(|error| ("pdf_extract".to_string(), error))?;
 
     let text_payload = extraction.markdown.clone().into_bytes();
@@ -358,6 +636,74 @@ fn extract_from_pdf(
     })?;
 
     Ok((text_payload, meta_payload))
+}
+
+async fn parse_mathpix_submit_response(
+    response: reqwest::Response,
+) -> Result<MathpixSubmitResponse, String> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "mathpix pdf submit failed: status {} ({})",
+            status,
+            summarize_api_error(&body)
+        ));
+    }
+
+    let body_text = response
+        .text()
+        .await
+        .map_err(|error| format!("failed to decode mathpix submit response: {error}"))?;
+    let body: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|error| format!("failed to parse mathpix submit response: {error}"))?;
+    let Some(pdf_id) = body.get("pdf_id").and_then(|value| value.as_str()) else {
+        return Err("mathpix submit response did not include pdf_id".to_string());
+    };
+    if pdf_id.trim().is_empty() {
+        return Err("mathpix submit response contained empty pdf_id".to_string());
+    }
+
+    Ok(MathpixSubmitResponse {
+        pdf_id: pdf_id.trim().to_string(),
+    })
+}
+
+fn summarize_api_error(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "empty response body".to_string();
+    }
+    let summary = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let max_len = 320;
+    if summary.chars().count() <= max_len {
+        summary
+    } else {
+        format!("{}...", summary.chars().take(max_len).collect::<String>())
+    }
+}
+
+fn is_mathpix_completed_status(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "complete" | "done" | "success" | "succeeded"
+    )
+}
+
+fn is_mathpix_failed_status(status: &str) -> bool {
+    matches!(status, "error" | "failed" | "failure")
+}
+
+fn infer_mathpix_page_count(value: &serde_json::Value) -> Option<usize> {
+    value
+        .get("num_pages")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            value
+                .get("num_pages_total")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .map(|count| count as usize)
 }
 
 pub(crate) fn extract_html_from_warc(payload: &[u8]) -> Result<Vec<u8>, String> {
@@ -549,29 +895,37 @@ mod tests {
         assert_eq!(estimate_pdf_page_count("   "), None);
     }
 
-    struct FakePdfExtractor;
+    struct FakePdfExtractor {
+        name: &'static str,
+        result: Result<PdfExtraction, String>,
+    }
 
+    #[async_trait::async_trait]
     impl PdfTextExtractor for FakePdfExtractor {
         fn name(&self) -> &'static str {
-            "fake"
+            self.name
         }
 
-        fn extract(&self, _payload: &[u8]) -> Result<PdfExtraction, String> {
-            Ok(PdfExtraction {
-                markdown: "sample text".to_string(),
-                page_count: Some(2),
-            })
+        async fn extract(&self, _payload: &[u8]) -> Result<PdfExtraction, String> {
+            self.result.clone()
         }
     }
 
-    #[test]
-    fn extracts_pdf_text_and_metadata() {
+    #[tokio::test]
+    async fn extracts_pdf_text_and_metadata() {
         let (text_payload, meta_payload) = extract_from_pdf(
-            &FakePdfExtractor,
+            &FakePdfExtractor {
+                name: "fake",
+                result: Ok(PdfExtraction {
+                    markdown: "sample text".to_string(),
+                    page_count: Some(2),
+                }),
+            },
             "Doc",
             "https://example.com/report.pdf",
             b"%PDF",
         )
+        .await
         .expect("pdf extraction should succeed");
 
         assert_eq!(
@@ -584,5 +938,84 @@ mod tests {
         assert_eq!(meta["title"], "Doc");
         assert_eq!(meta["pdf_page_count"], 2);
         assert_eq!(meta["pdf_extractor"], "fake");
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_local_extractor_when_primary_fails() {
+        let (text_payload, meta_payload) = extract_from_pdf_with_fallback(
+            Some(&FakePdfExtractor {
+                name: "mathpix",
+                result: Err("mathpix failed".to_string()),
+            }),
+            &FakePdfExtractor {
+                name: "pdf_extract",
+                result: Ok(PdfExtraction {
+                    markdown: "fallback text".to_string(),
+                    page_count: Some(3),
+                }),
+            },
+            "Doc",
+            "https://example.com/report.pdf",
+            b"%PDF",
+        )
+        .await
+        .expect("fallback extractor should succeed");
+
+        assert_eq!(
+            String::from_utf8(text_payload).expect("text payload should decode"),
+            "fallback text"
+        );
+        let meta: serde_json::Value =
+            serde_json::from_slice(&meta_payload).expect("meta should decode");
+        assert_eq!(meta["pdf_extractor"], "pdf_extract");
+    }
+
+    #[tokio::test]
+    async fn returns_combined_error_when_primary_and_fallback_fail() {
+        let error = extract_from_pdf_with_fallback(
+            Some(&FakePdfExtractor {
+                name: "mathpix",
+                result: Err("primary error".to_string()),
+            }),
+            &FakePdfExtractor {
+                name: "pdf_extract",
+                result: Err("fallback error".to_string()),
+            },
+            "Doc",
+            "https://example.com/report.pdf",
+            b"%PDF",
+        )
+        .await
+        .expect_err("both extractors should fail");
+
+        assert_eq!(error.0, "pdf_extract");
+        assert!(error.1.contains("mathpix failed: primary error"));
+        assert!(
+            error
+                .1
+                .contains("fallback pdf_extract failed: fallback error")
+        );
+    }
+
+    #[test]
+    fn recognizes_mathpix_status_values() {
+        assert!(is_mathpix_completed_status("completed"));
+        assert!(is_mathpix_completed_status("success"));
+        assert!(is_mathpix_failed_status("failed"));
+        assert!(is_mathpix_failed_status("error"));
+        assert!(!is_mathpix_completed_status("processing"));
+        assert!(!is_mathpix_failed_status("processing"));
+    }
+
+    #[test]
+    fn infers_mathpix_page_count() {
+        let value = serde_json::json!({ "num_pages": 12 });
+        assert_eq!(infer_mathpix_page_count(&value), Some(12));
+
+        let value = serde_json::json!({ "num_pages_total": 7 });
+        assert_eq!(infer_mathpix_page_count(&value), Some(7));
+
+        let value = serde_json::json!({});
+        assert_eq!(infer_mathpix_page_count(&value), None);
     }
 }

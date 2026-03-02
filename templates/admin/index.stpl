@@ -4,6 +4,15 @@
     <h2 id="admin-heading" class="text-2xl font-semibold leading-8 tracking-tight">Admin tasks</h2>
     <p class="text-sm text-tertiary">Maintenance operations for the processing pipeline.</p>
     <p class="text-sm text-tertiary" data-admin-version>Version <code class="font-mono text-[0.9em]"><%= self.app_version %></code></p>
+    <p class="text-sm text-tertiary" data-admin-mathpix>
+      PDF Mathpix parsing:
+      <% if self.mathpix.enabled { %>
+        <span class="text-primary">Enabled</span>
+      <% } else { %>
+        <span class="text-primary">Disabled</span>
+        <span>(<code class="font-mono text-[0.9em]"><%= self.mathpix.reason %></code>)</span>
+      <% } %>
+    </p>
   </article>
 
   <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
