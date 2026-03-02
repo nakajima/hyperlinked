@@ -12,7 +12,7 @@ use axum::{
     routing,
 };
 use sailfish::Template;
-use sea_orm::EntityTrait;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::{
         hyperlink_artifact::{self, HyperlinkArtifactKind},
         hyperlink_processing_job,
     },
-    model::{hyperlink::HyperlinkInput, hyperlink_title},
+    model::{hyperlink::HyperlinkInput, hyperlink_search_doc, hyperlink_title},
     server::{
         context::Context,
         flash::{Flash, FlashName, redirect_with_flash},
@@ -60,6 +60,14 @@ pub fn links() -> Router<Context> {
         .route(
             "/hyperlinks/{id}/artifacts/{kind}/inline",
             routing::get(render_latest_artifact_inline),
+        )
+        .route(
+            "/hyperlinks/{id}/artifacts/{kind}/delete",
+            routing::post(delete_artifact_kind),
+        )
+        .route(
+            "/hyperlinks/{id}/artifacts/{kind}/fetch",
+            routing::post(fetch_artifact_kind),
         )
         .route("/hyperlinks/{id_or_ext}", routing::get(show_by_path))
         .route("/hyperlinks/{id_or_ext}", routing::patch(update_by_path))
@@ -341,6 +349,122 @@ async fn reprocess(
         Ok(None) => hyperlink_not_found(ResponseKind::Text, id),
         Err(err) => hyperlink_internal_error(ResponseKind::Text, id, "enqueue for processing", err),
     }
+}
+
+async fn delete_artifact_kind(
+    Path((id, kind)): Path<(i32, String)>,
+    State(state): State<Context>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(kind) = parse_artifact_kind(&kind) else {
+        return response_error(
+            ResponseKind::Text,
+            StatusCode::BAD_REQUEST,
+            "invalid artifact kind",
+        );
+    };
+
+    match hyperlink::Entity::find_by_id(id)
+        .one(&state.connection)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return hyperlink_not_found(ResponseKind::Text, id),
+        Err(err) => return hyperlink_internal_error(ResponseKind::Text, id, "fetch", err),
+    }
+
+    let delete_result = match hyperlink_artifact::Entity::delete_many()
+        .filter(hyperlink_artifact::Column::HyperlinkId.eq(id))
+        .filter(hyperlink_artifact::Column::Kind.eq(kind.clone()))
+        .exec(&state.connection)
+        .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            return hyperlink_internal_error(ResponseKind::Text, id, "delete artifacts for", err);
+        }
+    };
+
+    if is_readability_artifact_kind(&kind)
+        && let Err(error) =
+            hyperlink_search_doc::clear_readable_text_for_hyperlink(&state.connection, id).await
+    {
+        if !hyperlink_search_doc::is_search_doc_missing_error(&error) {
+            return hyperlink_internal_error(
+                ResponseKind::Text,
+                id,
+                "clear readability search text for",
+                error,
+            );
+        }
+    }
+
+    let label = artifact_kind_label(&kind);
+    let message = if delete_result.rows_affected > 0 {
+        format!("Deleted {label} artifact(s).")
+    } else {
+        format!("No {label} artifacts to delete.")
+    };
+
+    redirect_with_flash(&headers, &show_path(id), FlashName::Notice, message)
+}
+
+async fn fetch_artifact_kind(
+    Path((id, kind)): Path<(i32, String)>,
+    State(state): State<Context>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(kind) = parse_artifact_kind(&kind) else {
+        return response_error(
+            ResponseKind::Text,
+            StatusCode::BAD_REQUEST,
+            "invalid artifact kind",
+        );
+    };
+
+    match hyperlink::Entity::find_by_id(id)
+        .one(&state.connection)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return hyperlink_not_found(ResponseKind::Text, id),
+        Err(err) => return hyperlink_internal_error(ResponseKind::Text, id, "fetch", err),
+    }
+
+    let Some(job_kind) = artifact_fetch_job_kind(&kind) else {
+        return response_error(
+            ResponseKind::Text,
+            StatusCode::BAD_REQUEST,
+            "unsupported artifact fetch kind",
+        );
+    };
+
+    let Some(queue) = state.processing_queue.as_ref() else {
+        return redirect_with_flash(
+            &headers,
+            &show_path(id),
+            FlashName::Alert,
+            "Queue workers are unavailable in this environment.",
+        );
+    };
+
+    if let Err(err) = crate::model::hyperlink_processing_job::enqueue_for_hyperlink_kind(
+        &state.connection,
+        id,
+        job_kind,
+        Some(queue),
+    )
+    .await
+    {
+        return hyperlink_internal_error(ResponseKind::Text, id, "enqueue artifact fetch for", err);
+    }
+
+    redirect_with_flash(
+        &headers,
+        &show_path(id),
+        FlashName::Notice,
+        format!("Queued fetch for {}.", artifact_kind_label(&kind)),
+    )
 }
 
 async fn download_latest_artifact(
@@ -851,7 +975,9 @@ fn index_status(
         hyperlink_processing_job::HyperlinkProcessingJobState::Queued
         | hyperlink_processing_job::HyperlinkProcessingJobState::Running => {
             if let Some(active_ids) = active_processing_job_ids {
-                active_ids.contains(&job.id).then_some(IndexStatus::Processing)
+                active_ids
+                    .contains(&job.id)
+                    .then_some(IndexStatus::Processing)
             } else {
                 Some(IndexStatus::Processing)
             }
@@ -1165,11 +1291,10 @@ impl<'a> HyperlinksShowTemplate<'a> {
             .collect()
     }
 
-    fn missing_artifact_labels(&self) -> Vec<&'static str> {
+    fn missing_artifact_kinds(&self) -> Vec<HyperlinkArtifactKind> {
         required_show_artifact_kinds(&self.link.url, self.latest_artifacts)
             .into_iter()
             .filter(|kind| !self.latest_artifacts.contains_key(kind))
-            .map(|kind| artifact_kind_label(&kind))
             .collect()
     }
 
@@ -1183,6 +1308,14 @@ impl<'a> HyperlinksShowTemplate<'a> {
 
     fn artifact_inline_path(&self, kind: &HyperlinkArtifactKind) -> String {
         artifact_inline_path(self.link.id, kind)
+    }
+
+    fn artifact_delete_path(&self, kind: &HyperlinkArtifactKind) -> String {
+        artifact_delete_path(self.link.id, kind)
+    }
+
+    fn artifact_fetch_path(&self, kind: &HyperlinkArtifactKind) -> String {
+        artifact_fetch_path(self.link.id, kind)
     }
 
     fn og_summary(&self) -> Option<&OgSummary> {
@@ -1664,6 +1797,57 @@ fn artifact_inline_path(hyperlink_id: i32, kind: &HyperlinkArtifactKind) -> Stri
     )
 }
 
+fn artifact_delete_path(hyperlink_id: i32, kind: &HyperlinkArtifactKind) -> String {
+    format!(
+        "/hyperlinks/{hyperlink_id}/artifacts/{}/delete",
+        artifact_kind_slug(kind)
+    )
+}
+
+fn artifact_fetch_path(hyperlink_id: i32, kind: &HyperlinkArtifactKind) -> String {
+    format!(
+        "/hyperlinks/{hyperlink_id}/artifacts/{}/fetch",
+        artifact_kind_slug(kind)
+    )
+}
+
+fn is_readability_artifact_kind(kind: &HyperlinkArtifactKind) -> bool {
+    matches!(
+        kind,
+        HyperlinkArtifactKind::ReadableText
+            | HyperlinkArtifactKind::ReadableMeta
+            | HyperlinkArtifactKind::ReadableError
+    )
+}
+
+fn artifact_fetch_job_kind(
+    kind: &HyperlinkArtifactKind,
+) -> Option<hyperlink_processing_job::HyperlinkProcessingJobKind> {
+    match kind {
+        HyperlinkArtifactKind::SnapshotWarc
+        | HyperlinkArtifactKind::PdfSource
+        | HyperlinkArtifactKind::SnapshotError
+        | HyperlinkArtifactKind::ScreenshotWebp
+        | HyperlinkArtifactKind::ScreenshotThumbWebp
+        | HyperlinkArtifactKind::ScreenshotDarkWebp
+        | HyperlinkArtifactKind::ScreenshotThumbDarkWebp
+        | HyperlinkArtifactKind::ScreenshotError => {
+            Some(hyperlink_processing_job::HyperlinkProcessingJobKind::Snapshot)
+        }
+        HyperlinkArtifactKind::OgMeta
+        | HyperlinkArtifactKind::OgImage
+        | HyperlinkArtifactKind::OgError => {
+            Some(hyperlink_processing_job::HyperlinkProcessingJobKind::Og)
+        }
+        HyperlinkArtifactKind::ReadableText
+        | HyperlinkArtifactKind::ReadableMeta
+        | HyperlinkArtifactKind::ReadableError => {
+            Some(hyperlink_processing_job::HyperlinkProcessingJobKind::Readability)
+        }
+        HyperlinkArtifactKind::OembedMeta | HyperlinkArtifactKind::OembedError => None,
+    }
+}
+
 fn render_relative_time(datetime: &sea_orm::entity::prelude::DateTime) -> String {
     let datetime_iso = datetime.format("%Y-%m-%dT%H:%M:%SZ");
     let datetime_human = datetime.format("%b %d, %Y %H:%M UTC");
@@ -1706,6 +1890,7 @@ mod tests {
     use super::*;
     use crate::server::test_support;
     use axum_test::TestServer;
+    use sea_orm::DatabaseConnection;
     use serde::Serialize;
     use serde_json::json;
 
@@ -1728,6 +1913,29 @@ mod tests {
             backup_imports: crate::server::admin_import::AdminImportManager::default(),
         });
         TestServer::new(app).expect("test server should initialize")
+    }
+
+    async fn new_server_with_queue(seed_sql: Option<&str>) -> (TestServer, DatabaseConnection) {
+        let connection = test_support::new_memory_connection().await;
+        test_support::initialize_hyperlinks_schema_with_search(&connection).await;
+        test_support::initialize_queue_jobs_schema(&connection).await;
+        if let Some(seed_sql) = seed_sql {
+            test_support::execute_sql(&connection, seed_sql).await;
+        }
+
+        let queue = crate::queue::ProcessingQueue::connect(connection.clone())
+            .await
+            .expect("processing queue should initialize");
+        let app = Router::<Context>::new().merge(links()).with_state(Context {
+            connection: connection.clone(),
+            processing_queue: Some(queue),
+            backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
+            backup_imports: crate::server::admin_import::AdminImportManager::default(),
+        });
+        (
+            TestServer::new(app).expect("test server should initialize"),
+            connection,
+        )
     }
 
     #[derive(Serialize)]
@@ -2019,9 +2227,10 @@ mod tests {
                 "data-hyperlink-id=\"1\"",
             ],
         );
-        assert!(index_body.contains(
-            "href=\"/hyperlinks/new\" class=\"inline-flex min-h-11 items-center"
-        ));
+        assert!(
+            index_body
+                .contains("href=\"/hyperlinks/new\" class=\"inline-flex min-h-11 items-center")
+        );
         assert!(index_body.contains("data-url-intent-input"));
         assert!(index_body.contains("data-url-intent"));
         assert!(index_body.contains("aria-hidden=\"true\""));
@@ -2115,6 +2324,26 @@ mod tests {
         assert!(body.contains("PDF Source"));
         assert!(body.contains("Readable Markdown"));
         assert!(!body.contains("Snapshot WARC"));
+    }
+
+    #[tokio::test]
+    async fn show_artifacts_renders_delete_and_fetch_controls() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Article', 'https://example.com/article', 'https://example.com/article', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES (1, 1, NULL, 'readable_meta', X'7B7D', 'application/json', 2, '2026-02-19 00:00:01');
+            "#,
+        ))
+        .await;
+
+        let show = server.get("/hyperlinks/1").await;
+        show.assert_status_ok();
+        let body = show.text();
+        assert!(body.contains("/hyperlinks/1/artifacts/readable_meta/delete"));
+        assert!(body.contains("/hyperlinks/1/artifacts/snapshot_warc/fetch"));
+        assert!(body.contains("/hyperlinks/1/artifacts/readable_text/fetch"));
     }
 
     #[tokio::test]
@@ -2558,6 +2787,143 @@ mod tests {
             "attachment; filename=\"hyperlink-1-snapshot_warc.warc\"",
         );
         assert_eq!(download.text(), "WARC");
+    }
+
+    #[tokio::test]
+    async fn delete_artifact_kind_removes_all_rows_for_that_kind() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Example', 'https://example.com', 'https://example.com', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (1, 1, NULL, 'readable_text', X'6669727374', 'text/markdown; charset=utf-8', 5, '2026-02-19 00:00:01'),
+                    (2, 1, NULL, 'readable_text', X'7365636f6e64', 'text/markdown; charset=utf-8', 6, '2026-02-19 00:00:02');
+            "#,
+        ))
+        .await;
+
+        let delete = server
+            .post("/hyperlinks/1/artifacts/readable_text/delete")
+            .await;
+        delete.assert_status_see_other();
+        delete.assert_header("location", "/hyperlinks/1");
+
+        server
+            .get("/hyperlinks/1/artifacts/readable_text")
+            .await
+            .assert_status_not_found();
+    }
+
+    #[tokio::test]
+    async fn delete_readability_artifact_clears_search_doc_text() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Example', 'https://example.com', 'https://example.com', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES (1, 1, NULL, 'readable_text', CAST('quantumneedle appears here' AS BLOB), 'text/markdown; charset=utf-8', 24, '2026-02-19 00:00:01');
+            "#,
+        ))
+        .await;
+
+        let before = server.get("/hyperlinks?q=quantumneedle").await;
+        before.assert_status_ok();
+        assert!(before.text().contains("/hyperlinks/1\">Details"));
+
+        let delete = server
+            .post("/hyperlinks/1/artifacts/readable_text/delete")
+            .await;
+        delete.assert_status_see_other();
+
+        let after = server.get("/hyperlinks?q=quantumneedle").await;
+        after.assert_status_ok();
+        assert!(!after.text().contains("/hyperlinks/1\">Details"));
+    }
+
+    #[tokio::test]
+    async fn fetch_artifact_kind_enqueues_snapshot_job() {
+        let (server, connection) = new_server_with_queue(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Example', 'https://example.com', 'https://example.com', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+            "#,
+        ))
+        .await;
+
+        let fetch = server
+            .post("/hyperlinks/1/artifacts/screenshot_webp/fetch")
+            .await;
+        fetch.assert_status_see_other();
+        fetch.assert_header("location", "/hyperlinks/1");
+
+        let latest = crate::model::hyperlink_processing_job::latest_for_hyperlink(&connection, 1)
+            .await
+            .expect("latest job should load")
+            .expect("job should exist");
+        assert_eq!(
+            latest.kind,
+            hyperlink_processing_job::HyperlinkProcessingJobKind::Snapshot
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_artifact_kind_enqueues_og_and_readability_jobs() {
+        let (server, connection) = new_server_with_queue(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Example', 'https://example.com', 'https://example.com', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+            "#,
+        ))
+        .await;
+
+        let og_fetch = server.post("/hyperlinks/1/artifacts/og_meta/fetch").await;
+        og_fetch.assert_status_see_other();
+
+        let og_latest =
+            crate::model::hyperlink_processing_job::latest_for_hyperlink(&connection, 1)
+                .await
+                .expect("latest job should load")
+                .expect("job should exist");
+        assert_eq!(
+            og_latest.kind,
+            hyperlink_processing_job::HyperlinkProcessingJobKind::Og
+        );
+
+        let readable_fetch = server
+            .post("/hyperlinks/1/artifacts/readable_text/fetch")
+            .await;
+        readable_fetch.assert_status_see_other();
+
+        let readable_latest =
+            crate::model::hyperlink_processing_job::latest_for_hyperlink(&connection, 1)
+                .await
+                .expect("latest job should load")
+                .expect("job should exist");
+        assert_eq!(
+            readable_latest.kind,
+            hyperlink_processing_job::HyperlinkProcessingJobKind::Readability
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_artifact_kind_without_queue_keeps_processing_idle() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Example', 'https://example.com', 'https://example.com', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+            "#,
+        ))
+        .await;
+
+        let fetch = server
+            .post("/hyperlinks/1/artifacts/readable_text/fetch")
+            .await;
+        fetch.assert_status_see_other();
+        fetch.assert_header("location", "/hyperlinks/1");
+
+        let shown = show_json_hyperlink(&server, 1).await;
+        assert_eq!(shown.processing_state, "idle");
     }
 
     #[tokio::test]

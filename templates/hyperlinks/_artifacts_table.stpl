@@ -26,6 +26,15 @@
                 <a class="text-accent no-underline hover:text-accent/80" href="<%= self.artifact_inline_path(kind) %>" target="_blank" rel="noopener noreferrer">View</a>
                 |
                 <a class="text-accent no-underline hover:text-accent/80" href="<%= self.artifact_download_path(kind) %>">Download <%= slug %></a>
+                |
+                <form
+                  action="<%= self.artifact_delete_path(kind) %>"
+                  method="post"
+                  class="inline"
+                  data-confirm="Delete all <%= label %> artifacts for this link?"
+                >
+                  <button class="inline min-h-0 border-0 bg-transparent p-0 text-accent hover:text-accent/80" type="submit">Delete</button>
+                </form>
               </td>
             </tr>
           <% } %>
@@ -35,11 +44,18 @@
   </div>
 <% } %>
 
-<% if !present_kinds.is_empty() && !missing_labels.is_empty() { %>
-  <p class="text-sm">
-    Missing:
-    <% for (idx, label) in missing_labels.iter().enumerate() { %>
-      <% if idx > 0 { %>, <% } %><%= label %>
-    <% } %>
-  </p>
+<% if !missing_kinds.is_empty() { %>
+  <div class="flex flex-col gap-1">
+    <p class="text-sm">Missing:</p>
+    <ul class="flex flex-col gap-1 text-sm">
+      <% for kind in &missing_kinds { %>
+        <li class="flex flex-row flex-wrap items-center gap-2">
+          <span><%= artifact_kind_label(kind) %></span>
+          <form action="<%= self.artifact_fetch_path(kind) %>" method="post" class="inline">
+            <button class="inline min-h-0 border-0 bg-transparent p-0 text-accent hover:text-accent/80" type="submit">Fetch</button>
+          </form>
+        </li>
+      <% } %>
+    </ul>
+  </div>
 <% } %>

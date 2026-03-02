@@ -156,7 +156,7 @@
       <section class="flex flex-col gap-[0.4rem]">
         <h4 class="text-lg font-semibold leading-7 tracking-tight">Artifacts</h4>
         <% let present_kinds = self.present_artifact_kinds(); %>
-        <% let missing_labels = self.missing_artifact_labels(); %>
+        <% let missing_kinds = self.missing_artifact_kinds(); %>
         <% include!("_artifacts_table.stpl"); %>
       </section>
       <section class="flex flex-col gap-[0.4rem]">

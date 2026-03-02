@@ -46,6 +46,26 @@ pub async fn clear_all_readable_text(connection: &DatabaseConnection) -> Result<
     Ok(result.rows_affected())
 }
 
+pub async fn clear_readable_text_for_hyperlink(
+    connection: &DatabaseConnection,
+    hyperlink_id: i32,
+) -> Result<u64, DbErr> {
+    let backend = connection.get_database_backend();
+    let result = connection
+        .execute(Statement::from_sql_and_values(
+            backend,
+            r#"
+                UPDATE hyperlink_search_doc
+                SET readable_text = '', updated_at = CURRENT_TIMESTAMP
+                WHERE hyperlink_id = ? AND readable_text <> ''
+            "#
+            .to_string(),
+            vec![Value::from(hyperlink_id)],
+        ))
+        .await?;
+    Ok(result.rows_affected())
+}
+
 pub fn is_search_doc_missing_error(error: &DbErr) -> bool {
     match error {
         DbErr::Exec(exec_error) => exec_error
