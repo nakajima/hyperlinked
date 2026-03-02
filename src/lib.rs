@@ -3,6 +3,7 @@ pub mod dev_reload;
 mod dev_reload_marker;
 pub mod entity;
 pub mod import;
+pub mod integrations;
 pub mod model;
 pub mod processors;
 pub mod queue;
