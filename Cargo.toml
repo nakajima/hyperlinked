@@ -62,6 +62,9 @@ zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 axum-test = "18.7.0"
 
+[profile.release]
+opt-level = "s"
+
 [profile.dev-hot]
 inherits = "dev"
 debug = 0
