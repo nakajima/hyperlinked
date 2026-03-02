@@ -112,4 +112,19 @@ struct hyperlinkedTests {
         #expect(scopeTokens == ["scope:all"])
     }
 
+    @Test
+    func basicAuthCredentialsBuildAuthorizationHeader() {
+        let credentials = BasicAuthCredentials(
+            username: " alice ",
+            password: "s3cr3t"
+        )
+        #expect(credentials.authorizationHeaderValue == "Basic YWxpY2U6czNjcjN0")
+    }
+
+    @Test
+    func serverCredentialKeyUsesNormalizedServerURL() {
+        let url = URL(string: "HTTP://Example.com:8765/hyperlinks?q=1#frag")!
+        #expect(AppModel.serverCredentialKey(for: url) == "http://example.com:8765")
+    }
+
 }

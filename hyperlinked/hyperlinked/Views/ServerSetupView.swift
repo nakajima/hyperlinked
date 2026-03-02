@@ -4,6 +4,9 @@ struct ServerSetupView: View {
     @EnvironmentObject private var appModel: AppModel
     @StateObject private var discovery = BonjourDiscoveryService()
     @State private var manualServerInput = ""
+    @State private var authMode: ServerAuthMode = .none
+    @State private var basicUsername = ""
+    @State private var basicPassword = ""
     @State private var isConnecting = false
     @State private var statusMessage: String?
 
@@ -55,6 +58,20 @@ struct ServerSetupView: View {
                     .disabled(isConnecting)
                 }
 
+                Section("Authentication") {
+                    Picker("Mode", selection: $authMode) {
+                        ForEach(ServerAuthMode.allCases, id: \.rawValue) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    if authMode == .basic {
+                        TextField("Username", text: $basicUsername)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled(true)
+                        SecureField("Password", text: $basicPassword)
+                    }
+                }
+
                 Section("Status") {
                     if isConnecting {
                         ProgressView("Testing server connection…")
@@ -90,6 +107,14 @@ struct ServerSetupView: View {
                 if let selectedServer = appModel.selectedServerURL {
                     manualServerInput = selectedServer.absoluteString
                 }
+                authMode = appModel.selectedServerAuthMode
+                if let credentials = appModel.selectedBasicCredentials() {
+                    basicUsername = credentials.username
+                    basicPassword = credentials.password
+                } else {
+                    basicUsername = ""
+                    basicPassword = ""
+                }
             }
             .onDisappear {
                 discovery.stopDiscovery()
@@ -107,16 +132,53 @@ struct ServerSetupView: View {
     }
 
     private func connect(to baseURL: URL) async {
+        let credentials = resolvedBasicCredentials()
+        if authMode == .basic && credentials == nil {
+            statusMessage = "Username and password are required for Basic Auth."
+            return
+        }
+
         isConnecting = true
         defer { isConnecting = false }
 
         do {
-            let client = APIClient(baseURL: baseURL)
+            let client = APIClient(
+                baseURL: baseURL,
+                authorizationHeaderValue: credentials?.authorizationHeaderValue
+            )
             try await client.testConnection()
-            appModel.saveServerURL(baseURL)
+            let saved = appModel.saveServerConnection(
+                baseURL,
+                authMode: authMode,
+                basicCredentials: credentials
+            )
+            guard saved else {
+                statusMessage = "Failed to save server authentication settings."
+                return
+            }
             statusMessage = "Connected to \(baseURL.absoluteString)."
         } catch {
-            statusMessage = error.localizedDescription
+            if case APIClientError.unexpectedStatus(let code, _) = error, code == 401 {
+                statusMessage = authMode == .basic
+                    ? "Authentication failed. Check your Basic Auth credentials."
+                    : "Server requires Basic Auth. Set Authentication Mode to Basic Auth and retry."
+            } else {
+                statusMessage = error.localizedDescription
+            }
         }
+    }
+
+    private func resolvedBasicCredentials() -> BasicAuthCredentials? {
+        guard authMode == .basic else {
+            return nil
+        }
+        let credentials = BasicAuthCredentials(
+            username: basicUsername,
+            password: basicPassword
+        ).normalized
+        guard credentials.isValid else {
+            return nil
+        }
+        return credentials
     }
 }

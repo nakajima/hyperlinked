@@ -31,12 +31,18 @@ enum APIClientError: LocalizedError {
 struct APIClient {
     let baseURL: URL
     let session: URLSession
+    let authorizationHeaderValue: String?
 
     private let apollo: ApolloClient
 
-    init(baseURL: URL, session: URLSession = .shared) {
+    init(
+        baseURL: URL,
+        authorizationHeaderValue: String? = nil,
+        session: URLSession = .shared
+    ) {
         self.baseURL = baseURL
         self.session = session
+        self.authorizationHeaderValue = authorizationHeaderValue
         let store = ApolloStore(cache: InMemoryNormalizedCache())
         let sessionClient = URLSessionClient(
             sessionConfiguration: session.configuration,
@@ -47,15 +53,21 @@ struct APIClient {
             shouldInvalidateClientOnDeinit: true,
             store: store
         )
+        var additionalHeaders: [String: String] = [:]
+        if let authorizationHeaderValue {
+            additionalHeaders["Authorization"] = authorizationHeaderValue
+        }
         let transport = RequestChainNetworkTransport(
             interceptorProvider: interceptorProvider,
-            endpointURL: baseURL.appendingPathComponent("graphql")
+            endpointURL: baseURL.appendingPathComponent("graphql"),
+            additionalHeaders: additionalHeaders
         )
         self.apollo = ApolloClient(networkTransport: transport, store: store)
     }
 
     func testConnection() async throws {
-        _ = try await listHyperlinks()
+        let request = try makeRequest(path: "/hyperlinks.json", method: "GET")
+        _ = try await send(request)
     }
 
     func listHyperlinks() async throws -> [Hyperlink] {
@@ -256,6 +268,9 @@ struct APIClient {
         request.httpMethod = method
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let authorizationHeaderValue {
+            request.setValue(authorizationHeaderValue, forHTTPHeaderField: "Authorization")
+        }
         return request
     }
 

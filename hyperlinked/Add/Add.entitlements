@@ -6,5 +6,9 @@
 	<array>
 		<string>group.fm.folder.hyperlinked</string>
 	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)fm.folder.hyperlinked.shared</string>
+	</array>
 </dict>
 </plist>

@@ -23,10 +23,16 @@ enum ShareAPIClientError: LocalizedError {
 struct ShareAPIClient {
     let baseURL: URL
     let session: URLSession
+    let authorizationHeaderValue: String?
 
-    init(baseURL: URL, session: URLSession = .shared) {
+    init(
+        baseURL: URL,
+        authorizationHeaderValue: String? = nil,
+        session: URLSession = .shared
+    ) {
         self.baseURL = baseURL
         self.session = session
+        self.authorizationHeaderValue = authorizationHeaderValue
     }
 
     func createHyperlink(title: String, url: String) async throws {
@@ -47,6 +53,9 @@ struct ShareAPIClient {
         request.httpMethod = method
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let authorizationHeaderValue {
+            request.setValue(authorizationHeaderValue, forHTTPHeaderField: "Authorization")
+        }
         return request
     }
 

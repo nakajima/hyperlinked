@@ -14,8 +14,14 @@ final class ShareViewController: UIViewController {
         case failed(String)
     }
 
+    private struct ConfiguredServerConnection {
+        let baseURL: URL
+        let authorizationHeaderValue: String?
+    }
+
     private let appGroupID = "group.fm.folder.hyperlinked"
     private let selectedServerURLKey = "selected_server_base_url"
+    private let selectedServerAuthModeKey = "selected_server_auth_mode"
 
     private var candidates: [SharedLinkCandidate] = []
     private var selectedCandidateID: String?
@@ -25,6 +31,7 @@ final class ShareViewController: UIViewController {
     private var isSubmitting = false
     private var isManualUIVisible = false
     private var isShowingTransientToast = false
+    private let credentialsStore = ShareServerCredentialsStore()
     private lazy var outboxStore: ShareOutboxStore? = try? ShareOutboxStore.openShared(
         appGroupID: appGroupID
     )
@@ -245,8 +252,8 @@ final class ShareViewController: UIViewController {
         candidate: SharedLinkCandidate,
         resolvedTitle: String?
     ) async -> SaveExecutionResult {
-        guard let serverURL = configuredServerURL() else {
-            return .failed("Open Hyperlinked and configure a server first.")
+        guard let serverConnection = configuredServerConnection() else {
+            return .failed(serverConfigurationValidationMessage())
         }
         guard let outboxStore else {
             return .failed("Could not save this link locally. Please try again.")
@@ -262,7 +269,10 @@ final class ShareViewController: UIViewController {
             return .failed("Could not save this link locally. Please try again.")
         }
 
-        let client = ShareAPIClient(baseURL: serverURL)
+        let client = ShareAPIClient(
+            baseURL: serverConnection.baseURL,
+            authorizationHeaderValue: serverConnection.authorizationHeaderValue
+        )
         do {
             try await client.createHyperlink(title: queuedItem.title, url: queuedItem.url)
             try outboxStore.markDelivered(id: queuedItem.id)
@@ -347,8 +357,8 @@ final class ShareViewController: UIViewController {
         if isPreparingPayload {
             return "Preparing shared content..."
         }
-        guard configuredServerURL() != nil else {
-            return "Open Hyperlinked and configure a server first."
+        guard configuredServerConnection() != nil else {
+            return serverConfigurationValidationMessage()
         }
         guard outboxStore != nil else {
             return "Could not access shared storage for offline queue."
@@ -513,12 +523,59 @@ final class ShareViewController: UIViewController {
             .isEmpty
     }
 
-    private func configuredServerURL() -> URL? {
+    private func configuredServerConnection() -> ConfiguredServerConnection? {
         let defaults = UserDefaults(suiteName: appGroupID)
         guard let raw = defaults?.string(forKey: selectedServerURLKey) else {
             return nil
         }
-        return normalizedServerURL(from: raw)
+        guard let baseURL = normalizedServerURL(from: raw) else {
+            return nil
+        }
+
+        let mode = ShareServerAuthMode(
+            rawValue: defaults?.string(forKey: selectedServerAuthModeKey) ?? ""
+        ) ?? .none
+        switch mode {
+        case .none:
+            return ConfiguredServerConnection(
+                baseURL: baseURL,
+                authorizationHeaderValue: nil
+            )
+        case .basic:
+            let serverKey = serverCredentialKey(for: baseURL)
+            guard let credentials = credentialsStore.loadCredentials(for: serverKey) else {
+                return nil
+            }
+            return ConfiguredServerConnection(
+                baseURL: baseURL,
+                authorizationHeaderValue: credentials.authorizationHeaderValue
+            )
+        }
+    }
+
+    private func serverConfigurationValidationMessage() -> String {
+        let defaults = UserDefaults(suiteName: appGroupID)
+        guard let raw = defaults?.string(forKey: selectedServerURLKey),
+              let baseURL = normalizedServerURL(from: raw) else {
+            return "Open Hyperlinked and configure a server first."
+        }
+        let mode = ShareServerAuthMode(
+            rawValue: defaults?.string(forKey: selectedServerAuthModeKey) ?? ""
+        ) ?? .none
+        guard mode == .basic else {
+            return "Open Hyperlinked and configure a server first."
+        }
+        let serverKey = serverCredentialKey(for: baseURL)
+        if credentialsStore.loadCredentials(for: serverKey) == nil {
+            return "Open Hyperlinked and save Basic Auth credentials for this server."
+        }
+        return "Open Hyperlinked and configure a server first."
+    }
+
+    private func serverCredentialKey(for url: URL) -> String {
+        normalizedServerURL(from: url.absoluteString)?
+            .absoluteString
+            .lowercased() ?? url.absoluteString.lowercased()
     }
 
     private func normalizedServerURL(from rawValue: String) -> URL? {
