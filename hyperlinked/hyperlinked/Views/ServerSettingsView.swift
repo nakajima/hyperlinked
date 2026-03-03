@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ServerSettingsView: View {
     @EnvironmentObject private var appModel: AppModel
@@ -12,7 +13,15 @@ struct ServerSettingsView: View {
     @State private var basicUsername = ""
     @State private var basicPassword = ""
     @State private var authStatusMessage: String?
+    @State private var diagnosticsStatusMessage: String?
     @State private var isSavingAuth = false
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+        return formatter
+    }()
 
     var body: some View {
         NavigationStack {
@@ -38,6 +47,108 @@ struct ServerSettingsView: View {
                         onRetryPendingUploads()
                     }
                     .disabled(pendingUploadsCount == 0)
+                }
+
+                Section("Widget Rotation Health") {
+                    HStack {
+                        Text("Last Status")
+                        Spacer()
+                        Text(appModel.widgetRotationDiagnostics.status.label)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Last Failure")
+                        Spacer()
+                        Text(formattedDate(appModel.widgetRotationDiagnostics.lastFailureAt))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Last Success")
+                        Spacer()
+                        Text(formattedDate(appModel.widgetRotationDiagnostics.lastSuccessAt))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("DB Mode")
+                        Spacer()
+                        Text(appModel.widgetRotationDiagnostics.lastFailureDBMode ?? "n/a")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("SQLite Code")
+                        Spacer()
+                        Text(appModel.widgetRotationDiagnostics.lastFailureSQLiteCode.map(String.init) ?? "n/a")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Failure Stage")
+                        Spacer()
+                        Text(appModel.widgetRotationDiagnostics.lastFailureStage ?? "n/a")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let sqliteMessage = appModel.widgetRotationDiagnostics.lastFailureSQLiteMessage,
+                       !sqliteMessage.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("SQLite Message")
+                            Text(sqliteMessage)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(4)
+                        }
+                    }
+
+                    HStack {
+                        Text("Failures (24h)")
+                        Spacer()
+                        Text("\(appModel.widgetRotationDiagnostics.recentFailureCount24h)")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text("Log Size")
+                        Spacer()
+                        Text(
+                            ByteCountFormatter.string(
+                                fromByteCount: appModel.widgetRotationDiagnostics.logFileSizeBytes,
+                                countStyle: .file
+                            )
+                        )
+                        .foregroundStyle(.secondary)
+                    }
+
+                    if !appModel.widgetRotationDiagnostics.logFilePath.isEmpty {
+                        Text(appModel.widgetRotationDiagnostics.logFilePath)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(3)
+                    }
+
+                    Button("Refresh Diagnostics") {
+                        appModel.refreshDiagnostics()
+                        diagnosticsStatusMessage = "Diagnostics refreshed."
+                    }
+
+                    Button("Copy Latest Diagnostic Entry") {
+                        copyLatestDiagnosticEntry()
+                    }
+
+                    Button("Clear Log", role: .destructive) {
+                        appModel.clearDiagnosticsLog()
+                        diagnosticsStatusMessage = "Diagnostics log cleared."
+                    }
+
+                    if let diagnosticsStatusMessage {
+                        Text(diagnosticsStatusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("Authentication") {
@@ -83,6 +194,7 @@ struct ServerSettingsView: View {
             .navigationTitle("Server Settings")
             .task {
                 loadAuthFromModel()
+                appModel.refreshDiagnostics()
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -163,5 +275,22 @@ struct ServerSettingsView: View {
         basicUsername = ""
         basicPassword = ""
         authStatusMessage = "Saved credentials removed."
+    }
+
+    private func formattedDate(_ date: Date?) -> String {
+        guard let date else {
+            return "n/a"
+        }
+        return Self.dateFormatter.string(from: date)
+    }
+
+    private func copyLatestDiagnosticEntry() {
+        guard let latest = appModel.widgetRotationDiagnostics.latestLogEntry, !latest.isEmpty else {
+            diagnosticsStatusMessage = "No diagnostic entries available."
+            return
+        }
+
+        UIPasteboard.general.string = latest
+        diagnosticsStatusMessage = "Latest diagnostic entry copied."
     }
 }

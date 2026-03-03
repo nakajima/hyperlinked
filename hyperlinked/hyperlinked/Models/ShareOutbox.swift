@@ -8,12 +8,25 @@ enum ShareOutboxState: String, Codable {
     case delivered
 }
 
+enum ShareOutboxPayloadKind: String, Codable {
+    case url
+    case upload
+}
+
+enum ShareOutboxUploadType: String, Codable {
+    case pdf
+}
+
 struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable {
     static let databaseTableName = "share_outbox_items"
 
     var id: String
     var url: String
     var title: String
+    var payloadKind: String
+    var uploadType: String?
+    var uploadFilePath: String?
+    var uploadFilename: String?
     var createdAt: TimeInterval
     var state: String
     var attemptCount: Int
@@ -26,6 +39,10 @@ struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Ident
         case id
         case url
         case title
+        case payloadKind = "payload_kind"
+        case uploadType = "upload_type"
+        case uploadFilePath = "upload_file_path"
+        case uploadFilename = "upload_filename"
         case createdAt = "created_at"
         case state
         case attemptCount = "attempt_count"
@@ -43,6 +60,17 @@ struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Ident
 
     var isDelivered: Bool {
         state == ShareOutboxState.delivered.rawValue
+    }
+
+    var resolvedPayloadKind: ShareOutboxPayloadKind {
+        ShareOutboxPayloadKind(rawValue: payloadKind) ?? .url
+    }
+
+    var resolvedUploadType: ShareOutboxUploadType? {
+        guard let uploadType else {
+            return nil
+        }
+        return ShareOutboxUploadType(rawValue: uploadType)
     }
 }
 
@@ -69,6 +97,48 @@ final class ShareOutboxStore {
             id: UUID().uuidString,
             url: url,
             title: title,
+            payloadKind: ShareOutboxPayloadKind.url.rawValue,
+            uploadType: nil,
+            uploadFilePath: nil,
+            uploadFilename: nil,
+            createdAt: timestamp,
+            state: ShareOutboxState.pending.rawValue,
+            attemptCount: 0,
+            nextAttemptAt: timestamp,
+            lastAttemptAt: nil,
+            lastError: nil,
+            deliveredAt: nil
+        )
+        try dbQueue.write { db in
+            try item.insert(db)
+        }
+        return item
+    }
+
+    func enqueueUpload(
+        fileURL: URL,
+        filename: String,
+        title: String,
+        uploadType: ShareOutboxUploadType,
+        now: Date = Date()
+    ) throws -> ShareOutboxItemRecord {
+        let timestamp = now.timeIntervalSince1970
+        let sanitizedFilename = Self.sanitizeUploadFilename(
+            preferred: filename,
+            fallback: fileURL.lastPathComponent
+        )
+        let copiedFileURL = try Self.copyUploadFileToQueue(
+            sourceFileURL: fileURL,
+            filename: sanitizedFilename
+        )
+        let item = ShareOutboxItemRecord(
+            id: UUID().uuidString,
+            url: "",
+            title: title,
+            payloadKind: ShareOutboxPayloadKind.upload.rawValue,
+            uploadType: uploadType.rawValue,
+            uploadFilePath: copiedFileURL.path,
+            uploadFilename: sanitizedFilename,
             createdAt: timestamp,
             state: ShareOutboxState.pending.rawValue,
             attemptCount: 0,
@@ -182,6 +252,13 @@ final class ShareOutboxStore {
         }
     }
 
+    func removeUploadFileIfPresent(path: String?) {
+        guard let path, !path.isEmpty else {
+            return
+        }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
     private static func nextAttemptTimestamp(
         attemptCount: Int,
         nowTimestamp: TimeInterval
@@ -190,6 +267,65 @@ final class ShareOutboxStore {
         let baseDelay = min(pow(2.0, Double(exponent)) * 5.0, 3600.0)
         let jitter = Double.random(in: 0...(baseDelay * 0.2))
         return nowTimestamp + baseDelay + jitter
+    }
+
+    private static func copyUploadFileToQueue(
+        sourceFileURL: URL,
+        filename: String
+    ) throws -> URL {
+        let destinationDirectory = try uploadQueueDirectoryURL()
+        let destination = destinationDirectory.appendingPathComponent(
+            "\(UUID().uuidString)-\(filename)",
+            isDirectory: false
+        )
+        let didStartScopedAccess = sourceFileURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartScopedAccess {
+                sourceFileURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try? FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.copyItem(at: sourceFileURL, to: destination)
+        return destination
+    }
+
+    private static func uploadQueueDirectoryURL() throws -> URL {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: DB.appGroupID
+        ) else {
+            throw DBError.appGroupContainerUnavailable(DB.appGroupID)
+        }
+        let directory = containerURL
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+            .appendingPathComponent("share_outbox_uploads", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private static func sanitizeUploadFilename(preferred: String, fallback: String) -> String {
+        let raw = preferred.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? fallback
+            : preferred
+        let source = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lastComponent = source
+            .split(whereSeparator: { $0 == "/" || $0 == "\\" })
+            .map(String.init)
+            .last ?? source
+        var output = lastComponent.filter { character in
+            character.isLetter || character.isNumber || character == "." || character == "-" || character == "_"
+        }
+        output = output.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        if output.isEmpty {
+            output = "document.pdf"
+        }
+        if !output.lowercased().hasSuffix(".pdf") {
+            output += ".pdf"
+        }
+        return output
     }
 }
 

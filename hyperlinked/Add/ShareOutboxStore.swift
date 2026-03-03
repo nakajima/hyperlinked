@@ -7,12 +7,25 @@ enum ShareOutboxState: String, Codable {
     case delivered
 }
 
+enum ShareOutboxPayloadKind: String, Codable {
+    case url
+    case upload
+}
+
+enum ShareOutboxUploadType: String, Codable {
+    case pdf
+}
+
 struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Identifiable {
     static let databaseTableName = "share_outbox_items"
 
     var id: String
     var url: String
     var title: String
+    var payloadKind: String
+    var uploadType: String?
+    var uploadFilePath: String?
+    var uploadFilename: String?
     var createdAt: TimeInterval
     var state: String
     var attemptCount: Int
@@ -25,6 +38,10 @@ struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Ident
         case id
         case url
         case title
+        case payloadKind = "payload_kind"
+        case uploadType = "upload_type"
+        case uploadFilePath = "upload_file_path"
+        case uploadFilename = "upload_filename"
         case createdAt = "created_at"
         case state
         case attemptCount = "attempt_count"
@@ -35,6 +52,17 @@ struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Ident
     }
 
     typealias Columns = CodingKeys
+
+    var resolvedPayloadKind: ShareOutboxPayloadKind {
+        ShareOutboxPayloadKind(rawValue: payloadKind) ?? .url
+    }
+
+    var resolvedUploadType: ShareOutboxUploadType? {
+        guard let uploadType else {
+            return nil
+        }
+        return ShareOutboxUploadType(rawValue: uploadType)
+    }
 }
 
 enum ShareOutboxStoreError: LocalizedError {
@@ -53,9 +81,11 @@ final class ShareOutboxStore {
     static let databaseFilename = "db.sqlite"
 
     private let dbQueue: DatabaseQueue
+    private let appGroupID: String
 
-    private init(dbQueue: DatabaseQueue) {
+    private init(dbQueue: DatabaseQueue, appGroupID: String) {
         self.dbQueue = dbQueue
+        self.appGroupID = appGroupID
     }
 
     static func openShared(appGroupID: String = appGroupID) throws -> ShareOutboxStore {
@@ -82,7 +112,7 @@ final class ShareOutboxStore {
         }
 
         let queue = try DatabaseQueue(path: dbURL.path, configuration: configuration)
-        let store = ShareOutboxStore(dbQueue: queue)
+        let store = ShareOutboxStore(dbQueue: queue, appGroupID: appGroupID)
         try store.migrateIfNeeded()
         return store
     }
@@ -93,6 +123,49 @@ final class ShareOutboxStore {
             id: UUID().uuidString,
             url: url,
             title: title,
+            payloadKind: ShareOutboxPayloadKind.url.rawValue,
+            uploadType: nil,
+            uploadFilePath: nil,
+            uploadFilename: nil,
+            createdAt: timestamp,
+            state: ShareOutboxState.pending.rawValue,
+            attemptCount: 0,
+            nextAttemptAt: timestamp,
+            lastAttemptAt: nil,
+            lastError: nil,
+            deliveredAt: nil
+        )
+        try dbQueue.write { db in
+            try item.insert(db)
+        }
+        return item
+    }
+
+    func enqueueUpload(
+        fileURL: URL,
+        filename: String,
+        title: String,
+        uploadType: ShareOutboxUploadType,
+        now: Date = Date()
+    ) throws -> ShareOutboxItemRecord {
+        let timestamp = now.timeIntervalSince1970
+        let sanitizedFilename = Self.sanitizeUploadFilename(
+            preferred: filename,
+            fallback: fileURL.lastPathComponent
+        )
+        let copiedFileURL = try Self.copyUploadFileToQueue(
+            sourceFileURL: fileURL,
+            filename: sanitizedFilename,
+            appGroupID: appGroupID
+        )
+        let item = ShareOutboxItemRecord(
+            id: UUID().uuidString,
+            url: "",
+            title: title,
+            payloadKind: ShareOutboxPayloadKind.upload.rawValue,
+            uploadType: uploadType.rawValue,
+            uploadFilePath: copiedFileURL.path,
+            uploadFilename: sanitizedFilename,
             createdAt: timestamp,
             state: ShareOutboxState.pending.rawValue,
             attemptCount: 0,
@@ -176,6 +249,13 @@ final class ShareOutboxStore {
         }
     }
 
+    func removeUploadFileIfPresent(path: String?) {
+        guard let path, !path.isEmpty else {
+            return
+        }
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
     private func migrateIfNeeded() throws {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("create_share_outbox_items") { db in
@@ -184,6 +264,12 @@ final class ShareOutboxStore {
                 t.column(ShareOutboxItemRecord.Columns.url.rawValue, .text).notNull()
                 t.column(ShareOutboxItemRecord.Columns.title.rawValue, .text).notNull()
                     .defaults(to: "")
+                t.column(ShareOutboxItemRecord.Columns.payloadKind.rawValue, .text)
+                    .notNull()
+                    .defaults(to: ShareOutboxPayloadKind.url.rawValue)
+                t.column(ShareOutboxItemRecord.Columns.uploadType.rawValue, .text)
+                t.column(ShareOutboxItemRecord.Columns.uploadFilePath.rawValue, .text)
+                t.column(ShareOutboxItemRecord.Columns.uploadFilename.rawValue, .text)
                 t.column(ShareOutboxItemRecord.Columns.createdAt.rawValue, .double).notNull()
                 t.column(ShareOutboxItemRecord.Columns.state.rawValue, .text).notNull()
                 t.column(ShareOutboxItemRecord.Columns.attemptCount.rawValue, .integer).notNull()
@@ -210,6 +296,60 @@ final class ShareOutboxStore {
                 ifNotExists: true
             )
         }
+
+        migrator.registerMigration("add_share_outbox_upload_fields_v1") { db in
+            guard try Self.tableExists(ShareOutboxItemRecord.databaseTableName, in: db) else {
+                return
+            }
+            if try !Self.columnExists(
+                ShareOutboxItemRecord.Columns.payloadKind.rawValue,
+                in: ShareOutboxItemRecord.databaseTableName,
+                db: db
+            ) {
+                try db.execute(
+                    sql: """
+                        ALTER TABLE \(ShareOutboxItemRecord.databaseTableName)
+                        ADD COLUMN \(ShareOutboxItemRecord.Columns.payloadKind.rawValue) TEXT NOT NULL DEFAULT '\(ShareOutboxPayloadKind.url.rawValue)'
+                    """
+                )
+            }
+            if try !Self.columnExists(
+                ShareOutboxItemRecord.Columns.uploadType.rawValue,
+                in: ShareOutboxItemRecord.databaseTableName,
+                db: db
+            ) {
+                try db.execute(
+                    sql: """
+                        ALTER TABLE \(ShareOutboxItemRecord.databaseTableName)
+                        ADD COLUMN \(ShareOutboxItemRecord.Columns.uploadType.rawValue) TEXT
+                    """
+                )
+            }
+            if try !Self.columnExists(
+                ShareOutboxItemRecord.Columns.uploadFilePath.rawValue,
+                in: ShareOutboxItemRecord.databaseTableName,
+                db: db
+            ) {
+                try db.execute(
+                    sql: """
+                        ALTER TABLE \(ShareOutboxItemRecord.databaseTableName)
+                        ADD COLUMN \(ShareOutboxItemRecord.Columns.uploadFilePath.rawValue) TEXT
+                    """
+                )
+            }
+            if try !Self.columnExists(
+                ShareOutboxItemRecord.Columns.uploadFilename.rawValue,
+                in: ShareOutboxItemRecord.databaseTableName,
+                db: db
+            ) {
+                try db.execute(
+                    sql: """
+                        ALTER TABLE \(ShareOutboxItemRecord.databaseTableName)
+                        ADD COLUMN \(ShareOutboxItemRecord.Columns.uploadFilename.rawValue) TEXT
+                    """
+                )
+            }
+        }
         try migrator.migrate(dbQueue)
     }
 
@@ -221,5 +361,99 @@ final class ShareOutboxStore {
         let baseDelay = min(pow(2.0, Double(exponent)) * 5.0, 3600.0)
         let jitter = Double.random(in: 0...(baseDelay * 0.2))
         return nowTimestamp + baseDelay + jitter
+    }
+
+    private static func copyUploadFileToQueue(
+        sourceFileURL: URL,
+        filename: String,
+        appGroupID: String
+    ) throws -> URL {
+        let destinationDirectory = try uploadQueueDirectoryURL(appGroupID: appGroupID)
+        let destination = destinationDirectory.appendingPathComponent(
+            "\(UUID().uuidString)-\(filename)",
+            isDirectory: false
+        )
+        let didStartScopedAccess = sourceFileURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartScopedAccess {
+                sourceFileURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try? FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.copyItem(at: sourceFileURL, to: destination)
+        return destination
+    }
+
+    private static func uploadQueueDirectoryURL(appGroupID: String) throws -> URL {
+        guard let containerURL = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: appGroupID
+        ) else {
+            throw ShareOutboxStoreError.appGroupContainerUnavailable
+        }
+
+        let directory = containerURL
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+            .appendingPathComponent("share_outbox_uploads", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        return directory
+    }
+
+    private static func sanitizeUploadFilename(preferred: String, fallback: String) -> String {
+        let raw = preferred.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? fallback
+            : preferred
+        let source = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lastComponent = source
+            .split(whereSeparator: { $0 == "/" || $0 == "\\" })
+            .map(String.init)
+            .last ?? source
+        var output = lastComponent.filter { character in
+            character.isLetter || character.isNumber || character == "." || character == "-" || character == "_"
+        }
+        output = output.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        if output.isEmpty {
+            output = "document.pdf"
+        }
+        if !output.lowercased().hasSuffix(".pdf") {
+            output += ".pdf"
+        }
+        return output
+    }
+
+    private static func tableExists(_ name: String, in db: Database) throws -> Bool {
+        let count = try Int.fetchOne(
+            db,
+            sql: """
+                SELECT COUNT(*)
+                FROM sqlite_master
+                WHERE type = 'table' AND name = ?
+            """,
+            arguments: [name]
+        ) ?? 0
+        return count > 0
+    }
+
+    private static func columnExists(
+        _ columnName: String,
+        in tableName: String,
+        db: Database
+    ) throws -> Bool {
+        let count = try Int.fetchOne(
+            db,
+            sql: """
+                SELECT COUNT(*)
+                FROM pragma_table_info('\(tableName)')
+                WHERE name = ?
+            """,
+            arguments: [columnName]
+        ) ?? 0
+        return count > 0
     }
 }

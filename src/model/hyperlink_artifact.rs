@@ -131,6 +131,33 @@ pub async fn latest_for_hyperlinks_kind(
     Ok(latest)
 }
 
+pub async fn latest_source_for_hyperlinks(
+    connection: &DatabaseConnection,
+    hyperlink_ids: &[i32],
+) -> Result<HashMap<i32, hyperlink_artifact::Model>, sea_orm::DbErr> {
+    if hyperlink_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let artifacts = hyperlink_artifact::Entity::find()
+        .filter(hyperlink_artifact::Column::HyperlinkId.is_in(hyperlink_ids.to_vec()))
+        .filter(hyperlink_artifact::Column::Kind.is_in(vec![
+            HyperlinkArtifactKind::SnapshotWarc,
+            HyperlinkArtifactKind::PdfSource,
+        ]))
+        .order_by_desc(hyperlink_artifact::Column::CreatedAt)
+        .order_by_desc(hyperlink_artifact::Column::Id)
+        .all(connection)
+        .await?;
+
+    let mut latest = HashMap::with_capacity(hyperlink_ids.len());
+    for artifact in artifacts {
+        latest.entry(artifact.hyperlink_id).or_insert(artifact);
+    }
+
+    Ok(latest)
+}
+
 pub async fn load_payload(artifact: &hyperlink_artifact::Model) -> Result<Vec<u8>, sea_orm::DbErr> {
     if let Some(storage_path) = artifact.storage_path.as_deref() {
         match artifacts::read_payload(storage_path).await {

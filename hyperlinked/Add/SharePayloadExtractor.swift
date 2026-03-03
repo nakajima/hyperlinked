@@ -2,17 +2,41 @@ import Foundation
 import LinkPresentation
 import UniformTypeIdentifiers
 
+enum SharedPayload: Hashable {
+    case url(URL)
+    case pdf(fileURL: URL, filename: String)
+}
+
 struct SharedLinkCandidate: Hashable, Identifiable {
-    let url: URL
+    let payload: SharedPayload
     let sourceLabel: String
 
     var id: String {
-        url.absoluteString
+        switch payload {
+        case .url(let url):
+            return "url:\(url.absoluteString)"
+        case .pdf(let fileURL, let filename):
+            return "pdf:\(filename):\(fileURL.path)"
+        }
     }
 
     var displayValue: String {
-        let host = url.host ?? url.absoluteString
-        return "\(host)\(url.path.isEmpty ? "" : url.path)"
+        switch payload {
+        case .url(let url):
+            let host = url.host ?? url.absoluteString
+            return "\(host)\(url.path.isEmpty ? "" : url.path)"
+        case .pdf(_, let filename):
+            return filename
+        }
+    }
+
+    var detailValue: String {
+        switch payload {
+        case .url(let url):
+            return url.absoluteString
+        case .pdf(let fileURL, _):
+            return fileURL.path
+        }
     }
 }
 
@@ -39,6 +63,7 @@ enum SharePayloadExtractor {
         }
 
         var extractedTitle = ""
+        var fileCandidates: [SharedLinkCandidate] = []
         var directURLCandidates: [SharedLinkCandidate] = []
         var textPayloads: [String] = []
 
@@ -66,7 +91,7 @@ enum SharePayloadExtractor {
                     if let rawURL = firstString(in: propertyList, matching: possibleURLKeys),
                        let parsedURL = normalizeURLString(rawURL) {
                         directURLCandidates.append(
-                            SharedLinkCandidate(url: parsedURL, sourceLabel: "Property List")
+                            SharedLinkCandidate(payload: .url(parsedURL), sourceLabel: "Property List")
                         )
                     }
                 }
@@ -84,7 +109,7 @@ enum SharePayloadExtractor {
                     if let metadataURL = metadata.originalURL ?? metadata.url,
                        let normalized = normalizeURL(metadataURL) {
                         directURLCandidates.append(
-                            SharedLinkCandidate(url: normalized, sourceLabel: "Metadata")
+                            SharedLinkCandidate(payload: .url(normalized), sourceLabel: "Metadata")
                         )
                     }
                 }
@@ -92,7 +117,20 @@ enum SharePayloadExtractor {
                 if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier),
                    let url = await loadURL(from: provider) {
                     directURLCandidates.append(
-                        SharedLinkCandidate(url: url, sourceLabel: "Attachment")
+                        SharedLinkCandidate(payload: .url(url), sourceLabel: "Attachment")
+                    )
+                    continue
+                }
+
+                if provider.hasItemConformingToTypeIdentifier(UTType.pdf.identifier),
+                   let fileURL = await loadPDFFileCopy(from: provider) {
+                    let filename = provider.suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let resolvedFilename = filename?.nilIfEmpty ?? fileURL.lastPathComponent
+                    fileCandidates.append(
+                        SharedLinkCandidate(
+                            payload: .pdf(fileURL: fileURL, filename: resolvedFilename),
+                            sourceLabel: "Attachment"
+                        )
                     )
                     continue
                 }
@@ -113,28 +151,48 @@ enum SharePayloadExtractor {
         }
 
         let dedupedDirectURLs = dedupe(directURLCandidates)
+        let dedupedFiles = dedupe(fileCandidates)
         if isLikelyURLString(extractedTitle) {
             extractedTitle = ""
         }
         if extractedTitle.isEmpty {
-            extractedTitle = inferTitle(from: textPayloads, knownURLs: dedupedDirectURLs.map(\.url)) ?? ""
+            extractedTitle = inferTitle(
+                from: textPayloads,
+                knownURLs: dedupedDirectURLs.compactMap { candidate in
+                    if case .url(let url) = candidate.payload {
+                        return url
+                    }
+                    return nil
+                }
+            ) ?? ""
         }
-        if !dedupedDirectURLs.isEmpty {
-            return ShareExtractionResult(title: extractedTitle, candidates: dedupedDirectURLs)
+        if !dedupedFiles.isEmpty || !dedupedDirectURLs.isEmpty {
+            return ShareExtractionResult(
+                title: extractedTitle,
+                candidates: dedupedFiles + dedupedDirectURLs
+            )
         }
 
         var parsedFromText: [SharedLinkCandidate] = []
         for text in textPayloads {
             parsedFromText.append(
                 contentsOf: detectLinks(in: text).map { url in
-                    SharedLinkCandidate(url: url, sourceLabel: "Detected from text")
+                    SharedLinkCandidate(payload: .url(url), sourceLabel: "Detected from text")
                 }
             )
         }
 
         let dedupedParsedURLs = dedupe(parsedFromText)
         if extractedTitle.isEmpty {
-            extractedTitle = inferTitle(from: textPayloads, knownURLs: dedupedParsedURLs.map(\.url)) ?? ""
+            extractedTitle = inferTitle(
+                from: textPayloads,
+                knownURLs: dedupedParsedURLs.compactMap { candidate in
+                    if case .url(let url) = candidate.payload {
+                        return url
+                    }
+                    return nil
+                }
+            ) ?? ""
         }
         return ShareExtractionResult(title: extractedTitle, candidates: dedupedParsedURLs)
     }
@@ -167,6 +225,34 @@ enum SharePayloadExtractor {
             }
         }
         return nil
+    }
+
+    private static func loadPDFFileCopy(from provider: NSItemProvider) async -> URL? {
+        guard provider.hasItemConformingToTypeIdentifier(UTType.pdf.identifier) else {
+            return nil
+        }
+
+        return await withCheckedContinuation { continuation in
+            provider.loadFileRepresentation(forTypeIdentifier: UTType.pdf.identifier) { fileURL, _ in
+                guard let fileURL else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let temporaryDirectory = FileManager.default.temporaryDirectory
+                let destination = temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString, isDirectory: false)
+                    .appendingPathExtension("pdf")
+                do {
+                    if FileManager.default.fileExists(atPath: destination.path) {
+                        try FileManager.default.removeItem(at: destination)
+                    }
+                    try FileManager.default.copyItem(at: fileURL, to: destination)
+                    continuation.resume(returning: destination)
+                } catch {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
     }
 
     private static func loadLinkMetadata(from provider: NSItemProvider) async -> LPLinkMetadata? {
@@ -266,7 +352,7 @@ enum SharePayloadExtractor {
         unique.reserveCapacity(candidates.count)
 
         for candidate in candidates {
-            let key = candidate.url.absoluteString
+            let key = candidate.id
             if seen.insert(key).inserted {
                 unique.append(candidate)
             }
@@ -373,5 +459,11 @@ enum SharePayloadExtractor {
             }
         }
         return nil
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }

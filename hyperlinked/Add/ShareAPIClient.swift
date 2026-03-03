@@ -42,6 +42,30 @@ struct ShareAPIClient {
         _ = try await send(request)
     }
 
+    func uploadPDF(title: String, fileURL: URL, filename: String) async throws {
+        let didStartScopedAccess = fileURL.startAccessingSecurityScopedResource()
+        defer {
+            if didStartScopedAccess {
+                fileURL.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let payload = try Data(contentsOf: fileURL)
+        let boundary = "Boundary-\(UUID().uuidString)"
+        var request = try makeRequest(path: "/uploads", method: "POST")
+        request.setValue(
+            "multipart/form-data; boundary=\(boundary)",
+            forHTTPHeaderField: "Content-Type"
+        )
+        request.httpBody = buildUploadPDFBody(
+            boundary: boundary,
+            title: title,
+            filename: filename,
+            payload: payload
+        )
+        _ = try await send(request)
+    }
+
     private func makeRequest(path: String, method: String) throws -> URLRequest {
         let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
         let endpoint = baseURL.appendingPathComponent(cleanPath)
@@ -80,6 +104,62 @@ struct ShareAPIClient {
             return raw.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return ""
+    }
+
+    private func buildUploadPDFBody(
+        boundary: String,
+        title: String,
+        filename: String,
+        payload: Data
+    ) -> Data {
+        var body = Data()
+        appendMultipartField("upload_type", value: "pdf", boundary: boundary, to: &body)
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTitle.isEmpty {
+            appendMultipartField("title", value: trimmedTitle, boundary: boundary, to: &body)
+        }
+        appendMultipartField("filename", value: filename, boundary: boundary, to: &body)
+        appendMultipartFile(
+            fieldName: "file",
+            filename: filename,
+            mimeType: "application/pdf",
+            payload: payload,
+            boundary: boundary,
+            to: &body
+        )
+        body.append("--\(boundary)--\r\n".data(using: .utf8) ?? Data())
+        return body
+    }
+
+    private func appendMultipartField(
+        _ name: String,
+        value: String,
+        boundary: String,
+        to body: inout Data
+    ) {
+        body.append("--\(boundary)\r\n".data(using: .utf8) ?? Data())
+        body.append(
+            "Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8) ?? Data()
+        )
+        body.append("\(value)\r\n".data(using: .utf8) ?? Data())
+    }
+
+    private func appendMultipartFile(
+        fieldName: String,
+        filename: String,
+        mimeType: String,
+        payload: Data,
+        boundary: String,
+        to body: inout Data
+    ) {
+        body.append("--\(boundary)\r\n".data(using: .utf8) ?? Data())
+        body.append(
+            "Content-Disposition: form-data; name=\"\(fieldName)\"; filename=\"\(filename)\"\r\n"
+                .data(using: .utf8) ?? Data()
+        )
+        body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8) ?? Data())
+        body.append(payload)
+        body.append("\r\n".data(using: .utf8) ?? Data())
     }
 }
 

@@ -29,11 +29,31 @@ final class OutboxDeliveryCoordinator {
         for item in dueItems {
             result.attempted += 1
             do {
-                let created = try await client.createHyperlink(title: item.title, url: item.url)
+                let created: Hyperlink
+                switch item.resolvedPayloadKind {
+                case .url:
+                    created = try await client.createHyperlink(title: item.title, url: item.url)
+                case .upload:
+                    guard item.resolvedUploadType == .pdf else {
+                        throw APIClientError.decodingFailed("unsupported queued upload type")
+                    }
+                    guard let path = item.uploadFilePath,
+                          let filename = item.uploadFilename else {
+                        throw APIClientError.decodingFailed("queued upload file metadata is missing")
+                    }
+                    created = try await client.uploadPDF(
+                        title: item.title,
+                        fileURL: URL(fileURLWithPath: path),
+                        filename: filename
+                    )
+                }
                 if let hyperlinkStore {
                     try? hyperlinkStore.upsert(hyperlink: created)
                 }
                 try store.markDelivered(id: item.id)
+                if item.resolvedPayloadKind == .upload {
+                    store.removeUploadFileIfPresent(path: item.uploadFilePath)
+                }
                 result.delivered += 1
             } catch {
                 try? store.markAttemptFailed(id: item.id, errorMessage: error.localizedDescription)

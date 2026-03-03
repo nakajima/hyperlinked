@@ -10,6 +10,7 @@ final class AppModel: ObservableObject {
     @Published var selectedServerURL: URL?
     @Published var selectedServerAuthMode: ServerAuthMode
     @Published var shouldShowServerSetup: Bool
+    @Published private(set) var widgetRotationDiagnostics = WidgetRotationDiagnosticsSnapshot.empty
 
     private let defaults: UserDefaults
     private let sharedDefaults: UserDefaults?
@@ -38,6 +39,8 @@ final class AppModel: ObservableObject {
             selectedServerAuthMode = .none
             shouldShowServerSetup = true
         }
+
+        refreshDiagnostics()
     }
 
     var apiClient: APIClient? {
@@ -127,6 +130,20 @@ final class AppModel: ObservableObject {
 
     func dismissServerSetup() {
         shouldShowServerSetup = false
+    }
+
+    func refreshDiagnostics() {
+        Task {
+            let snapshot = await AppDiagnosticsLog.shared.refreshSnapshot()
+            widgetRotationDiagnostics = snapshot
+        }
+    }
+
+    func clearDiagnosticsLog() {
+        Task {
+            let snapshot = await AppDiagnosticsLog.shared.clearLog()
+            widgetRotationDiagnostics = snapshot
+        }
     }
 
     func resetServerSelection() {

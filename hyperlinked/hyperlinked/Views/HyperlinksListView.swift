@@ -153,6 +153,7 @@ struct HyperlinksListView: View {
         .refreshable {
 						WidgetCenter.shared.reloadAllTimelines()
             await loadHyperlinks()
+            appModel.refreshDiagnostics()
         }
         .onSubmit(of: .search) {
             // Search is local over cached records.
@@ -165,6 +166,7 @@ struct HyperlinksListView: View {
         .onReceive(
             NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
         ) { _ in
+            appModel.refreshDiagnostics()
             Task {
                 await loadHyperlinks()
             }
@@ -567,11 +569,11 @@ private struct PendingOutboxRowContent: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? item.url : item.title)
+                Text(primaryLine)
                     .font(.headline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                Text(item.url)
+                Text(secondaryLine)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -594,6 +596,24 @@ private struct PendingOutboxRowContent: View {
         }
         .padding(.vertical, 4)
         .opacity(0.78)
+    }
+
+    private var primaryLine: String {
+        let trimmedTitle = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTitle.isEmpty {
+            return trimmedTitle
+        }
+        if item.resolvedPayloadKind == .upload {
+            return item.uploadFilename ?? "Queued upload"
+        }
+        return item.url
+    }
+
+    private var secondaryLine: String {
+        if item.resolvedPayloadKind == .upload {
+            return item.uploadFilename ?? "PDF upload"
+        }
+        return item.url
     }
 }
 
@@ -695,6 +715,10 @@ struct HyperlinksListRowPreviews: PreviewProvider {
             id: "preview-pending-1",
             url: "https://ryanbrewer.dev/posts/sequent-calculus/",
             title: "Par Part 1: Sequent Calculus",
+            payloadKind: ShareOutboxPayloadKind.url.rawValue,
+            uploadType: nil,
+            uploadFilePath: nil,
+            uploadFilename: nil,
             createdAt: Date().timeIntervalSince1970 - 120,
             state: ShareOutboxState.pending.rawValue,
             attemptCount: 1,

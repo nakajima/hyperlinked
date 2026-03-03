@@ -608,94 +608,49 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
         })?;
 
     let deadline = Instant::now() + SNAPSHOT_DEADLINE;
-
-    if snapshot_content_use_chromium() && !path_has_pdf_extension(parsed.path()) {
-        match capture_html_with_chromium_response(parsed.clone(), deadline).await {
-            Ok(source_response) => {
-                if looks_like_pdf_viewer_dom(&source_response.body)
-                    && let Ok(capture) = capture_snapshot_via_reqwest(
-                        &client,
-                        parsed.clone(),
-                        deadline,
-                        HtmlCaptureMethod::ReqwestFallback,
-                        true,
-                        Some(
-                            "chromium dump-dom looked like a PDF viewer; attempted reqwest source capture"
-                                .to_string(),
-                        ),
-                    )
-                    .await
-                {
-                    return Ok(capture);
-                }
-
-                return capture_snapshot_from_html_response(
-                    &client,
-                    source_response,
-                    deadline,
-                    HtmlCaptureMethod::Chromium,
-                    false,
-                    None,
-                )
-                .await;
-            }
-            Err(chromium_error) => {
-                match capture_snapshot_via_reqwest(
-                    &client,
-                    parsed.clone(),
-                    deadline,
-                    HtmlCaptureMethod::ReqwestFallback,
-                    true,
-                    Some(chromium_error.clone()),
-                )
-                .await
-                {
-                    Ok(capture) => return Ok(capture),
-                    Err(mut fallback_error) => {
-                        let message = format!(
-                            "chromium content capture failed: {chromium_error}; reqwest fallback failed: {}",
-                            fallback_error.message
-                        );
-                        fallback_error.message = message.clone();
-                        fallback_error.artifact.stage = "chromium_fallback".to_string();
-                        fallback_error.artifact.final_error = message;
-                        return Err(fallback_error);
-                    }
-                }
-            }
-        }
-    }
-
-    capture_snapshot_via_reqwest(
+    let source_response = match fetch_response_with_retry(
         &client,
-        parsed,
+        parsed.clone(),
+        MAX_HTML_BYTES,
         deadline,
-        HtmlCaptureMethod::Reqwest,
-        false,
-        None,
     )
     .await
-}
+    {
+        Ok(response) => response,
+        Err(failure) => {
+            if snapshot_content_use_chromium() && !path_has_pdf_extension(parsed.path()) {
+                return match capture_html_with_chromium_response(parsed.clone(), deadline).await {
+                    Ok(chromium_response) => {
+                        capture_snapshot_from_html_response(
+                            &client,
+                            chromium_response,
+                            deadline,
+                            HtmlCaptureMethod::Chromium,
+                            false,
+                            None,
+                        )
+                        .await
+                    }
+                    Err(chromium_error) => Err(snapshot_capture_error(
+                        parsed.as_str(),
+                        "chromium_fallback",
+                        format!(
+                            "reqwest source capture failed: {}; chromium content capture failed: {chromium_error}",
+                            failure.final_error.message
+                        ),
+                        failure.attempts,
+                    )),
+                };
+            }
 
-async fn capture_snapshot_via_reqwest(
-    client: &reqwest::Client,
-    parsed: Url,
-    deadline: Instant,
-    capture_method: HtmlCaptureMethod,
-    fallback_used: bool,
-    chromium_error: Option<String>,
-) -> Result<SnapshotCapture, SnapshotCaptureError> {
-    let source_response =
-        fetch_response_with_retry(client, parsed.clone(), MAX_HTML_BYTES, deadline)
-            .await
-            .map_err(|failure| {
-                snapshot_capture_error(
-                    parsed.as_str(),
-                    "html_fetch",
-                    failure.final_error.message,
-                    failure.attempts,
-                )
-            })?;
+            return Err(snapshot_capture_error(
+                parsed.as_str(),
+                "html_fetch",
+                failure.final_error.message,
+                failure.attempts,
+            ));
+        }
+    };
 
     let source_kind = classify_source_kind(
         source_response.content_type.as_deref(),
@@ -718,13 +673,55 @@ async fn capture_snapshot_via_reqwest(
         ));
     }
 
+    if snapshot_content_use_chromium() && !path_has_pdf_extension(parsed.path()) {
+        match capture_html_with_chromium_response(parsed.clone(), deadline).await {
+            Ok(chromium_response) => {
+                if looks_like_pdf_viewer_dom(&chromium_response.body) {
+                    return capture_snapshot_from_html_response(
+                        &client,
+                        source_response,
+                        deadline,
+                        HtmlCaptureMethod::ReqwestFallback,
+                        true,
+                        Some(
+                            "chromium dump-dom looked like a PDF viewer; used reqwest source capture"
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+                }
+
+                return capture_snapshot_from_html_response(
+                    &client,
+                    chromium_response,
+                    deadline,
+                    HtmlCaptureMethod::Chromium,
+                    false,
+                    None,
+                )
+                .await;
+            }
+            Err(chromium_error) => {
+                return capture_snapshot_from_html_response(
+                    &client,
+                    source_response,
+                    deadline,
+                    HtmlCaptureMethod::ReqwestFallback,
+                    true,
+                    Some(chromium_error),
+                )
+                .await;
+            }
+        }
+    }
+
     capture_snapshot_from_html_response(
-        client,
+        &client,
         source_response,
         deadline,
-        capture_method,
-        fallback_used,
-        chromium_error,
+        HtmlCaptureMethod::Reqwest,
+        false,
+        None,
     )
     .await
 }
@@ -2160,6 +2157,10 @@ mod tests {
     fn classifies_pdf_sources() {
         assert_eq!(
             classify_source_kind(Some("application/pdf; charset=binary"), "/doc"),
+            SnapshotSourceKind::Pdf
+        );
+        assert_eq!(
+            classify_source_kind(Some("application/pdf"), "/pdf/2602.11988"),
             SnapshotSourceKind::Pdf
         );
         assert_eq!(

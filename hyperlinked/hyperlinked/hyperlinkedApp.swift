@@ -11,12 +11,22 @@ import SwiftUI
 @main
 struct hyperlinkedApp: App {
     @StateObject private var appModel = AppModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(appModel)
                 .databaseContext(DB.databaseContext())
+                .task {
+                    appModel.refreshDiagnostics()
+                }
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active else {
+                return
+            }
+            appModel.refreshDiagnostics()
         }
     }
 }

@@ -85,6 +85,10 @@ public struct DB {
                 t.column("id", .text).primaryKey()
                 t.column("url", .text).notNull()
                 t.column("title", .text).notNull().defaults(to: "")
+                t.column("payload_kind", .text).notNull().defaults(to: "url")
+                t.column("upload_type", .text)
+                t.column("upload_file_path", .text)
+                t.column("upload_filename", .text)
                 t.column("created_at", .double).notNull()
                 t.column("state", .text).notNull()
                 t.column("attempt_count", .integer).notNull().defaults(to: 0)
@@ -106,6 +110,45 @@ public struct DB {
                 columns: ["created_at"],
                 ifNotExists: true
             )
+        }
+
+        migrator.registerMigration("add_share_outbox_upload_fields_v1") { db in
+            guard try tableExists(outboxTableName, in: db) else {
+                return
+            }
+
+            if try !columnExists("payload_kind", in: outboxTableName, db: db) {
+                try db.execute(
+                    sql: """
+                        ALTER TABLE \(outboxTableName)
+                        ADD COLUMN payload_kind TEXT NOT NULL DEFAULT 'url'
+                    """
+                )
+            }
+            if try !columnExists("upload_type", in: outboxTableName, db: db) {
+                try db.execute(
+                    sql: """
+                        ALTER TABLE \(outboxTableName)
+                        ADD COLUMN upload_type TEXT
+                    """
+                )
+            }
+            if try !columnExists("upload_file_path", in: outboxTableName, db: db) {
+                try db.execute(
+                    sql: """
+                        ALTER TABLE \(outboxTableName)
+                        ADD COLUMN upload_file_path TEXT
+                    """
+                )
+            }
+            if try !columnExists("upload_filename", in: outboxTableName, db: db) {
+                try db.execute(
+                    sql: """
+                        ALTER TABLE \(outboxTableName)
+                        ADD COLUMN upload_filename TEXT
+                    """
+                )
+            }
         }
 
         migrator.registerMigration("rename_legacy_hyperlink_table") { db in

@@ -200,6 +200,21 @@ struct HyperlinksEntry: TimelineEntry {
     let configuration: ConfigurationAppIntent
     let hyperlinks: [WidgetHyperlink]
     let status: EntryStatus
+    let rotationStampStatus: WidgetRotationStampStatus
+
+    init(
+        date: Date,
+        configuration: ConfigurationAppIntent,
+        hyperlinks: [WidgetHyperlink],
+        status: EntryStatus,
+        rotationStampStatus: WidgetRotationStampStatus = .healthy
+    ) {
+        self.date = date
+        self.configuration = configuration
+        self.hyperlinks = hyperlinks
+        self.status = status
+        self.rotationStampStatus = rotationStampStatus
+    }
 
     static func noServer(configuration: ConfigurationAppIntent) -> HyperlinksEntry {
         HyperlinksEntry(
@@ -476,11 +491,18 @@ struct HyperlinksProvider: AppIntentTimelineProvider {
                 hyperlinks: baseHyperlinks,
                 session: .shared
             )
+            let rotationStampStatus: WidgetRotationStampStatus = {
+                guard configuration.rotateSlowly else {
+                    return .healthy
+                }
+                return WidgetDiagnosticsBridge.rotationStampStatus()
+            }()
             return HyperlinksEntry(
                 date: .now,
                 configuration: configuration,
                 hyperlinks: hyperlinks,
-                status: .loaded
+                status: .loaded,
+                rotationStampStatus: rotationStampStatus
             )
         } catch {
             WidgetDiagnostics.cache.debug(
@@ -1303,6 +1325,7 @@ private struct HyperlinksWidgetEntryView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                    rotationStatusFooter
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
@@ -1338,9 +1361,23 @@ private struct HyperlinksWidgetEntryView: View {
                     }
                 }
 
+                rotationStatusFooter
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var rotationStatusFooter: some View {
+        if entry.configuration.rotateSlowly {
+            if case .paused = entry.rotationStampStatus {
+                Text("Rotation paused")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 

@@ -26,7 +26,7 @@
 
       <p class="flex w-full min-w-0 flex-row flex-wrap items-center gap-[0.4rem] text-sm leading-4">
         <a class="min-w-0 flex-1 break-all text-tertiary no-underline hover:text-primary" href="<%= link.url %>" data-hyperlink-id="<%= link.id %>"><%= link.url %></a>
-        <% if link.url.ends_with(".pdf") { %>
+        <% if self.link_is_pdf(link) { %>
           <span class="inline-block whitespace-nowrap rounded-[0.25rem] bg-badge px-[0.2rem] py-1 text-[0.5rem] leading-[0.5rem] text-center align-baseline text-black">PDF</span>
         <% } %>
       </p>

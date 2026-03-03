@@ -31,6 +31,7 @@ pub struct HyperlinkFetchResults {
     pub active_processing_job_ids: HashSet<i32>,
     pub thumbnail_artifacts: HashMap<i32, hyperlink_artifact::Model>,
     pub dark_thumbnail_artifacts: HashMap<i32, hyperlink_artifact::Model>,
+    pub latest_source_artifacts: HashMap<i32, hyperlink_artifact::Model>,
     pub match_snippets: HashMap<i32, String>,
     pub parsed_query: ParsedHyperlinkQuery,
     pub ignored_tokens: Vec<String>,
@@ -159,6 +160,11 @@ impl<'a> HyperlinkFetcher<'a> {
             HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
         )
         .await?;
+        let latest_source_artifacts = hyperlink_artifact_model::latest_source_for_hyperlinks(
+            self.connection,
+            &shown_hyperlink_ids,
+        )
+        .await?;
 
         Ok(HyperlinkFetchResults {
             links,
@@ -166,6 +172,7 @@ impl<'a> HyperlinkFetcher<'a> {
             active_processing_job_ids,
             thumbnail_artifacts,
             dark_thumbnail_artifacts,
+            latest_source_artifacts,
             match_snippets,
             parsed_query: parsed.parsed_query,
             ignored_tokens: parsed.ignored_tokens,
@@ -424,12 +431,25 @@ fn build_hyperlink_sql_parts(
         ScopeSelection::All => {}
     }
 
-    let is_pdf_expr =
-        "(lower(h.url) LIKE '%.pdf' OR lower(h.url) LIKE '%.pdf?%' OR lower(h.url) LIKE '%.pdf#%')";
+    let latest_source_kind_expr = "(SELECT a.kind
+          FROM hyperlink_artifact a
+          WHERE a.hyperlink_id = h.id
+            AND a.kind IN ('pdf_source', 'snapshot_warc')
+          ORDER BY a.created_at DESC, a.id DESC
+          LIMIT 1)";
+    let url_looks_pdf_expr = url_looks_pdf_sql_expr("h.url");
+    let is_pdf_expr = format!(
+        "(CASE
+            WHEN ({latest_source_kind_expr}) = 'pdf_source' THEN 1
+            WHEN ({latest_source_kind_expr}) = 'snapshot_warc' THEN 0
+            WHEN {url_looks_pdf_expr} THEN 1
+            ELSE 0
+          END) = 1"
+    );
     match parsed_query.effective_type() {
         TypeSelection::All => {}
         TypeSelection::PdfOnly => filters.push(is_pdf_expr.to_string()),
-        TypeSelection::NonPdfOnly => filters.push(format!("NOT {is_pdf_expr}")),
+        TypeSelection::NonPdfOnly => filters.push(format!("NOT ({is_pdf_expr})")),
     }
 
     if matches!(
@@ -529,6 +549,12 @@ fn build_title_url_fallback_sql(search_terms: &[SearchTerm], values: &mut Vec<Va
         }
     }
     term_sql.join(" AND ")
+}
+
+fn url_looks_pdf_sql_expr(column: &str) -> String {
+    format!(
+        "(lower({column}) LIKE '%.pdf' OR lower({column}) LIKE '%.pdf?%' OR lower({column}) LIKE '%.pdf#%')"
+    )
 }
 
 fn build_exact_word_match_sql(column_sql: &str, value: &str, values: &mut Vec<Value>) -> String {

@@ -261,10 +261,20 @@ final class ShareViewController: UIViewController {
 
         let queuedItem: ShareOutboxItemRecord
         do {
-            queuedItem = try outboxStore.enqueue(
-                url: candidate.url.absoluteString,
-                title: resolvedTitle ?? ""
-            )
+            switch candidate.payload {
+            case .url(let url):
+                queuedItem = try outboxStore.enqueue(
+                    url: url.absoluteString,
+                    title: resolvedTitle ?? ""
+                )
+            case .pdf(let fileURL, let filename):
+                queuedItem = try outboxStore.enqueueUpload(
+                    fileURL: fileURL,
+                    filename: filename,
+                    title: resolvedTitle ?? "",
+                    uploadType: .pdf
+                )
+            }
         } catch {
             return .failed("Could not save this link locally. Please try again.")
         }
@@ -274,8 +284,9 @@ final class ShareViewController: UIViewController {
             authorizationHeaderValue: serverConnection.authorizationHeaderValue
         )
         do {
-            try await client.createHyperlink(title: queuedItem.title, url: queuedItem.url)
+            try await deliverOutboxItem(queuedItem, with: client)
             try outboxStore.markDelivered(id: queuedItem.id)
+            outboxStore.removeUploadFileIfPresent(path: queuedItem.uploadFilePath)
             await drainPendingOutbox(store: outboxStore, client: client, excludingID: queuedItem.id)
             return .delivered
         } catch {
@@ -364,10 +375,10 @@ final class ShareViewController: UIViewController {
             return "Could not access shared storage for offline queue."
         }
         guard !candidates.isEmpty else {
-            return "No URL found in the shared content."
+            return "No supported content found in the shared item."
         }
         guard selectedCandidate != nil else {
-            return "Choose a URL to save."
+            return "Choose an item to save."
         }
         return nil
     }
@@ -484,11 +495,32 @@ final class ShareViewController: UIViewController {
 
         for item in dueItems where item.id != excludingID {
             do {
-                try await client.createHyperlink(title: item.title, url: item.url)
+                try await deliverOutboxItem(item, with: client)
                 try store.markDelivered(id: item.id)
+                store.removeUploadFileIfPresent(path: item.uploadFilePath)
             } catch {
                 try? store.markAttemptFailed(id: item.id, errorMessage: error.localizedDescription)
             }
+        }
+    }
+
+    private func deliverOutboxItem(_ item: ShareOutboxItemRecord, with client: ShareAPIClient) async throws {
+        switch item.resolvedPayloadKind {
+        case .url:
+            try await client.createHyperlink(title: item.title, url: item.url)
+        case .upload:
+            guard item.resolvedUploadType == .pdf else {
+                throw ShareAPIClientError.unexpectedStatus(code: 400, message: "Unsupported upload type.")
+            }
+            guard let path = item.uploadFilePath,
+                  let filename = item.uploadFilename else {
+                throw ShareAPIClientError.unexpectedStatus(code: 400, message: "Missing queued upload file.")
+            }
+            try await client.uploadPDF(
+                title: item.title,
+                fileURL: URL(fileURLWithPath: path),
+                filename: filename
+            )
         }
     }
 
@@ -497,7 +529,7 @@ final class ShareViewController: UIViewController {
         isSubmitting = false
         updateUIState()
         let alert = UIAlertController(
-            title: "Couldn't Save Link",
+            title: "Couldn't Save Item",
             message: message,
             preferredStyle: .alert
         )
@@ -625,7 +657,7 @@ extension ShareViewController: UITableViewDataSource, UITableViewDelegate {
         cell.textLabel?.font = .preferredFont(forTextStyle: .body)
         cell.textLabel?.textColor = .label
         cell.textLabel?.lineBreakMode = .byTruncatingMiddle
-        cell.detailTextLabel?.text = candidate.url.absoluteString
+        cell.detailTextLabel?.text = candidate.detailValue
         cell.detailTextLabel?.font = .preferredFont(forTextStyle: .caption1)
         cell.detailTextLabel?.textColor = .secondaryLabel
         cell.detailTextLabel?.lineBreakMode = .byTruncatingMiddle
