@@ -21,22 +21,23 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
     let content_length = content_length_header(parts.headers.get(header::CONTENT_LENGTH));
     let query = summarize_query(uri.query());
 
-    let (request, body_summary) = if should_log_body(&method, content_type.as_deref(), content_length) {
-        match to_bytes(body, MAX_LOGGED_BODY_BYTES).await {
-            Ok(bytes) => {
-                let summary = summarize_body(content_type.as_deref(), &bytes);
-                let req = Request::from_parts(parts, Body::from(bytes));
-                (req, summary)
+    let (request, body_summary) =
+        if should_log_body(&method, content_type.as_deref(), content_length) {
+            match to_bytes(body, MAX_LOGGED_BODY_BYTES).await {
+                Ok(bytes) => {
+                    let summary = summarize_body(content_type.as_deref(), &bytes);
+                    let req = Request::from_parts(parts, Body::from(bytes));
+                    (req, summary)
+                }
+                Err(err) => {
+                    let req = Request::from_parts(parts, Body::empty());
+                    (req, format!("<failed to read body: {err}>"))
+                }
             }
-            Err(err) => {
-                let req = Request::from_parts(parts, Body::empty());
-                (req, format!("<failed to read body: {err}>"))
-            }
-        }
-    } else {
-        let req = Request::from_parts(parts, body);
-        (req, "<not logged>".to_string())
-    };
+        } else {
+            let req = Request::from_parts(parts, body);
+            (req, "<not logged>".to_string())
+        };
 
     let response = next.run(request).await;
     let latency_ms = started_at.elapsed().as_millis();
@@ -81,7 +82,11 @@ fn summarize_query(query: Option<&str>) -> String {
     }
 }
 
-fn should_log_body(method: &Method, content_type: Option<&str>, content_length: Option<usize>) -> bool {
+fn should_log_body(
+    method: &Method,
+    content_type: Option<&str>,
+    content_length: Option<usize>,
+) -> bool {
     if method == Method::GET || method == Method::HEAD {
         return false;
     }

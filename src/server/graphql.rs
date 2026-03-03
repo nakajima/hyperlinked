@@ -501,24 +501,36 @@ fn hyperlink_ref_object() -> Object {
                 Ok(Some(FieldValue::value(hyperlink_ref.id)))
             })
         }))
-        .field(Field::new("title", TypeRef::named_nn(TypeRef::STRING), |ctx| {
-            FieldFuture::new(async move {
-                let hyperlink_ref = ctx.parent_value.try_downcast_ref::<HyperlinkRef>()?;
-                Ok(Some(FieldValue::value(hyperlink_ref.title.clone())))
-            })
-        }))
-        .field(Field::new("url", TypeRef::named_nn(TypeRef::STRING), |ctx| {
-            FieldFuture::new(async move {
-                let hyperlink_ref = ctx.parent_value.try_downcast_ref::<HyperlinkRef>()?;
-                Ok(Some(FieldValue::value(hyperlink_ref.url.clone())))
-            })
-        }))
-        .field(Field::new("rawUrl", TypeRef::named_nn(TypeRef::STRING), |ctx| {
-            FieldFuture::new(async move {
-                let hyperlink_ref = ctx.parent_value.try_downcast_ref::<HyperlinkRef>()?;
-                Ok(Some(FieldValue::value(hyperlink_ref.raw_url.clone())))
-            })
-        }))
+        .field(Field::new(
+            "title",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let hyperlink_ref = ctx.parent_value.try_downcast_ref::<HyperlinkRef>()?;
+                    Ok(Some(FieldValue::value(hyperlink_ref.title.clone())))
+                })
+            },
+        ))
+        .field(Field::new(
+            "url",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let hyperlink_ref = ctx.parent_value.try_downcast_ref::<HyperlinkRef>()?;
+                    Ok(Some(FieldValue::value(hyperlink_ref.url.clone())))
+                })
+            },
+        ))
+        .field(Field::new(
+            "rawUrl",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let hyperlink_ref = ctx.parent_value.try_downcast_ref::<HyperlinkRef>()?;
+                    Ok(Some(FieldValue::value(hyperlink_ref.raw_url.clone())))
+                })
+            },
+        ))
 }
 
 fn register_hyperlink_sublinks_field(builder: &mut Builder) {

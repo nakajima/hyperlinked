@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::{net::lookup_host, process::Command, time::sleep};
@@ -41,6 +43,9 @@ const DEFAULT_SNAPSHOT_CONTENT_TIMEOUT_SECS: u64 = 20;
 const DEFAULT_SNAPSHOT_CONTENT_RENDER_WAIT_MS: u64 = 5000;
 const DEFAULT_SCREENSHOT_TIMEOUT_SECS: u64 = 20;
 const CHROMIUM_PATH_ENV: &str = "CHROMIUM_PATH";
+const CHROMIUM_NO_SANDBOX_ENV: &str = "CHROMIUM_NO_SANDBOX";
+const CHROMIUM_RUNTIME_DIR_ENV: &str = "CHROMIUM_RUNTIME_DIR";
+const DEFAULT_CHROMIUM_RUNTIME_DIR: &str = "hyperlinked-chromium-runtime";
 const DEFAULT_SCREENSHOT_DESKTOP_VIEWPORT: Viewport = Viewport {
     width: 1366,
     height: 4096,
@@ -891,7 +896,9 @@ async fn capture_html_with_chromium_response(
         return Err("snapshot deadline reached before chromium content capture".to_string());
     }
 
+    let runtime_dir = ensure_chromium_runtime_dir().await?;
     let mut command = Command::new(snapshot_content_chromium_path());
+    configure_chromium_command(&mut command, runtime_dir.as_path());
     command
         .arg("--headless=new")
         .arg("--disable-gpu")
@@ -1081,8 +1088,11 @@ async fn capture_single_screenshot_exact_height_inner(
                 profile_dir.display()
             )
         })?;
+    let runtime_dir = profile_dir.join("runtime");
+    ensure_chromium_runtime_dir_at(&runtime_dir).await?;
 
     let mut command = Command::new(screenshot_chromium_path());
+    configure_chromium_command(&mut command, runtime_dir.as_path());
     command
         .arg("--headless=new")
         .arg("--disable-gpu")
@@ -1341,8 +1351,10 @@ async fn capture_single_screenshot_fixed_viewport(
 ) -> Result<Vec<u8>, String> {
     let screenshot_path = screenshot_temp_path();
     let window_size = format!("{},{}", viewport.width, viewport.height);
+    let runtime_dir = ensure_chromium_runtime_dir().await?;
 
     let mut command = Command::new(screenshot_chromium_path());
+    configure_chromium_command(&mut command, runtime_dir.as_path());
     command
         .arg("--headless=new")
         .arg("--disable-gpu")
@@ -1455,6 +1467,72 @@ fn command_looks_available(command: &str) -> bool {
             .map(|path| path.join(command))
             .any(|path| path.is_file())
     })
+}
+
+async fn ensure_chromium_runtime_dir() -> Result<PathBuf, String> {
+    let runtime_dir = chromium_runtime_dir();
+    ensure_chromium_runtime_dir_at(&runtime_dir).await?;
+    Ok(runtime_dir)
+}
+
+async fn ensure_chromium_runtime_dir_at(runtime_dir: &Path) -> Result<(), String> {
+    tokio::fs::create_dir_all(runtime_dir)
+        .await
+        .map_err(|err| {
+            format!(
+                "failed to create chromium runtime directory {}: {err}",
+                runtime_dir.display()
+            )
+        })?;
+    #[cfg(unix)]
+    tokio::fs::set_permissions(runtime_dir, std::fs::Permissions::from_mode(0o700))
+        .await
+        .map_err(|err| {
+            format!(
+                "failed to set chromium runtime permissions {}: {err}",
+                runtime_dir.display()
+            )
+        })?;
+    Ok(())
+}
+
+fn configure_chromium_command(command: &mut Command, runtime_dir: &Path) {
+    command.env("XDG_RUNTIME_DIR", runtime_dir.as_os_str());
+    if chromium_no_sandbox() {
+        command.arg("--no-sandbox").arg("--disable-setuid-sandbox");
+    }
+}
+
+fn chromium_runtime_dir() -> PathBuf {
+    if let Some(path) = std::env::var(CHROMIUM_RUNTIME_DIR_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(path);
+    }
+
+    std::env::temp_dir().join(DEFAULT_CHROMIUM_RUNTIME_DIR)
+}
+
+fn chromium_no_sandbox() -> bool {
+    env_bool(CHROMIUM_NO_SANDBOX_ENV, process_is_root())
+}
+
+#[cfg(unix)]
+fn process_is_root() -> bool {
+    // Safety: `geteuid` has no preconditions and simply reports the effective uid.
+    unsafe { geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_is_root() -> bool {
+    false
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn geteuid() -> u32;
 }
 
 fn snapshot_content_timeout() -> Duration {
