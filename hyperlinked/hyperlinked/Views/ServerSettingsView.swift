@@ -139,6 +139,10 @@ struct ServerSettingsView: View {
                         copyLatestDiagnosticEntry()
                     }
 
+                    NavigationLink("View Full Log") {
+                        DiagnosticsLogViewerView()
+                    }
+
                     Button("Clear Log", role: .destructive) {
                         appModel.clearDiagnosticsLog()
                         diagnosticsStatusMessage = "Diagnostics log cleared."

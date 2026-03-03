@@ -80,6 +80,15 @@ actor AppDiagnosticsLog {
         return snapshot()
     }
 
+    func readLogText(maxLines: Int = 2_000) -> String {
+        ingestPendingEvents()
+        let lines = readLogLines(at: try? resolveLogURL())
+        guard maxLines > 0, lines.count > maxLines else {
+            return lines.joined(separator: "\n")
+        }
+        return lines.suffix(maxLines).joined(separator: "\n")
+    }
+
     func appendAppEvent(
         name: String,
         details: [String: String]

@@ -29,6 +29,30 @@
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES"
       shouldAutocreateTestPlan = "YES">
+      <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A63EBF9D2F4CDD9700C9F2E1"
+               BuildableName = "hyperlinkedTests.xctest"
+               BlueprintName = "hyperlinkedTests"
+               ReferencedContainer = "container:hyperlinked.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A63EBFA72F4CDD9700C9F2E1"
+               BuildableName = "hyperlinkedUITests.xctest"
+               BlueprintName = "hyperlinkedUITests"
+               ReferencedContainer = "container:hyperlinked.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+      </Testables>
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
