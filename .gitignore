@@ -4,3 +4,4 @@ dev.db*
 artifacts/
 olddb/
 tools/tailwindcss
+hyperlinked/build
