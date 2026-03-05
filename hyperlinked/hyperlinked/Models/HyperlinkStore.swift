@@ -1,12 +1,32 @@
 import Foundation
 import GRDB
 import GRDBQuery
+import WidgetKit
+
+enum WidgetKind {
+    static let hyperlinks = "HyperlinksWidget"
+}
+
+protocol WidgetTimelineReloading {
+    func reloadHyperlinksWidgetTimeline()
+}
+
+struct WidgetTimelineReloader: WidgetTimelineReloading {
+    func reloadHyperlinksWidgetTimeline() {
+        WidgetCenter.shared.reloadTimelines(ofKind: WidgetKind.hyperlinks)
+    }
+}
 
 final class HyperlinkStore {
     private let dbQueue: DatabaseQueue
+    private let timelineReloader: any WidgetTimelineReloading
 
-    private init(dbQueue: DatabaseQueue) {
+    init(
+        dbQueue: DatabaseQueue,
+        timelineReloader: any WidgetTimelineReloading = WidgetTimelineReloader()
+    ) {
         self.dbQueue = dbQueue
+        self.timelineReloader = timelineReloader
     }
 
     static func openShared() throws -> HyperlinkStore {
@@ -23,6 +43,7 @@ final class HyperlinkStore {
                 try hyperlink.upsert(db)
             }
         }
+        timelineReloader.reloadHyperlinksWidgetTimeline()
     }
 
     func upsert(hyperlink: Hyperlink) throws {
@@ -30,6 +51,10 @@ final class HyperlinkStore {
     }
 
     func apply(updatedBatch: UpdatedHyperlinksBatch) throws {
+        guard !updatedBatch.changes.isEmpty else {
+            return
+        }
+
         try dbQueue.write { db in
             for change in updatedBatch.changes {
                 switch change.changeType {
@@ -43,12 +68,14 @@ final class HyperlinkStore {
                 }
             }
         }
+        timelineReloader.reloadHyperlinksWidgetTimeline()
     }
 
     func clearAll() throws {
         try dbQueue.write { db in
             _ = try Hyperlink.deleteAll(db)
         }
+        timelineReloader.reloadHyperlinksWidgetTimeline()
     }
 }
 

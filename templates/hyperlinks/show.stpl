@@ -44,7 +44,20 @@
         </div>
       </dl>
 
-      <% if let Some(screenshot_path) = self.screenshot_inline_path() { %>
+      <% if let Some(pdf_preview_path) = self.pdf_preview_path() { %>
+        <div
+          class="block overflow-hidden rounded-[0.4rem] border border-form-control-border bg-form-control md:min-h-0 md:flex-1"
+          style="height: min(78vh, 60rem); min-height: 24rem; background: #fff;"
+        >
+          <iframe
+            class="block h-full w-full"
+            src="<%= pdf_preview_path %>"
+            title="PDF preview for <%= self.display_title() %>"
+            loading="lazy"
+            style="background: #fff;"
+          ></iframe>
+        </div>
+      <% } else if let Some(screenshot_path) = self.screenshot_inline_path() { %>
         <a
           href="<%= screenshot_path %>"
           target="_blank"

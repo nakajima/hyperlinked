@@ -7,6 +7,7 @@
 
 import Testing
 import Foundation
+import GRDB
 @testable import hyperlinked
 
 @MainActor
@@ -127,4 +128,123 @@ struct hyperlinkedTests {
         #expect(AppModel.serverCredentialKey(for: url) == "http://example.com:8765")
     }
 
+    @Test
+    func upsertNonEmptyReloadsWidgetTimeline() throws {
+        let (store, reloader) = try makeStoreForWidgetReloadTesting()
+
+        try store.upsert(hyperlinks: [makeHyperlink(id: 1)])
+
+        #expect(reloader.reloadCount == 1)
+    }
+
+    @Test
+    func upsertEmptyDoesNotReloadWidgetTimeline() throws {
+        let (store, reloader) = try makeStoreForWidgetReloadTesting()
+
+        try store.upsert(hyperlinks: [])
+
+        #expect(reloader.reloadCount == 0)
+    }
+
+    @Test
+    func applyNonEmptyBatchReloadsWidgetTimeline() throws {
+        let (store, reloader) = try makeStoreForWidgetReloadTesting()
+        let batch = UpdatedHyperlinksBatch(
+            serverUpdatedAt: "2026-03-05T00:00:00Z",
+            changes: [
+                UpdatedHyperlinkChange(
+                    id: 1,
+                    changeType: .updated,
+                    updatedAt: "2026-03-05T00:00:00Z",
+                    hyperlink: makeHyperlink(id: 1)
+                ),
+            ]
+        )
+
+        try store.apply(updatedBatch: batch)
+
+        #expect(reloader.reloadCount == 1)
+    }
+
+    @Test
+    func applyEmptyBatchDoesNotReloadWidgetTimeline() throws {
+        let (store, reloader) = try makeStoreForWidgetReloadTesting()
+        let batch = UpdatedHyperlinksBatch(
+            serverUpdatedAt: "2026-03-05T00:00:00Z",
+            changes: []
+        )
+
+        try store.apply(updatedBatch: batch)
+
+        #expect(reloader.reloadCount == 0)
+    }
+
+    @Test
+    func clearAllReloadsWidgetTimeline() throws {
+        let (store, reloader) = try makeStoreForWidgetReloadTesting()
+
+        try store.clearAll()
+
+        #expect(reloader.reloadCount == 1)
+    }
+
+    private func makeStoreForWidgetReloadTesting() throws -> (HyperlinkStore, WidgetTimelineReloaderSpy) {
+        let reloader = WidgetTimelineReloaderSpy()
+        let dbQueue = try DatabaseQueue(path: ":memory:")
+        try dbQueue.write { db in
+            try db.create(table: DB.hyperlinkTableName) { t in
+                t.column("id", .integer).primaryKey()
+                t.column("title", .text).notNull()
+                t.column("url", .text).notNull()
+                t.column("raw_url", .text).notNull()
+                t.column("og_description", .text)
+                t.column("is_url_valid", .boolean)
+                t.column("discovery_depth", .integer)
+                t.column("clicks_count", .integer).notNull().defaults(to: 0)
+                t.column("last_clicked_at", .text)
+                t.column("processing_state", .text).notNull().defaults(to: "ready")
+                t.column("created_at", .text).notNull()
+                t.column("updated_at", .text).notNull()
+                t.column("last_shown_in_widget", .text)
+                t.column("thumbnail_url", .text)
+                t.column("thumbnail_dark_url", .text)
+                t.column("screenshot_url", .text)
+                t.column("screenshot_dark_url", .text)
+                t.column("discovered_via_json", .text).notNull().defaults(to: "[]")
+            }
+        }
+        let store = HyperlinkStore(dbQueue: dbQueue, timelineReloader: reloader)
+        return (store, reloader)
+    }
+
+    private func makeHyperlink(id: Int) -> Hyperlink {
+        Hyperlink(
+            id: id,
+            title: "Example \(id)",
+            url: "https://example.com/\(id)",
+            rawURL: "https://example.com/\(id)",
+            ogDescription: "Example description",
+            isURLValid: true,
+            discoveryDepth: 0,
+            clicksCount: 0,
+            lastClickedAt: nil,
+            processingState: "ready",
+            createdAt: "2026-03-05T00:00:00Z",
+            updatedAt: "2026-03-05T00:00:00Z",
+            thumbnailURL: nil,
+            thumbnailDarkURL: nil,
+            screenshotURL: nil,
+            screenshotDarkURL: nil,
+            discoveredVia: []
+        )
+    }
+
+}
+
+private final class WidgetTimelineReloaderSpy: WidgetTimelineReloading {
+    private(set) var reloadCount = 0
+
+    func reloadHyperlinksWidgetTimeline() {
+        reloadCount += 1
+    }
 }

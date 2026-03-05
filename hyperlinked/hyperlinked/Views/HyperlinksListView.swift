@@ -1,7 +1,6 @@
 import SwiftUI
 import UIKit
 import OSLog
-import WidgetKit
 import GRDBQuery
 
 struct HyperlinksListView: View {
@@ -151,7 +150,6 @@ struct HyperlinksListView: View {
             await retryPendingOutboxLoop()
         }
         .refreshable {
-						WidgetCenter.shared.reloadAllTimelines()
             await loadHyperlinks()
             appModel.refreshDiagnostics()
         }

@@ -19,6 +19,8 @@ pub enum HyperlinkArtifactKind {
     SnapshotWarc,
     #[sea_orm(string_value = "pdf_source")]
     PdfSource,
+    #[sea_orm(string_value = "paperless_metadata")]
+    PaperlessMetadata,
     #[sea_orm(string_value = "snapshot_error")]
     SnapshotError,
     #[sea_orm(string_value = "oembed_meta")]

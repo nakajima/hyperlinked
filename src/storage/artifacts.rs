@@ -119,6 +119,7 @@ fn kind_slug(kind: &HyperlinkArtifactKind) -> &'static str {
     match kind {
         HyperlinkArtifactKind::SnapshotWarc => "snapshot_warc",
         HyperlinkArtifactKind::PdfSource => "pdf_source",
+        HyperlinkArtifactKind::PaperlessMetadata => "paperless_metadata",
         HyperlinkArtifactKind::SnapshotError => "snapshot_error",
         HyperlinkArtifactKind::OembedMeta => "oembed_meta",
         HyperlinkArtifactKind::OembedError => "oembed_error",
@@ -140,6 +141,7 @@ fn extension(kind: &HyperlinkArtifactKind) -> &'static str {
     match kind {
         HyperlinkArtifactKind::SnapshotWarc => "warc",
         HyperlinkArtifactKind::PdfSource => "pdf",
+        HyperlinkArtifactKind::PaperlessMetadata => "json",
         HyperlinkArtifactKind::SnapshotError => "json",
         HyperlinkArtifactKind::OembedMeta => "json",
         HyperlinkArtifactKind::OembedError => "json",

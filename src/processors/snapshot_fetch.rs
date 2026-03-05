@@ -128,6 +128,10 @@ impl Processor for SnapshotFetcher {
                     screenshot_error_artifact_id: None,
                 };
 
+                if should_skip_screenshot_capture_for_source(&output.source_artifact_kind) {
+                    return Ok(output);
+                }
+
                 let collection_settings = settings::load(connection)
                     .await
                     .map_err(ProcessingError::DB)?;
@@ -276,6 +280,10 @@ impl Processor for SnapshotFetcher {
             }
         }
     }
+}
+
+fn should_skip_screenshot_capture_for_source(source_kind: &HyperlinkArtifactKind) -> bool {
+    matches!(source_kind, HyperlinkArtifactKind::PdfSource)
 }
 
 enum SnapshotCapture {
@@ -956,10 +964,9 @@ async fn capture_screenshots(
     url: &str,
     collect_dark_variant: bool,
 ) -> Result<ScreenshotCapture, String> {
+    let mut warnings = Vec::new();
     let parsed = Url::parse(url).map_err(|err| format!("invalid screenshot url: {err}"))?;
     ensure_fetchable_url(&parsed).await?;
-
-    let mut warnings = Vec::new();
     let desktop_viewport = screenshot_desktop_viewport();
     let desktop_capture =
         capture_single_screenshot(parsed.as_str(), desktop_viewport, ScreenshotVariant::Light)
@@ -2205,6 +2212,16 @@ mod tests {
         <html><body><article>hello world</article></body></html>
         "#;
         assert!(!looks_like_pdf_viewer_dom(html.as_bytes()));
+    }
+
+    #[test]
+    fn skips_screenshot_capture_for_pdf_sources() {
+        assert!(should_skip_screenshot_capture_for_source(
+            &HyperlinkArtifactKind::PdfSource
+        ));
+        assert!(!should_skip_screenshot_capture_for_source(
+            &HyperlinkArtifactKind::SnapshotWarc
+        ));
     }
 
     #[test]

@@ -62,6 +62,10 @@ pub fn links() -> Router<Context> {
             routing::get(render_latest_artifact_inline),
         )
         .route(
+            "/hyperlinks/{id}/artifacts/pdf_source/preview",
+            routing::get(render_pdf_source_preview),
+        )
+        .route(
             "/hyperlinks/{id}/artifacts/{kind}/delete",
             routing::post(delete_artifact_kind),
         )
@@ -479,6 +483,74 @@ async fn render_latest_artifact_inline(
     State(state): State<Context>,
 ) -> Response {
     serve_latest_artifact(state, id, kind, false).await
+}
+
+async fn render_pdf_source_preview(Path(id): Path<i32>, State(state): State<Context>) -> Response {
+    match hyperlink::Entity::find_by_id(id)
+        .one(&state.connection)
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return hyperlink_not_found(ResponseKind::Text, id),
+        Err(err) => return hyperlink_internal_error(ResponseKind::Text, id, "fetch", err),
+    }
+
+    match crate::model::hyperlink_artifact::latest_for_hyperlink_kind(
+        &state.connection,
+        id,
+        HyperlinkArtifactKind::PdfSource,
+    )
+    .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return response_error(
+                ResponseKind::Text,
+                StatusCode::NOT_FOUND,
+                format!("no pdf_source artifact available for hyperlink {id}"),
+            );
+        }
+        Err(err) => {
+            return hyperlink_internal_error(ResponseKind::Text, id, "load artifact for", err);
+        }
+    }
+
+    let inline_path = artifact_inline_path(id, &HyperlinkArtifactKind::PdfSource);
+    let body = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      html, body {{
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: #fff;
+        color-scheme: light;
+      }}
+      embed {{
+        display: block;
+        width: 100%;
+        height: 100%;
+        background: #fff;
+      }}
+    </style>
+  </head>
+  <body>
+    <embed src="{inline_path}#zoom=page-width" type="application/pdf">
+  </body>
+</html>
+"#,
+    );
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
 }
 
 async fn serve_latest_artifact(
@@ -1357,6 +1429,12 @@ impl<'a> HyperlinksShowTemplate<'a> {
             .then_some(self.artifact_inline_path(&HyperlinkArtifactKind::OgMeta))
     }
 
+    fn pdf_preview_path(&self) -> Option<String> {
+        self.latest_artifacts
+            .contains_key(&HyperlinkArtifactKind::PdfSource)
+            .then_some(artifact_pdf_preview_path(self.link.id))
+    }
+
     fn screenshot_inline_path(&self) -> Option<String> {
         self.latest_artifacts
             .contains_key(&HyperlinkArtifactKind::ScreenshotWebp)
@@ -1696,10 +1774,11 @@ fn word_count(value: &str) -> usize {
     value.split_whitespace().count()
 }
 
-fn show_artifact_kinds() -> [HyperlinkArtifactKind; 14] {
+fn show_artifact_kinds() -> [HyperlinkArtifactKind; 15] {
     [
         HyperlinkArtifactKind::SnapshotWarc,
         HyperlinkArtifactKind::PdfSource,
+        HyperlinkArtifactKind::PaperlessMetadata,
         HyperlinkArtifactKind::SnapshotError,
         HyperlinkArtifactKind::OgMeta,
         HyperlinkArtifactKind::OgImage,
@@ -1786,6 +1865,9 @@ fn artifact_kind_info(
     match kind {
         HyperlinkArtifactKind::SnapshotWarc => ("snapshot_warc", "Snapshot WARC", "warc", false),
         HyperlinkArtifactKind::PdfSource => ("pdf_source", "PDF Source", "pdf", false),
+        HyperlinkArtifactKind::PaperlessMetadata => {
+            ("paperless_metadata", "Paperless Metadata", "json", false)
+        }
         HyperlinkArtifactKind::SnapshotError => ("snapshot_error", "Snapshot Error", "json", true),
         HyperlinkArtifactKind::OembedMeta => ("oembed_meta", "oEmbed Metadata", "json", false),
         HyperlinkArtifactKind::OembedError => ("oembed_error", "oEmbed Error", "json", true),
@@ -1866,6 +1948,10 @@ fn artifact_inline_path(hyperlink_id: i32, kind: &HyperlinkArtifactKind) -> Stri
     )
 }
 
+fn artifact_pdf_preview_path(hyperlink_id: i32) -> String {
+    format!("/hyperlinks/{hyperlink_id}/artifacts/pdf_source/preview")
+}
+
 fn artifact_delete_path(hyperlink_id: i32, kind: &HyperlinkArtifactKind) -> String {
     format!(
         "/hyperlinks/{hyperlink_id}/artifacts/{}/delete",
@@ -1913,7 +1999,9 @@ fn artifact_fetch_job_kind(
         | HyperlinkArtifactKind::ReadableError => {
             Some(hyperlink_processing_job::HyperlinkProcessingJobKind::Readability)
         }
-        HyperlinkArtifactKind::OembedMeta | HyperlinkArtifactKind::OembedError => None,
+        HyperlinkArtifactKind::PaperlessMetadata
+        | HyperlinkArtifactKind::OembedMeta
+        | HyperlinkArtifactKind::OembedError => None,
     }
 }
 
@@ -2666,6 +2754,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn show_renders_pdf_iframe_and_skips_screenshot_preview_for_pdf_sources() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (
+                    1,
+                    'Example paper',
+                    'https://example.com/paper.pdf',
+                    'https://example.com/paper.pdf',
+                    0,
+                    NULL,
+                    '2026-02-22 00:00:00',
+                    '2026-02-22 00:00:00'
+                );
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (1, 1, NULL, 'pdf_source', X'25504446', 'application/pdf', 4, '2026-02-22 00:00:01'),
+                    (2, 1, NULL, 'screenshot_webp', X'00', 'image/webp', 1, '2026-02-22 00:00:02'),
+                    (3, 1, NULL, 'screenshot_dark_webp', X'00', 'image/webp', 1, '2026-02-22 00:00:03');
+            "#,
+        ))
+        .await;
+
+        let show = server.get("/hyperlinks/1").await;
+        show.assert_status_ok();
+        let body = show.text();
+        assert!(body.contains("<iframe"));
+        assert!(body.contains("PDF preview for Example paper"));
+        assert!(body.contains("/hyperlinks/1/artifacts/pdf_source/preview"));
+        assert!(!body.contains("Screenshot for Example paper"));
+    }
+
+    #[tokio::test]
     async fn index_decodes_html_entities_in_link_title_card() {
         let server = new_server_with_seed(Some(
             r#"
@@ -2851,6 +2972,19 @@ mod tests {
         pdf_inline.assert_status_ok();
         pdf_inline.assert_header("content-type", "application/pdf");
         assert_eq!(pdf_inline.text(), "%PDF-1.5\n%");
+
+        let pdf_preview = server
+            .get("/hyperlinks/1/artifacts/pdf_source/preview")
+            .await;
+        pdf_preview.assert_status_ok();
+        pdf_preview.assert_header("content-type", "text/html; charset=utf-8");
+        let pdf_preview_body = pdf_preview.text();
+        assert!(pdf_preview_body.contains("color-scheme: light;"));
+        assert!(
+            pdf_preview_body.contains(
+                "<embed src=\"/hyperlinks/1/artifacts/pdf_source/inline#zoom=page-width\""
+            )
+        );
 
         let warc_download = server.get("/hyperlinks/1/artifacts/snapshot_warc").await;
         warc_download.assert_status_ok();
@@ -3382,6 +3516,34 @@ mod tests {
         let body = html.text();
         assert!(body.contains("ArXiv"));
         assert!(body.contains("PDF</span>"));
+    }
+
+    #[tokio::test]
+    async fn index_uses_dark_thumbnail_artifacts_without_frontend_pdf_filter() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'PDF Link', 'https://arxiv.org/pdf/2602.11988', 'https://arxiv.org/pdf/2602.11988', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00'),
+                    (2, 'HTML Link', 'https://example.com/article', 'https://example.com/article', 0, 0, NULL, '2026-02-19 00:00:01', '2026-02-19 00:00:01');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (10, 1, NULL, 'pdf_source', X'25504446', 'application/pdf', 4, '2026-02-19 00:00:02'),
+                    (11, 1, NULL, 'screenshot_thumb_webp', X'52494646', 'image/webp', 4, '2026-02-19 00:00:03'),
+                    (12, 1, NULL, 'screenshot_thumb_dark_webp', X'52494646', 'image/webp', 4, '2026-02-19 00:00:04'),
+                    (13, 2, NULL, 'screenshot_thumb_webp', X'52494646', 'image/webp', 4, '2026-02-19 00:00:05');
+            "#,
+        ))
+        .await;
+
+        let html = server.get("/hyperlinks").await;
+        html.assert_status_ok();
+        let body = html.text();
+
+        assert!(body.contains("/hyperlinks/1/artifacts/screenshot_thumb_dark_webp/inline"));
+        assert!(body.contains("media=\"(prefers-color-scheme: dark)\""));
+        assert!(!body.contains("pdf-thumbnail-neutral-invert"));
+        assert!(!body.contains("id=\"pdf-neutral-invert\""));
     }
 
     #[tokio::test]
