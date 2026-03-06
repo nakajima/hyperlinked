@@ -189,6 +189,7 @@ fn schema(
 
     builder.register_enumeration::<hyperlink_processing_job::HyperlinkProcessingJobState>();
     builder.register_enumeration::<hyperlink_processing_job::HyperlinkProcessingJobKind>();
+    builder.register_enumeration::<hyperlink::HyperlinkSourceType>();
     builder.register_enumeration::<hyperlink_artifact::HyperlinkArtifactKind>();
 
     builder
@@ -846,6 +847,8 @@ mod tests {
                 processing_queue: None,
                 backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
                 backup_imports: crate::server::admin_import::AdminImportManager::default(),
+                tag_reclassify:
+                    crate::server::admin_tag_reclassify::AdminTagReclassifyManager::default(),
             });
 
         TestServer::new(app).expect("test server should initialize")

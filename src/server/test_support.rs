@@ -17,6 +17,7 @@ const HYPERLINK_TABLE_SQL: &str = r#"
         discovery_depth integer NOT NULL DEFAULT 0,
         clicks_count integer NOT NULL DEFAULT 0,
         last_clicked_at datetime_text NULL,
+        source_type varchar NOT NULL DEFAULT 'unknown',
         created_at datetime_text NOT NULL,
         updated_at datetime_text NOT NULL
     );
@@ -52,6 +53,32 @@ const HYPERLINK_ARTIFACT_TABLE_SQL: &str = r#"
         content_type varchar NOT NULL,
         size_bytes integer NOT NULL,
         created_at datetime_text NOT NULL
+    );
+"#;
+
+#[cfg(test)]
+const TAG_TABLE_SQL: &str = r#"
+    CREATE TABLE tag (
+        id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+        name varchar NOT NULL,
+        name_key varchar NOT NULL,
+        state varchar NOT NULL DEFAULT 'AI_PENDING',
+        created_at datetime_text NOT NULL,
+        updated_at datetime_text NOT NULL,
+        UNIQUE(name_key)
+    );
+"#;
+
+#[cfg(test)]
+const HYPERLINK_TAG_TABLE_SQL: &str = r#"
+    CREATE TABLE hyperlink_tag (
+        id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+        hyperlink_id integer NOT NULL,
+        tag_id integer NOT NULL,
+        source varchar NOT NULL DEFAULT 'AI',
+        created_at datetime_text NOT NULL,
+        updated_at datetime_text NOT NULL,
+        UNIQUE(hyperlink_id, tag_id)
     );
 "#;
 
@@ -221,6 +248,8 @@ pub(crate) async fn initialize_jobs_schema(connection: &DatabaseConnection) {
 pub(crate) async fn initialize_hyperlinks_schema(connection: &DatabaseConnection) {
     initialize_jobs_schema(connection).await;
     execute_sql(connection, HYPERLINK_ARTIFACT_TABLE_SQL).await;
+    execute_sql(connection, TAG_TABLE_SQL).await;
+    execute_sql(connection, HYPERLINK_TAG_TABLE_SQL).await;
     execute_sql(connection, HYPERLINK_RELATION_TABLE_SQL).await;
     execute_sql(connection, HYPERLINK_TOMBSTONE_TABLE_SQL).await;
 }

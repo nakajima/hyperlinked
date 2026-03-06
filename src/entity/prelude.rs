@@ -4,4 +4,6 @@ pub use super::hyperlink::Entity as Hyperlink;
 pub use super::hyperlink_artifact::Entity as HyperlinkArtifact;
 pub use super::hyperlink_processing_job::Entity as HyperlinkProcessingJob;
 pub use super::hyperlink_relation::Entity as HyperlinkRelation;
+pub use super::hyperlink_tag::Entity as HyperlinkTag;
 pub use super::hyperlink_tombstone::Entity as HyperlinkTombstone;
+pub use super::tag::Entity as Tag;

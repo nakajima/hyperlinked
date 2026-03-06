@@ -2,6 +2,17 @@
 
 use sea_orm::entity::prelude::*;
 
+#[derive(Debug, Clone, PartialEq, Eq, EnumIter, DeriveActiveEnum)]
+#[sea_orm(rs_type = "String", db_type = "String(StringLen::N(16))")]
+pub enum HyperlinkSourceType {
+    #[sea_orm(string_value = "unknown")]
+    Unknown,
+    #[sea_orm(string_value = "html")]
+    Html,
+    #[sea_orm(string_value = "pdf")]
+    Pdf,
+}
+
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
 #[sea_orm(table_name = "hyperlink")]
 pub struct Model {
@@ -19,6 +30,7 @@ pub struct Model {
     pub discovery_depth: i32,
     pub clicks_count: i32,
     pub last_clicked_at: Option<DateTime>,
+    pub source_type: HyperlinkSourceType,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }

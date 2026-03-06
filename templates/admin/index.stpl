@@ -95,7 +95,7 @@
     <p class="text-sm text-tertiary">
       Configure OpenAI-compatible tag classification. API key is optional for local/custom endpoints.
     </p>
-    <form action="/admin/tagging-settings" method="post" class="flex flex-col gap-3 text-sm">
+    <form action="/admin/tagging-settings" method="post" class="flex flex-col gap-3 text-sm" data-tagging-settings-form>
       <label class="flex items-start gap-2">
         <input type="checkbox" name="tagging_enabled" value="1"<% if self.tagging_settings.enabled { %> checked<% } %> class="mt-0.5 h-4 w-4 shrink-0 rounded border border-form-control-border bg-form-control accent-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
         <span>Enable automatic tag classification jobs</span>
@@ -103,28 +103,31 @@
 
       <label class="flex flex-col gap-1">
         <span>Base URL</span>
-        <input type="text" name="base_url" value="<%= self.tagging_settings.base_url %>" class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+        <input type="text" name="base_url" value="<%= self.tagging_settings.base_url %>" data-tagging-base-url class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
       </label>
 
       <label class="flex flex-col gap-1">
         <span>Model</span>
-        <input type="text" name="model" value="<%= self.tagging_settings.model %>" class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+        <select name="model" data-tagging-model-select class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30">
+          <option value="<%= self.tagging_settings.model %>"><%= self.tagging_settings.model %></option>
+        </select>
+        <span class="text-sm text-tertiary" data-tagging-model-status>Model options load from the configured endpoint.</span>
       </label>
 
       <label class="flex flex-col gap-1">
         <span>API key (optional)</span>
-        <input type="password" name="api_key" value="" autocomplete="off" class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+        <input type="password" name="api_key" value="" autocomplete="off" data-tagging-api-key class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
         <span class="text-sm text-tertiary">Leave blank to keep existing key.</span>
       </label>
 
       <label class="flex flex-col gap-1">
         <span>Auth header name (optional)</span>
-        <input type="text" name="auth_header_name" value="<%= self.tagging_settings.auth_header_name.as_deref().unwrap_or("") %>" class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+        <input type="text" name="auth_header_name" value="<%= self.tagging_settings.auth_header_name.as_deref().unwrap_or("") %>" data-tagging-auth-header-name class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
       </label>
 
       <label class="flex flex-col gap-1">
         <span>Auth header prefix (optional)</span>
-        <input type="text" name="auth_header_prefix" value="<%= self.tagging_settings.auth_header_prefix.as_deref().unwrap_or("") %>" class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+        <input type="text" name="auth_header_prefix" value="<%= self.tagging_settings.auth_header_prefix.as_deref().unwrap_or("") %>" data-tagging-auth-header-prefix class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
       </label>
 
       <label class="flex flex-col gap-1">
@@ -136,6 +139,39 @@
         <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Save tag settings</button>
       </div>
     </form>
+  </section>
+
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3" data-admin-tag-reclassify>
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Reclassify tags</h3>
+    <p class="text-sm text-tertiary">Run an AI pass across every link and collect pending tag suggestions.</p>
+    <div class="flex flex-row flex-wrap items-center gap-[0.4rem]">
+      <button type="button" data-admin-tag-reclassify-start class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Reclassify all links</button>
+      <button type="button" data-admin-tag-reclassify-cancel class="hidden min-h-10 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65" disabled>Cancel reclassify</button>
+    </div>
+    <p class="text-sm text-tertiary" data-admin-tag-reclassify-status aria-live="polite">Reclassify is idle.</p>
+    <p class="text-sm text-tertiary hidden" data-admin-tag-reclassify-progress aria-live="polite"></p>
+  </section>
+
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3" data-admin-pending-tags>
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Pending discovered tags</h3>
+    <p class="text-sm text-tertiary">Select tags to approve. Approved tags are added to vocabulary.</p>
+    <% if self.pending_tags.is_empty() { %>
+      <p class="text-sm text-tertiary">No pending tags.</p>
+    <% } else { %>
+      <form action="/admin/tags/approve" method="post" class="flex flex-col gap-2">
+        <div class="flex flex-col gap-1">
+          <% for pending in self.pending_tags { %>
+            <label class="flex items-start gap-2 text-sm">
+              <input type="checkbox" name="tag_ids" value="<%= pending.id %>" class="mt-0.5 h-4 w-4 shrink-0 rounded border border-form-control-border bg-form-control accent-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+              <span><%= pending.name %> (<%= pending.hyperlink_count %> links)</span>
+            </label>
+          <% } %>
+        </div>
+        <div>
+          <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Approve selected tags</button>
+        </div>
+      </form>
+    <% } %>
   </section>
 
   <% if self.chromium.has_missing_binary() { %>

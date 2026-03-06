@@ -431,21 +431,7 @@ fn build_hyperlink_sql_parts(
         ScopeSelection::All => {}
     }
 
-    let latest_source_kind_expr = "(SELECT a.kind
-          FROM hyperlink_artifact a
-          WHERE a.hyperlink_id = h.id
-            AND a.kind IN ('pdf_source', 'snapshot_warc')
-          ORDER BY a.created_at DESC, a.id DESC
-          LIMIT 1)";
-    let url_looks_pdf_expr = url_looks_pdf_sql_expr("h.url");
-    let is_pdf_expr = format!(
-        "(CASE
-            WHEN ({latest_source_kind_expr}) = 'pdf_source' THEN 1
-            WHEN ({latest_source_kind_expr}) = 'snapshot_warc' THEN 0
-            WHEN {url_looks_pdf_expr} THEN 1
-            ELSE 0
-          END) = 1"
-    );
+    let is_pdf_expr = "h.source_type = 'pdf'";
     match parsed_query.effective_type() {
         TypeSelection::All => {}
         TypeSelection::PdfOnly => filters.push(is_pdf_expr.to_string()),
@@ -549,12 +535,6 @@ fn build_title_url_fallback_sql(search_terms: &[SearchTerm], values: &mut Vec<Va
         }
     }
     term_sql.join(" AND ")
-}
-
-fn url_looks_pdf_sql_expr(column: &str) -> String {
-    format!(
-        "(lower({column}) LIKE '%.pdf' OR lower({column}) LIKE '%.pdf?%' OR lower({column}) LIKE '%.pdf#%')"
-    )
 }
 
 fn build_exact_word_match_sql(column_sql: &str, value: &str, values: &mut Vec<Value>) -> String {

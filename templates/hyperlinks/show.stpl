@@ -44,27 +44,33 @@
         </div>
       </dl>
 
-      <section class="flex flex-col gap-2 text-sm">
-        <h4 class="text-base font-semibold leading-6">Tags</h4>
-        <% if self.ranked_tags().is_empty() { %>
-          <p class="text-sm text-tertiary">No tags yet.</p>
-        <% } else { %>
-          <ul class="flex flex-row flex-wrap gap-2">
-            <% for ranked in self.ranked_tags() { %>
-              <li><%= ranked.tag %> (<%= format!("{:.2}", ranked.confidence) %>)</li>
-            <% } %>
-          </ul>
-        <% } %>
-        <form action="/hyperlinks/<%= self.link.id %>/tags" method="post" class="flex flex-col gap-2">
-          <label class="flex flex-col gap-1">
-            <span>Manual tags (comma or newline separated)</span>
-            <textarea name="tags" rows="3" class="w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"><%= self.manual_tags_input_value() %></textarea>
-          </label>
-          <p class="text-sm text-tertiary">Allowed tags: <%= self.tagging_vocabulary_hint() %></p>
-          <div>
-            <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Save manual tags</button>
-          </div>
-        </form>
+      <section class="flex flex-col gap-4">
+        <hr class="h-px border-0 bg-tertiary" />
+        <section class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
+          <h4 class="text-base font-semibold leading-6 text-subdued">Actions</h4>
+          <nav class="flex flex-row flex-wrap gap-2 overflow-x-visible whitespace-normal sm:gap-4" aria-label="Link actions">
+            <a class="text-accent no-underline hover:text-accent/80" href="/hyperlinks/<%= self.link.id %>/edit">Edit</a>
+            <form action="/hyperlinks/<%= self.link.id %>/reprocess" method="post" class="inline">
+              <button class="inline min-h-0 border-0 bg-transparent p-0 text-accent hover:text-accent/80" type="submit">Reprocess</button>
+            </form>
+            <form action="/hyperlinks/<%= self.link.id %>/delete" method="post" data-confirm="Delete this link?" class="inline">
+              <button class="inline min-h-0 border-0 bg-transparent p-0 text-accent hover:text-accent/80" type="submit">Delete</button>
+            </form>
+          </nav>
+        </section>
+        <hr class="h-px border-0 bg-tertiary" />
+        <div class="grid items-start gap-5">
+          <section class="flex flex-col gap-[0.4rem]">
+            <h4 class="text-lg font-semibold leading-7 tracking-tight">Artifacts</h4>
+            <% let present_kinds = self.present_artifact_kinds(); %>
+            <% let missing_kinds = self.missing_artifact_kinds(); %>
+            <% include!("_artifacts_table.stpl"); %>
+          </section>
+          <section class="flex flex-col gap-[0.4rem]">
+            <h4 class="text-lg font-semibold leading-7 tracking-tight">Recent jobs</h4>
+            <% include!("_timeline_table.stpl"); %>
+          </section>
+        </div>
       </section>
 
       <% if let Some(pdf_preview_path) = self.pdf_preview_path() { %>
@@ -173,32 +179,26 @@
     <% } %>
   </section>
 
-  <section class="flex flex-col gap-4">
-    <hr class="h-px border-0 bg-tertiary" />
-    <section class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-4">
-      <h4 class="text-base font-semibold leading-6 text-subdued">Actions</h4>
-      <nav class="flex flex-row flex-wrap gap-2 overflow-x-visible whitespace-normal sm:gap-4" aria-label="Link actions">
-        <a class="text-accent no-underline hover:text-accent/80" href="/hyperlinks/<%= self.link.id %>/edit">Edit</a>
-        <form action="/hyperlinks/<%= self.link.id %>/reprocess" method="post" class="inline">
-          <button class="inline min-h-0 border-0 bg-transparent p-0 text-accent hover:text-accent/80" type="submit">Reprocess</button>
-        </form>
-        <form action="/hyperlinks/<%= self.link.id %>/delete" method="post" data-confirm="Delete this link?" class="inline">
-          <button class="inline min-h-0 border-0 bg-transparent p-0 text-accent hover:text-accent/80" type="submit">Delete</button>
-        </form>
-      </nav>
-    </section>
-    <hr class="h-px border-0 bg-tertiary" />
-    <div class="grid items-start gap-5">
-      <section class="flex flex-col gap-[0.4rem]">
-        <h4 class="text-lg font-semibold leading-7 tracking-tight">Artifacts</h4>
-        <% let present_kinds = self.present_artifact_kinds(); %>
-        <% let missing_kinds = self.missing_artifact_kinds(); %>
-        <% include!("_artifacts_table.stpl"); %>
-      </section>
-      <section class="flex flex-col gap-[0.4rem]">
-        <h4 class="text-lg font-semibold leading-7 tracking-tight">Recent jobs</h4>
-        <% include!("_timeline_table.stpl"); %>
-      </section>
-    </div>
+  <section class="flex flex-col gap-2 text-sm">
+    <h4 class="text-base font-semibold leading-6">Tags</h4>
+    <% if self.visible_tags().is_empty() { %>
+      <p class="text-sm text-tertiary">No tags yet.</p>
+    <% } else { %>
+      <ul class="flex flex-row flex-wrap gap-2">
+        <% for tag in self.visible_tags() { %>
+          <li><%= tag %></li>
+        <% } %>
+      </ul>
+    <% } %>
+    <form action="/hyperlinks/<%= self.link.id %>/tags" method="post" class="flex flex-col gap-2">
+      <label class="flex flex-col gap-1">
+        <span>Manual tags (comma or newline separated)</span>
+        <textarea name="tags" rows="3" class="w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"><%= self.manual_tags_input_value() %></textarea>
+      </label>
+      <p class="text-sm text-tertiary">Allowed tags: <%= self.tagging_vocabulary_hint() %></p>
+      <div>
+        <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Save manual tags</button>
+      </div>
+    </form>
   </section>
 </section>

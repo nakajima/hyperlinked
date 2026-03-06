@@ -20,7 +20,10 @@ use tokio::{net::lookup_host, process::Command, time::sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::{
-    entity::{hyperlink, hyperlink_artifact::HyperlinkArtifactKind},
+    entity::{
+        hyperlink::{self, HyperlinkSourceType},
+        hyperlink_artifact::HyperlinkArtifactKind,
+    },
     model::{hyperlink_artifact, settings},
     processors::processor::{ProcessingError, Processor},
     server::font_diagnostics::{self, ScreenshotFontDiagnostics},
@@ -34,6 +37,7 @@ const MAX_TOTAL_CSS_BYTES: usize = 20 * 1024 * 1024;
 const SNAPSHOT_CONTENT_TYPE: &str = hyperlink_artifact::SNAPSHOT_WARC_GZIP_CONTENT_TYPE;
 const SNAPSHOT_ERROR_CONTENT_TYPE: &str = "application/json";
 const PDF_SOURCE_DEFAULT_CONTENT_TYPE: &str = "application/pdf";
+const PDF_SIGNATURE: &[u8] = b"%PDF-";
 const SCREENSHOT_CONTENT_TYPE: &str = "image/webp";
 const SCREENSHOT_ERROR_CONTENT_TYPE: &str = "application/json";
 const SCREENSHOT_WEBP_QUALITY: f32 = 85.0;
@@ -59,6 +63,10 @@ const DEFAULT_SCREENSHOT_THUMB_SIZE: u32 = 400;
 const DEFAULT_SCREENSHOT_RENDER_WAIT_MS: u64 = 5000;
 const DEFAULT_SCREENSHOT_MIN_PAGE_HEIGHT: u32 = 720;
 const DEFAULT_SCREENSHOT_MAX_PAGE_HEIGHT: u32 = 12_000;
+const DEFAULT_SCREENSHOT_EXACT_HEIGHT_ATTEMPTS: u64 = 3;
+const DEFAULT_SCREENSHOT_FIXED_VIEWPORT_ATTEMPTS: u64 = 2;
+const DEFAULT_SCREENSHOT_RETRY_BASE_BACKOFF_MS: u64 = 200;
+const DEFAULT_SCREENSHOT_RETRY_JITTER_MAX_MS: u64 = 125;
 const CDP_CAPTURE_RELAYOUT_WAIT_MS: u64 = 120;
 const CDP_STARTUP_POLL_INTERVAL_MS: u64 = 75;
 
@@ -92,6 +100,80 @@ impl Processor for SnapshotFetcher {
     ) -> Result<Self::Output, super::processor::ProcessingError> {
         let hyperlink_id = *hyperlink.id.as_ref();
         let source_url = hyperlink.url.as_ref().to_string();
+        let collection_settings = settings::load(connection)
+            .await
+            .map_err(ProcessingError::DB)?;
+
+        if hyperlink_source_type(hyperlink) == HyperlinkSourceType::Pdf {
+            if let Some(source_artifact) = hyperlink_artifact::latest_for_hyperlink_kind(
+                connection,
+                hyperlink_id,
+                HyperlinkArtifactKind::PdfSource,
+            )
+            .await
+            .map_err(ProcessingError::DB)?
+            {
+                let mut output = SnapshotFetchOutput {
+                    source_artifact_id: source_artifact.id,
+                    source_artifact_kind: HyperlinkArtifactKind::PdfSource,
+                    screenshot_artifact_id: None,
+                    screenshot_dark_artifact_id: None,
+                    screenshot_thumb_artifact_id: None,
+                    screenshot_thumb_dark_artifact_id: None,
+                    screenshot_error_artifact_id: None,
+                };
+
+                if collection_settings.collect_screenshots {
+                    let pdf_payload = hyperlink_artifact::load_payload(&source_artifact)
+                        .await
+                        .map_err(ProcessingError::DB)?;
+                    match build_pdf_thumbnail_from_source(&pdf_payload, screenshot_thumbnail_size())
+                    {
+                        Ok(thumbnail_webp) => {
+                            let thumbnail_artifact = hyperlink_artifact::insert(
+                                connection,
+                                hyperlink_id,
+                                Some(self.job_id),
+                                HyperlinkArtifactKind::ScreenshotThumbWebp,
+                                thumbnail_webp,
+                                SCREENSHOT_CONTENT_TYPE,
+                            )
+                            .await
+                            .map_err(ProcessingError::DB)?;
+                            output.screenshot_thumb_artifact_id = Some(thumbnail_artifact.id);
+                        }
+                        Err(error) => {
+                            let payload = encode_screenshot_failure_payload(
+                                &source_url,
+                                vec![format!("failed to render pdf thumbnail: {error}")],
+                                None,
+                                "error",
+                            );
+                            let error_artifact = hyperlink_artifact::insert(
+                                connection,
+                                hyperlink_id,
+                                Some(self.job_id),
+                                HyperlinkArtifactKind::ScreenshotError,
+                                payload,
+                                SCREENSHOT_ERROR_CONTENT_TYPE,
+                            )
+                            .await
+                            .map_err(ProcessingError::DB)?;
+                            output.screenshot_error_artifact_id = Some(error_artifact.id);
+                        }
+                    }
+                }
+
+                hyperlink.source_type = sea_orm::ActiveValue::Set(HyperlinkSourceType::Pdf);
+                return Ok(output);
+            }
+
+            if !is_absolute_http_or_https_url(&source_url) {
+                return Err(ProcessingError::FetchError(
+                    "pdf_source artifact is missing and hyperlink URL is not an absolute http/https URL; fetch PDF Source first.".to_string(),
+                ));
+            }
+        }
 
         match capture_snapshot(hyperlink.url.as_ref()).await {
             Ok(capture) => {
@@ -116,6 +198,12 @@ impl Processor for SnapshotFetcher {
                     }
                 };
 
+                hyperlink.source_type = sea_orm::ActiveValue::Set(match kind {
+                    HyperlinkArtifactKind::PdfSource => HyperlinkSourceType::Pdf,
+                    HyperlinkArtifactKind::SnapshotWarc => HyperlinkSourceType::Html,
+                    _ => HyperlinkSourceType::Unknown,
+                });
+
                 let source_artifact = hyperlink_artifact::insert(
                     connection,
                     hyperlink_id,
@@ -137,16 +225,11 @@ impl Processor for SnapshotFetcher {
                     screenshot_error_artifact_id: None,
                 };
 
-                let collection_settings = settings::load(connection)
-                    .await
-                    .map_err(ProcessingError::DB)?;
                 if !collection_settings.collect_screenshots {
                     return Ok(output);
                 }
 
-                if should_skip_screenshot_capture_for_source(&output.source_artifact_kind)
-                    || source_url_looks_like_pdf(&source_url)
-                {
+                if should_skip_screenshot_capture_for_source(&output.source_artifact_kind) {
                     if let Some(pdf_payload) = pdf_source_payload_for_thumbnail.as_deref() {
                         match build_pdf_thumbnail_from_source(
                             pdf_payload,
@@ -166,23 +249,12 @@ impl Processor for SnapshotFetcher {
                                 output.screenshot_thumb_artifact_id = Some(thumbnail_artifact.id);
                             }
                             Err(error) => {
-                                let font_diagnostics = current_screenshot_font_diagnostics();
-                                let payload = serde_json::to_vec_pretty(&ScreenshotFailureArtifact {
-                                    source_url: source_url.clone(),
-                                    failed_at: now_utc().to_string(),
-                                    errors: vec![format!(
-                                        "failed to render pdf thumbnail: {error}"
-                                    )],
-                                    chromium_path: screenshot_chromium_path(),
-                                    timeout_secs: screenshot_timeout().as_secs(),
-                                    font_diagnostics,
-                                })
-                                .unwrap_or_else(|encode_error| {
-                                    format!(
-                                        "{{\"error\":\"failed to encode screenshot error payload: {encode_error}\"}}"
-                                    )
-                                    .into_bytes()
-                                });
+                                let payload = encode_screenshot_failure_payload(
+                                    &source_url,
+                                    vec![format!("failed to render pdf thumbnail: {error}")],
+                                    None,
+                                    "error",
+                                );
                                 let error_artifact = hyperlink_artifact::insert(
                                     connection,
                                     hyperlink_id,
@@ -204,19 +276,27 @@ impl Processor for SnapshotFetcher {
                     .await
                 {
                     Ok(capture) => {
+                        let ScreenshotCapture {
+                            desktop_webp,
+                            desktop_dark_webp,
+                            thumbnail_webp,
+                            thumbnail_dark_webp,
+                            warnings,
+                            attempts,
+                        } = capture;
                         let screenshot_artifact = hyperlink_artifact::insert(
                             connection,
                             hyperlink_id,
                             Some(self.job_id),
                             HyperlinkArtifactKind::ScreenshotWebp,
-                            capture.desktop_webp,
+                            desktop_webp,
                             SCREENSHOT_CONTENT_TYPE,
                         )
                         .await
                         .map_err(ProcessingError::DB)?;
                         output.screenshot_artifact_id = Some(screenshot_artifact.id);
 
-                        if let Some(dark_webp) = capture.desktop_dark_webp {
+                        if let Some(dark_webp) = desktop_dark_webp {
                             let dark_artifact = hyperlink_artifact::insert(
                                 connection,
                                 hyperlink_id,
@@ -235,14 +315,14 @@ impl Processor for SnapshotFetcher {
                             hyperlink_id,
                             Some(self.job_id),
                             HyperlinkArtifactKind::ScreenshotThumbWebp,
-                            capture.thumbnail_webp,
+                            thumbnail_webp,
                             SCREENSHOT_CONTENT_TYPE,
                         )
                         .await
                         .map_err(ProcessingError::DB)?;
                         output.screenshot_thumb_artifact_id = Some(thumbnail_artifact.id);
 
-                        if let Some(dark_thumbnail_webp) = capture.thumbnail_dark_webp {
+                        if let Some(dark_thumbnail_webp) = thumbnail_dark_webp {
                             let dark_thumbnail_artifact = hyperlink_artifact::insert(
                                 connection,
                                 hyperlink_id,
@@ -257,22 +337,14 @@ impl Processor for SnapshotFetcher {
                                 Some(dark_thumbnail_artifact.id);
                         }
 
-                        if !capture.warnings.is_empty() {
-                            let font_diagnostics = current_screenshot_font_diagnostics();
-                            let payload = serde_json::to_vec_pretty(&ScreenshotFailureArtifact {
-                                source_url: source_url.clone(),
-                                failed_at: now_utc().to_string(),
-                                errors: capture.warnings,
-                                chromium_path: screenshot_chromium_path(),
-                                timeout_secs: screenshot_timeout().as_secs(),
-                                font_diagnostics,
-                            })
-                            .unwrap_or_else(|encode_error| {
-                                format!(
-                                    "{{\"error\":\"failed to encode screenshot warning payload: {encode_error}\"}}"
-                                )
-                                .into_bytes()
-                            });
+                        if !warnings.is_empty() {
+                            let attempts = (!attempts.is_empty()).then_some(attempts);
+                            let payload = encode_screenshot_failure_payload(
+                                &source_url,
+                                warnings,
+                                attempts,
+                                "warning",
+                            );
                             let warning_artifact = hyperlink_artifact::insert(
                                 connection,
                                 hyperlink_id,
@@ -287,21 +359,13 @@ impl Processor for SnapshotFetcher {
                         }
                     }
                     Err(error) => {
-                        let font_diagnostics = current_screenshot_font_diagnostics();
-                        let payload = serde_json::to_vec_pretty(&ScreenshotFailureArtifact {
-                            source_url: source_url.clone(),
-                            failed_at: now_utc().to_string(),
-                            errors: vec![error],
-                            chromium_path: screenshot_chromium_path(),
-                            timeout_secs: screenshot_timeout().as_secs(),
-                            font_diagnostics,
-                        })
-                        .unwrap_or_else(|encode_error| {
-                            format!(
-                                "{{\"error\":\"failed to encode screenshot error payload: {encode_error}\"}}"
-                            )
-                            .into_bytes()
-                        });
+                        let attempts = (!error.attempts.is_empty()).then_some(error.attempts);
+                        let payload = encode_screenshot_failure_payload(
+                            &source_url,
+                            vec![error.message],
+                            attempts,
+                            "error",
+                        );
 
                         let error_artifact = hyperlink_artifact::insert(
                             connection,
@@ -347,10 +411,17 @@ fn should_skip_screenshot_capture_for_source(source_kind: &HyperlinkArtifactKind
     matches!(source_kind, HyperlinkArtifactKind::PdfSource)
 }
 
-fn source_url_looks_like_pdf(url: &str) -> bool {
-    Url::parse(url)
+fn hyperlink_source_type(hyperlink: &hyperlink::ActiveModel) -> HyperlinkSourceType {
+    match &hyperlink.source_type {
+        sea_orm::ActiveValue::Set(value) | sea_orm::ActiveValue::Unchanged(value) => value.clone(),
+        sea_orm::ActiveValue::NotSet => HyperlinkSourceType::Unknown,
+    }
+}
+
+fn is_absolute_http_or_https_url(value: &str) -> bool {
+    Url::parse(value)
         .ok()
-        .is_some_and(|parsed| path_looks_like_pdf(parsed.path()))
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
 }
 
 enum SnapshotCapture {
@@ -374,12 +445,35 @@ struct ScreenshotCapture {
     thumbnail_webp: Vec<u8>,
     thumbnail_dark_webp: Option<Vec<u8>>,
     warnings: Vec<String>,
+    attempts: Vec<ScreenshotCaptureAttempt>,
 }
 
 #[derive(Debug)]
 struct SingleScreenshotCapture {
     bytes: Vec<u8>,
     warning: Option<String>,
+    attempts: Vec<ScreenshotCaptureAttempt>,
+}
+
+#[derive(Debug)]
+struct ScreenshotCaptureFailure {
+    message: String,
+    attempts: Vec<ScreenshotCaptureAttempt>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ScreenshotCaptureStage {
+    ExactHeight,
+    FixedViewport,
+}
+
+#[derive(Clone, Debug, Serialize, Eq, PartialEq)]
+struct ScreenshotCaptureAttempt {
+    attempt: usize,
+    stage: ScreenshotCaptureStage,
+    error: String,
+    retryable: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -576,6 +670,8 @@ struct ScreenshotFailureArtifact {
     chromium_path: String,
     timeout_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    attempts: Option<Vec<ScreenshotCaptureAttempt>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     font_diagnostics: Option<ScreenshotFontDiagnostics>,
 }
 
@@ -693,7 +789,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
     {
         Ok(response) => response,
         Err(failure) => {
-            if snapshot_content_use_chromium() && !path_looks_like_pdf(parsed.path()) {
+            if snapshot_content_use_chromium() {
                 return match capture_html_with_chromium_response(parsed.clone(), deadline).await {
                     Ok(chromium_response) => {
                         capture_snapshot_from_html_response(
@@ -729,7 +825,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
 
     let source_kind = classify_source_kind(
         source_response.content_type.as_deref(),
-        source_response.url.path(),
+        &source_response.body,
     );
     if matches!(source_kind, SnapshotSourceKind::Pdf) {
         return Ok(SnapshotCapture::Pdf {
@@ -748,7 +844,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
         ));
     }
 
-    if snapshot_content_use_chromium() && !path_looks_like_pdf(parsed.path()) {
+    if snapshot_content_use_chromium() {
         match capture_html_with_chromium_response(parsed.clone(), deadline).await {
             Ok(chromium_response) => {
                 if looks_like_pdf_viewer_dom(&chromium_response.body) {
@@ -1030,19 +1126,41 @@ async fn capture_html_with_chromium_response(
 async fn capture_screenshots(
     url: &str,
     collect_dark_variant: bool,
-) -> Result<ScreenshotCapture, String> {
+) -> Result<ScreenshotCapture, ScreenshotCaptureFailure> {
     let mut warnings = Vec::new();
-    let parsed = Url::parse(url).map_err(|err| format!("invalid screenshot url: {err}"))?;
-    ensure_fetchable_url(&parsed).await?;
+    let mut attempts = Vec::new();
+    let parsed = Url::parse(url).map_err(|err| ScreenshotCaptureFailure {
+        message: format!("invalid screenshot url: {err}"),
+        attempts: Vec::new(),
+    })?;
+    ensure_fetchable_url(&parsed)
+        .await
+        .map_err(|message| ScreenshotCaptureFailure {
+            message,
+            attempts: Vec::new(),
+        })?;
     let desktop_viewport = screenshot_desktop_viewport();
     let desktop_capture =
         capture_single_screenshot(parsed.as_str(), desktop_viewport, ScreenshotVariant::Light)
             .await?;
-    if let Some(warning) = desktop_capture.warning {
+    let SingleScreenshotCapture {
+        bytes: desktop_webp,
+        warning: desktop_warning,
+        attempts: desktop_attempts,
+    } = desktop_capture;
+    attempts.extend(desktop_attempts);
+    if let Some(warning) = desktop_warning {
         warnings.push(format!("light screenshot fallback: {warning}"));
     }
-    let desktop_webp = desktop_capture.bytes;
-    let thumbnail_webp = build_square_thumbnail(&desktop_webp, screenshot_thumbnail_size())?;
+    let thumbnail_webp = match build_square_thumbnail(&desktop_webp, screenshot_thumbnail_size()) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Err(ScreenshotCaptureFailure {
+                message: error,
+                attempts,
+            });
+        }
+    };
 
     let (desktop_dark_webp, thumbnail_dark_webp) = if collect_dark_variant
         && screenshot_dark_mode_enabled()
@@ -1051,10 +1169,15 @@ async fn capture_screenshots(
             .await
         {
             Ok(capture) => {
-                if let Some(warning) = capture.warning {
+                let SingleScreenshotCapture {
+                    bytes,
+                    warning,
+                    attempts: dark_attempts,
+                } = capture;
+                attempts.extend(dark_attempts);
+                if let Some(warning) = warning {
                     warnings.push(format!("dark screenshot fallback: {warning}"));
                 }
-                let bytes = capture.bytes;
                 let thumbnail = match build_square_thumbnail(&bytes, screenshot_thumbnail_size()) {
                     Ok(thumbnail) => Some(thumbnail),
                     Err(error) => {
@@ -1065,7 +1188,8 @@ async fn capture_screenshots(
                 (Some(bytes), thumbnail)
             }
             Err(error) => {
-                warnings.push(format!("dark screenshot failed: {error}"));
+                warnings.push(format!("dark screenshot failed: {}", error.message));
+                attempts.extend(error.attempts);
                 (None, None)
             }
         }
@@ -1079,6 +1203,7 @@ async fn capture_screenshots(
         thumbnail_webp,
         thumbnail_dark_webp,
         warnings,
+        attempts,
     })
 }
 
@@ -1086,43 +1211,132 @@ async fn capture_single_screenshot(
     url: &str,
     viewport: Viewport,
     variant: ScreenshotVariant,
-) -> Result<SingleScreenshotCapture, String> {
+) -> Result<SingleScreenshotCapture, ScreenshotCaptureFailure> {
     if !screenshot_exact_height_enabled() {
-        return capture_single_screenshot_fixed_viewport(url, viewport, variant)
-            .await
-            .map(|bytes| SingleScreenshotCapture {
-                bytes,
-                warning: None,
-            });
+        return capture_single_screenshot_fixed_viewport_with_retries(url, viewport, variant).await;
     }
 
-    match capture_single_screenshot_exact_height(url, viewport, variant).await {
-        Ok(bytes) => Ok(SingleScreenshotCapture {
-            bytes,
-            warning: None,
-        }),
-        Err(exact_error) => resolve_exact_height_capture_result(
-            exact_error,
-            capture_single_screenshot_fixed_viewport(url, viewport, variant).await,
-        ),
+    match capture_single_screenshot_exact_height_with_retries(url, viewport, variant).await {
+        Ok(capture) => Ok(capture),
+        Err(exact_error) => {
+            let exact_message = exact_error.message;
+            let mut attempts = exact_error.attempts;
+            match capture_single_screenshot_fixed_viewport_with_retries(url, viewport, variant)
+                .await
+            {
+                Ok(fallback_capture) => {
+                    attempts.extend(fallback_capture.attempts);
+                    Ok(SingleScreenshotCapture {
+                        bytes: fallback_capture.bytes,
+                        warning: Some(format!(
+                            "exact-height capture failed and fixed-viewport fallback was used: {exact_message}"
+                        )),
+                        attempts,
+                    })
+                }
+                Err(fallback_error) => {
+                    attempts.extend(fallback_error.attempts);
+                    Err(ScreenshotCaptureFailure {
+                        message: format!(
+                            "exact-height screenshot capture failed: {exact_message}; fixed-viewport fallback failed: {}",
+                            fallback_error.message
+                        ),
+                        attempts,
+                    })
+                }
+            }
+        }
     }
 }
 
-fn resolve_exact_height_capture_result(
-    exact_error: String,
-    fallback_result: Result<Vec<u8>, String>,
-) -> Result<SingleScreenshotCapture, String> {
-    match fallback_result {
-        Ok(bytes) => Ok(SingleScreenshotCapture {
-            bytes,
-            warning: Some(format!(
-                "exact-height capture failed and fixed-viewport fallback was used: {exact_error}"
-            )),
-        }),
-        Err(fallback_error) => Err(format!(
-            "exact-height screenshot capture failed: {exact_error}; fixed-viewport fallback failed: {fallback_error}"
-        )),
+async fn capture_single_screenshot_exact_height_with_retries(
+    url: &str,
+    viewport: Viewport,
+    variant: ScreenshotVariant,
+) -> Result<SingleScreenshotCapture, ScreenshotCaptureFailure> {
+    let max_attempts = screenshot_exact_height_attempts();
+    let mut attempts = Vec::new();
+
+    for attempt in 1..=max_attempts {
+        match capture_single_screenshot_exact_height(url, viewport, variant).await {
+            Ok(bytes) => {
+                return Ok(SingleScreenshotCapture {
+                    bytes,
+                    warning: None,
+                    attempts,
+                });
+            }
+            Err(error) => {
+                let retryable = screenshot_capture_error_retryable(&error);
+                attempts.push(ScreenshotCaptureAttempt {
+                    attempt,
+                    stage: ScreenshotCaptureStage::ExactHeight,
+                    error: error.clone(),
+                    retryable,
+                });
+
+                if !retryable || attempt == max_attempts {
+                    return Err(ScreenshotCaptureFailure {
+                        message: error,
+                        attempts,
+                    });
+                }
+
+                sleep(screenshot_retry_backoff_delay(attempt)).await;
+            }
+        }
     }
+
+    Err(ScreenshotCaptureFailure {
+        message: "exact-height screenshot capture failed without an explicit attempt result"
+            .to_string(),
+        attempts,
+    })
+}
+
+async fn capture_single_screenshot_fixed_viewport_with_retries(
+    url: &str,
+    viewport: Viewport,
+    variant: ScreenshotVariant,
+) -> Result<SingleScreenshotCapture, ScreenshotCaptureFailure> {
+    let max_attempts = screenshot_fixed_viewport_attempts();
+    let mut attempts = Vec::new();
+
+    for attempt in 1..=max_attempts {
+        match capture_single_screenshot_fixed_viewport(url, viewport, variant).await {
+            Ok(bytes) => {
+                return Ok(SingleScreenshotCapture {
+                    bytes,
+                    warning: None,
+                    attempts,
+                });
+            }
+            Err(error) => {
+                let retryable = screenshot_capture_error_retryable(&error);
+                attempts.push(ScreenshotCaptureAttempt {
+                    attempt,
+                    stage: ScreenshotCaptureStage::FixedViewport,
+                    error: error.clone(),
+                    retryable,
+                });
+
+                if !retryable || attempt == max_attempts {
+                    return Err(ScreenshotCaptureFailure {
+                        message: error,
+                        attempts,
+                    });
+                }
+
+                sleep(screenshot_retry_backoff_delay(attempt)).await;
+            }
+        }
+    }
+
+    Err(ScreenshotCaptureFailure {
+        message: "fixed-viewport screenshot capture failed without an explicit attempt result"
+            .to_string(),
+        attempts,
+    })
 }
 
 async fn capture_single_screenshot_exact_height(
@@ -1662,12 +1876,94 @@ fn screenshot_render_wait_ms() -> u64 {
     )
 }
 
+fn screenshot_exact_height_attempts() -> usize {
+    env_u64(
+        "SCREENSHOT_EXACT_HEIGHT_ATTEMPTS",
+        DEFAULT_SCREENSHOT_EXACT_HEIGHT_ATTEMPTS,
+        1,
+        10,
+    ) as usize
+}
+
+fn screenshot_fixed_viewport_attempts() -> usize {
+    env_u64(
+        "SCREENSHOT_FIXED_VIEWPORT_ATTEMPTS",
+        DEFAULT_SCREENSHOT_FIXED_VIEWPORT_ATTEMPTS,
+        1,
+        10,
+    ) as usize
+}
+
+fn screenshot_retry_base_backoff_ms() -> u64 {
+    env_u64(
+        "SCREENSHOT_RETRY_BASE_BACKOFF_MS",
+        DEFAULT_SCREENSHOT_RETRY_BASE_BACKOFF_MS,
+        0,
+        10_000,
+    )
+}
+
+fn screenshot_retry_jitter_max_ms() -> u64 {
+    env_u64(
+        "SCREENSHOT_RETRY_JITTER_MAX_MS",
+        DEFAULT_SCREENSHOT_RETRY_JITTER_MAX_MS,
+        0,
+        10_000,
+    )
+}
+
+fn screenshot_retry_backoff_delay(attempt: usize) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(6) as u32;
+    let base = screenshot_retry_base_backoff_ms().saturating_mul(1u64 << exponent);
+    let jitter = jitter_ms_with_max(screenshot_retry_jitter_max_ms());
+    Duration::from_millis(base.saturating_add(jitter))
+}
+
+fn screenshot_capture_error_retryable(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("invalid screenshot url")
+        || normalized.contains("page-height evaluation raised an exception")
+        || normalized.contains("page-height evaluation returned a non-numeric result")
+        || normalized.contains("page-height evaluation returned an invalid value")
+        || normalized.contains("failed to decode chromium devtools response")
+        || normalized.contains("failed to decode chromium screenshot payload")
+    {
+        return false;
+    }
+
+    true
+}
+
 fn screenshot_dark_mode_enabled() -> bool {
     env_bool("SCREENSHOT_DARK_MODE_ENABLED", true)
 }
 
 fn current_screenshot_font_diagnostics() -> Option<ScreenshotFontDiagnostics> {
     font_diagnostics::current().screenshot_artifact_context()
+}
+
+fn encode_screenshot_failure_payload(
+    source_url: &str,
+    errors: Vec<String>,
+    attempts: Option<Vec<ScreenshotCaptureAttempt>>,
+    payload_kind: &str,
+) -> Vec<u8> {
+    let font_diagnostics = current_screenshot_font_diagnostics();
+    serde_json::to_vec_pretty(&ScreenshotFailureArtifact {
+        source_url: source_url.to_string(),
+        failed_at: now_utc().to_string(),
+        errors,
+        chromium_path: screenshot_chromium_path(),
+        timeout_secs: screenshot_timeout().as_secs(),
+        attempts,
+        font_diagnostics,
+    })
+    .unwrap_or_else(|encode_error| {
+        format!(
+            "{{\"error\":\"failed to encode screenshot {payload_kind} payload: {encode_error}\"}}"
+        )
+        .into_bytes()
+    })
 }
 
 fn parse_viewport_env(key: &str, default: Viewport) -> Viewport {
@@ -1946,16 +2242,23 @@ fn is_transient_reqwest_error(error: &reqwest::Error) -> bool {
 fn retry_backoff_delay(attempt: usize) -> Duration {
     let exponent = attempt.saturating_sub(1).min(6) as u32;
     let base = RETRY_BASE_BACKOFF_MS.saturating_mul(1u64 << exponent);
-    let jitter = jitter_ms();
+    let jitter = jitter_ms_with_max(RETRY_JITTER_MAX_MS);
     Duration::from_millis(base.saturating_add(jitter))
 }
 
 fn jitter_ms() -> u64 {
+    jitter_ms_with_max(RETRY_JITTER_MAX_MS)
+}
+
+fn jitter_ms_with_max(max_jitter_ms: u64) -> u64 {
+    if max_jitter_ms == 0 {
+        return 0;
+    }
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.subsec_nanos() as u64)
         .unwrap_or(0);
-    nanos % (RETRY_JITTER_MAX_MS + 1)
+    nanos % (max_jitter_ms + 1)
 }
 
 fn format_retry_failure(error: &RetryFailure) -> String {
@@ -2010,16 +2313,18 @@ fn retry_policy() -> SnapshotRetryPolicy {
     }
 }
 
-fn classify_source_kind(content_type: Option<&str>, path: &str) -> SnapshotSourceKind {
+fn classify_source_kind(content_type: Option<&str>, payload: &[u8]) -> SnapshotSourceKind {
+    if payload.len() >= PDF_SIGNATURE.len() && &payload[..PDF_SIGNATURE.len()] == PDF_SIGNATURE {
+        return SnapshotSourceKind::Pdf;
+    }
+
     if content_type.is_some_and(is_pdf_content_type) {
         return SnapshotSourceKind::Pdf;
     }
 
     match content_type {
         Some(content_type) if is_html_content_type(content_type) => SnapshotSourceKind::Html,
-        Some(_) if path_looks_like_pdf(path) => SnapshotSourceKind::Pdf,
         Some(_) => SnapshotSourceKind::Unsupported,
-        None if path_looks_like_pdf(path) => SnapshotSourceKind::Pdf,
         None => SnapshotSourceKind::Html,
     }
 }
@@ -2033,11 +2338,6 @@ fn is_pdf_content_type(content_type: &str) -> bool {
     content_type
         .to_ascii_lowercase()
         .contains("application/pdf")
-}
-
-fn path_looks_like_pdf(path: &str) -> bool {
-    let normalized = path.to_ascii_lowercase();
-    normalized.ends_with(".pdf") || normalized.ends_with("/pdf") || normalized.contains("/pdf/")
 }
 
 fn looks_like_pdf_viewer_dom(payload: &[u8]) -> bool {
@@ -2277,23 +2577,15 @@ mod tests {
     #[test]
     fn classifies_pdf_sources() {
         assert_eq!(
-            classify_source_kind(Some("application/pdf; charset=binary"), "/doc"),
+            classify_source_kind(Some("application/pdf; charset=binary"), b"not-a-pdf"),
             SnapshotSourceKind::Pdf
         );
         assert_eq!(
-            classify_source_kind(Some("application/pdf"), "/pdf/2602.11988"),
+            classify_source_kind(Some("application/pdf"), b"%PDF-1.7"),
             SnapshotSourceKind::Pdf
         );
         assert_eq!(
-            classify_source_kind(None, "/files/paper.PDF"),
-            SnapshotSourceKind::Pdf
-        );
-        assert_eq!(
-            classify_source_kind(Some("application/octet-stream"), "/files/paper.pdf"),
-            SnapshotSourceKind::Pdf
-        );
-        assert_eq!(
-            classify_source_kind(None, "/pdf/2602.11988"),
+            classify_source_kind(None, b"%PDF-1.6\n%"),
             SnapshotSourceKind::Pdf
         );
     }
@@ -2301,15 +2593,15 @@ mod tests {
     #[test]
     fn classifies_html_and_unsupported_sources() {
         assert_eq!(
-            classify_source_kind(Some("text/html; charset=utf-8"), "/"),
+            classify_source_kind(Some("text/html; charset=utf-8"), b"<html></html>"),
             SnapshotSourceKind::Html
         );
         assert_eq!(
-            classify_source_kind(Some("text/html"), "/docs/landing.pdf"),
+            classify_source_kind(Some("text/html"), b"<html></html>"),
             SnapshotSourceKind::Html
         );
         assert_eq!(
-            classify_source_kind(Some("application/json"), "/api/data"),
+            classify_source_kind(Some("application/json"), b"{\"ok\":true}"),
             SnapshotSourceKind::Unsupported
         );
     }
@@ -2340,13 +2632,22 @@ mod tests {
         assert!(!should_skip_screenshot_capture_for_source(
             &HyperlinkArtifactKind::SnapshotWarc
         ));
-        assert!(source_url_looks_like_pdf(
-            "https://arxiv.org/pdf/2602.11988"
+    }
+
+    #[test]
+    fn defaults_hyperlink_source_type_to_unknown_when_unset() {
+        let active = hyperlink::ActiveModel::default();
+        assert_eq!(hyperlink_source_type(&active), HyperlinkSourceType::Unknown);
+    }
+
+    #[test]
+    fn absolute_http_url_detection_rejects_relative_paths() {
+        assert!(is_absolute_http_or_https_url(
+            "https://example.com/file.pdf"
         ));
-        assert!(source_url_looks_like_pdf(
-            "https://example.com/files/paper.pdf"
-        ));
-        assert!(!source_url_looks_like_pdf("https://example.com/article"));
+        assert!(is_absolute_http_or_https_url("http://example.com/file.pdf"));
+        assert!(!is_absolute_http_or_https_url("/uploads/1/file.pdf"));
+        assert!(!is_absolute_http_or_https_url("file.pdf"));
     }
 
     #[test]
@@ -2382,31 +2683,27 @@ mod tests {
     }
 
     #[test]
-    fn exact_height_fallback_success_returns_warning() {
-        let capture =
-            resolve_exact_height_capture_result("cdp failed".to_string(), Ok(vec![1, 2, 3, 4]))
-                .expect("fallback success should preserve screenshot bytes");
-
-        assert_eq!(capture.bytes, vec![1, 2, 3, 4]);
-        assert!(
-            capture
-                .warning
-                .as_deref()
-                .unwrap_or_default()
-                .contains("fixed-viewport fallback was used")
-        );
+    fn screenshot_retry_backoff_grows() {
+        let first = screenshot_retry_backoff_delay(1);
+        let second = screenshot_retry_backoff_delay(2);
+        assert!(second >= first);
     }
 
     #[test]
-    fn exact_height_fallback_failure_combines_errors() {
-        let error = resolve_exact_height_capture_result(
-            "cdp failed".to_string(),
-            Err("cli failed".to_string()),
-        )
-        .expect_err("fallback failure should return a combined error");
+    fn screenshot_retryable_error_classifier_defaults_to_retry() {
+        assert!(screenshot_capture_error_retryable(
+            "failed to read chromium devtools response for `Runtime.evaluate`: connection reset"
+        ));
+    }
 
-        assert!(error.contains("cdp failed"));
-        assert!(error.contains("cli failed"));
+    #[test]
+    fn screenshot_retryable_error_classifier_rejects_deterministic_errors() {
+        assert!(!screenshot_capture_error_retryable(
+            "chromium page-height evaluation returned a non-numeric result"
+        ));
+        assert!(!screenshot_capture_error_retryable(
+            "failed to decode chromium screenshot payload: Invalid byte"
+        ));
     }
 
     #[test]
@@ -2417,6 +2714,7 @@ mod tests {
             errors: vec!["screenshot failed".to_string()],
             chromium_path: "chromium".to_string(),
             timeout_secs: 20,
+            attempts: None,
             font_diagnostics: Some(ScreenshotFontDiagnostics {
                 fontconfig_found: false,
                 required_families: vec!["Noto Sans".to_string()],
@@ -2427,5 +2725,26 @@ mod tests {
 
         let value = serde_json::to_value(&artifact).expect("artifact should serialize");
         assert!(value.get("font_diagnostics").is_some());
+    }
+
+    #[test]
+    fn screenshot_failure_artifact_serializes_attempts_when_present() {
+        let artifact = ScreenshotFailureArtifact {
+            source_url: "https://example.com".to_string(),
+            failed_at: "2026-02-26T00:00:00Z".to_string(),
+            errors: vec!["screenshot failed".to_string()],
+            chromium_path: "chromium".to_string(),
+            timeout_secs: 20,
+            attempts: Some(vec![ScreenshotCaptureAttempt {
+                attempt: 1,
+                stage: ScreenshotCaptureStage::ExactHeight,
+                error: "connection reset".to_string(),
+                retryable: true,
+            }]),
+            font_diagnostics: None,
+        };
+
+        let value = serde_json::to_value(&artifact).expect("artifact should serialize");
+        assert!(value.get("attempts").is_some());
     }
 }

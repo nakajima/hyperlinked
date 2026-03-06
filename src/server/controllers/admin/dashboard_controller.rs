@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     io::{ErrorKind, Read, Seek, Write},
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 use axum::{
@@ -11,6 +12,10 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing,
+};
+use reqwest::{
+    Url,
+    header::{HeaderName, HeaderValue},
 };
 use sailfish::Template;
 use sea_orm::{
@@ -33,7 +38,7 @@ use crate::{
     model::{
         hyperlink_artifact as hyperlink_artifact_model,
         hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
-        hyperlink_search_doc,
+        hyperlink_search_doc, hyperlink_tagging,
         settings::{self, ArtifactCollectionSettings},
         tagging_settings::{self, TaggingProvider, TaggingSettings},
     },
@@ -45,6 +50,9 @@ use crate::{
         admin_import::{
             ImportCompletionSummary, ImportProgress, ImportProgressStage, ImportStatusResponse,
             next_import_upload_path,
+        },
+        admin_tag_reclassify::{
+            TagReclassifyCompletionSummary, TagReclassifyProgress, TagReclassifyStatusResponse,
         },
         chromium_diagnostics::ChromiumDiagnostics,
         context::Context,
@@ -68,6 +76,9 @@ const BACKUP_ARTIFACTS_DIR: &str = "artifacts";
 const BACKUP_ARTIFACT_READ_CONCURRENCY: usize = 4;
 const BACKUP_DEFLATE_LEVEL_BEST: i32 = 9;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TAGGING_MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_TAGGING_AUTH_HEADER_NAME: &str = "Authorization";
+const DEFAULT_TAGGING_AUTH_HEADER_PREFIX: &str = "Bearer";
 
 pub fn routes() -> Router<Context> {
     Router::new()
@@ -100,6 +111,16 @@ pub fn routes() -> Router<Context> {
             "/admin/tagging-settings",
             routing::post(update_tagging_settings),
         )
+        .route("/admin/tagging-models", routing::post(fetch_tagging_models))
+        .route(
+            "/admin/tags/reclassify/start",
+            routing::post(start_tag_reclassify),
+        )
+        .route(
+            "/admin/tags/reclassify/cancel",
+            routing::post(cancel_tag_reclassify),
+        )
+        .route("/admin/tags/approve", routing::post(approve_pending_tags))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -166,6 +187,20 @@ struct TaggingSettingsForm {
     auth_header_name: Option<String>,
     auth_header_prefix: Option<String>,
     vocabulary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaggingModelsRequest {
+    base_url: Option<String>,
+    api_key: Option<String>,
+    auth_header_name: Option<String>,
+    auth_header_prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovePendingTagsForm {
+    #[serde(default)]
+    tag_ids: Vec<i32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -288,7 +323,13 @@ struct AdminStatusResponse {
     queue: crate::server::admin_jobs::QueuePendingCounts,
     backup: BackupStatusResponse,
     import: ImportStatusResponse,
+    tag_reclassify: TagReclassifyStatusResponse,
     server_time: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TaggingModelsResponse {
+    models: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -340,6 +381,15 @@ async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
             );
         }
     };
+    let pending_tags = match hyperlink_tagging::list_pending_tags(&state.connection).await {
+        Ok(tags) => tags,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load pending tag suggestions: {err}"),
+            );
+        }
+    };
     let chromium = crate::server::chromium_diagnostics::current();
     let fonts = crate::server::font_diagnostics::current();
     let mathpix = crate::integrations::mathpix::current_status();
@@ -351,6 +401,7 @@ async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
             &stats,
             &artifact_settings,
             &tagging_settings,
+            &pending_tags,
             &chromium,
             &fonts,
             &mathpix,
@@ -377,9 +428,149 @@ async fn status(State(state): State<Context>) -> Response {
         queue,
         backup: state.backup_exports.snapshot(),
         import: state.backup_imports.snapshot(),
+        tag_reclassify: state.tag_reclassify.snapshot(),
         server_time: format_datetime(&now_utc()),
     })
     .into_response()
+}
+
+async fn start_tag_reclassify(State(state): State<Context>) -> Response {
+    let manager = state.tag_reclassify.clone();
+    let manager_for_job = manager.clone();
+    let connection = state.connection.clone();
+
+    let started = manager.start_job(move |job_id| {
+        let manager = manager_for_job.clone();
+        tokio::spawn(async move {
+            let result = run_tag_reclassify_job(&connection, &manager, job_id).await;
+            if let Err(error) = result {
+                tracing::warn!(job_id, error = %error, "tag reclassify job failed");
+            }
+        })
+    });
+
+    let status = if started.started {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    (status, Json(started.status)).into_response()
+}
+
+async fn cancel_tag_reclassify(State(state): State<Context>) -> Response {
+    state.tag_reclassify.cancel_running();
+    Json(state.tag_reclassify.snapshot()).into_response()
+}
+
+async fn approve_pending_tags(
+    State(state): State<Context>,
+    headers: HeaderMap,
+    Form(form): Form<ApprovePendingTagsForm>,
+) -> Response {
+    let approved_names =
+        match hyperlink_tagging::approve_pending_tags(&state.connection, &form.tag_ids).await {
+            Ok(names) => names,
+            Err(err) => {
+                return response_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to approve pending tags: {err}"),
+                );
+            }
+        };
+
+    if approved_names.is_empty() {
+        return redirect_with_flash(
+            &headers,
+            "/admin",
+            FlashName::Notice,
+            "No pending tags were selected.",
+        );
+    }
+
+    let mut settings = match tagging_settings::load(&state.connection).await {
+        Ok(settings) => settings,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to reload tagging settings: {err}"),
+            );
+        }
+    };
+
+    let mut seen = settings
+        .vocabulary
+        .iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for tag in &approved_names {
+        let key = tag.to_ascii_lowercase();
+        if seen.insert(key) {
+            settings.vocabulary.push(tag.clone());
+        }
+    }
+
+    if let Err(err) = tagging_settings::save(&state.connection, settings).await {
+        return response_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to update vocabulary after approvals: {err}"),
+        );
+    }
+
+    redirect_with_flash(
+        &headers,
+        "/admin",
+        FlashName::Notice,
+        format!("Approved {} tag(s).", approved_names.len()),
+    )
+}
+
+async fn run_tag_reclassify_job(
+    connection: &DatabaseConnection,
+    manager: &crate::server::admin_tag_reclassify::AdminTagReclassifyManager,
+    job_id: u64,
+) -> Result<(), String> {
+    let hyperlinks = hyperlink::Entity::find()
+        .order_by_asc(hyperlink::Column::Id)
+        .all(connection)
+        .await
+        .map_err(|error| format!("failed to load hyperlinks for reclassify: {error}"))?;
+    let total = hyperlinks.len();
+    let mut progress = TagReclassifyProgress {
+        processed: 0,
+        total,
+    };
+    manager.update_progress(job_id, progress);
+
+    for model in hyperlinks {
+        let mut active_model: hyperlink::ActiveModel = model.into();
+        if let Err(error) = crate::processors::tag_classify::classify_hyperlink(
+            connection,
+            &mut active_model,
+            None,
+            crate::processors::tag_classify::TagClassificationMode::DiscoverWithPending,
+        )
+        .await
+        {
+            let message = format!(
+                "failed to classify hyperlink {}: {error}",
+                active_model.id.as_ref()
+            );
+            manager.mark_failed(job_id, message.clone(), progress);
+            return Err(message);
+        }
+
+        progress.processed = progress.processed.saturating_add(1);
+        manager.update_progress(job_id, progress);
+    }
+
+    manager.mark_ready(
+        job_id,
+        TagReclassifyCompletionSummary {
+            processed: progress.processed,
+            total: progress.total,
+        },
+    );
+    Ok(())
 }
 
 async fn start_backup_export(State(state): State<Context>) -> Response {
@@ -901,6 +1092,330 @@ async fn update_tagging_settings(
     };
 
     redirect_with_flash(&headers, "/admin", FlashName::Notice, message)
+}
+
+async fn fetch_tagging_models(
+    State(state): State<Context>,
+    Json(request): Json<TaggingModelsRequest>,
+) -> Response {
+    let current = match tagging_settings::load(&state.connection).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AdminApiError {
+                    error: format!("failed to load current tagging settings: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let TaggingSettings {
+        api_key: current_api_key,
+        auth_header_name: current_auth_header_name,
+        auth_header_prefix: current_auth_header_prefix,
+        ..
+    } = current;
+    let TaggingModelsRequest {
+        base_url,
+        api_key,
+        auth_header_name,
+        auth_header_prefix,
+    } = request;
+
+    let base_url = base_url.unwrap_or_default();
+    let endpoints = match tagging_models_endpoints(&base_url) {
+        Ok(endpoints) => endpoints,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(AdminApiError {
+                    error: format!("invalid base URL: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(TAGGING_MODELS_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AdminApiError {
+                    error: format!("failed to build model discovery client: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let api_key = trimmed_non_empty(api_key.as_deref()).or(current_api_key);
+    let mut auth_header: Option<(HeaderName, HeaderValue)> = None;
+    if let Some(api_key) = api_key {
+        let header_name = match auth_header_name {
+            Some(value) => trimmed_non_empty(Some(value.as_str())),
+            None => current_auth_header_name,
+        }
+        .unwrap_or_else(|| DEFAULT_TAGGING_AUTH_HEADER_NAME.to_string());
+        let header_prefix = match auth_header_prefix {
+            Some(value) => trimmed_non_empty(Some(value.as_str())),
+            None => current_auth_header_prefix,
+        }
+        .unwrap_or_else(|| DEFAULT_TAGGING_AUTH_HEADER_PREFIX.to_string());
+        let header_value = if header_prefix.is_empty() {
+            api_key
+        } else {
+            format!("{header_prefix} {api_key}")
+        };
+
+        let header_name = match HeaderName::from_bytes(header_name.as_bytes()) {
+            Ok(header_name) => header_name,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AdminApiError {
+                        error: format!("invalid auth header name: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let header_value = match HeaderValue::from_str(&header_value) {
+            Ok(header_value) => header_value,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AdminApiError {
+                        error: format!("invalid auth header value: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+
+        auth_header = Some((header_name, header_value));
+    }
+
+    let mut attempt_failures = Vec::new();
+
+    for endpoint in endpoints {
+        let endpoint_display = endpoint.to_string();
+        let mut builder = client.get(endpoint);
+        if let Some((header_name, header_value)) = auth_header.as_ref() {
+            builder = builder.header(header_name.clone(), header_value.clone());
+        }
+
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                attempt_failures.push(format!("{endpoint_display} -> request failed: {error}"));
+                continue;
+            }
+        };
+        let status = response.status();
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                attempt_failures.push(format!(
+                    "{endpoint_display} -> failed to read response body: {error}"
+                ));
+                continue;
+            }
+        };
+
+        if !status.is_success() {
+            attempt_failures.push(format!(
+                "{endpoint_display} -> status {status}: {}",
+                truncate_model_discovery_body(&body)
+            ));
+            continue;
+        }
+
+        let payload: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(payload) => payload,
+            Err(error) => {
+                attempt_failures.push(format!(
+                    "{endpoint_display} -> invalid json response: {error}"
+                ));
+                continue;
+            }
+        };
+
+        return Json(TaggingModelsResponse {
+            models: extract_tagging_model_ids(&payload),
+        })
+        .into_response();
+    }
+
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(AdminApiError {
+            error: format!(
+                "model list discovery failed for base URL `{base_url}`. attempts: {}",
+                attempt_failures.join(" | ")
+            ),
+        }),
+    )
+        .into_response()
+}
+
+fn truncate_model_discovery_body(body: &str) -> String {
+    const MAX_LEN: usize = 240;
+    let trimmed = body.trim();
+    if trimmed.len() <= MAX_LEN {
+        return trimmed.to_string();
+    }
+
+    let mut truncated = String::with_capacity(MAX_LEN + 3);
+    for (index, ch) in trimmed.chars().enumerate() {
+        if index >= MAX_LEN {
+            break;
+        }
+        truncated.push(ch);
+    }
+    truncated.push_str("...");
+    truncated
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TaggingModelsApiHint {
+    OpenAiCompatible,
+    Ollama,
+    Unknown,
+}
+
+fn tagging_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return Err("base URL is empty".to_string());
+    }
+
+    let mut parsed =
+        Url::parse(base_url).map_err(|error| format!("invalid base URL `{base_url}`: {error}"))?;
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+
+    let base_path = parsed.path().trim_end_matches('/');
+    let api_hint = tagging_models_api_hint(base_path);
+    let mut candidates: Vec<String> = Vec::new();
+    let mut seen_candidates = HashSet::new();
+
+    push_model_endpoint_candidate(
+        &mut candidates,
+        &mut seen_candidates,
+        replace_tagging_path_suffix(base_path, "/chat/completions", "/models"),
+    );
+    if base_path.ends_with("/models") {
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            Some(base_path.to_string()),
+        );
+    }
+    if base_path.ends_with("/api/tags") {
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            Some(base_path.to_string()),
+        );
+    }
+    if base_path.ends_with("/v1") {
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            Some(format!("{base_path}/models")),
+        );
+    }
+    if base_path.ends_with("/api") {
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            Some(format!("{base_path}/tags")),
+        );
+    }
+    if !base_path.is_empty()
+        && base_path != "/"
+        && !base_path.ends_with("/chat/completions")
+        && !base_path.ends_with("/models")
+        && !base_path.ends_with("/api/tags")
+    {
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            Some(format!("{base_path}/models")),
+        );
+    }
+
+    let prioritized_fallbacks = match api_hint {
+        TaggingModelsApiHint::Ollama => ["/api/tags", "/v1/models", "/models"],
+        _ => ["/v1/models", "/models", "/api/tags"],
+    };
+    for fallback in prioritized_fallbacks {
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            Some(fallback.to_string()),
+        );
+    }
+
+    let mut urls = Vec::with_capacity(candidates.len());
+    for path in candidates {
+        parsed.set_path(&path);
+        urls.push(parsed.clone());
+    }
+    Ok(urls)
+}
+
+fn tagging_models_api_hint(base_path: &str) -> TaggingModelsApiHint {
+    if base_path.ends_with("/api") || base_path.ends_with("/api/tags") {
+        return TaggingModelsApiHint::Ollama;
+    }
+    if base_path.ends_with("/chat/completions")
+        || base_path.ends_with("/models")
+        || base_path.ends_with("/v1")
+        || base_path.contains("/v1/")
+    {
+        return TaggingModelsApiHint::OpenAiCompatible;
+    }
+    TaggingModelsApiHint::Unknown
+}
+
+fn replace_tagging_path_suffix(base_path: &str, from: &str, to: &str) -> Option<String> {
+    if !base_path.ends_with(from) {
+        return None;
+    }
+
+    let prefix = base_path.trim_end_matches(from);
+    if prefix.is_empty() {
+        Some(to.to_string())
+    } else {
+        Some(format!("{prefix}{to}"))
+    }
+}
+
+fn push_model_endpoint_candidate(
+    candidates: &mut Vec<String>,
+    seen_candidates: &mut HashSet<String>,
+    candidate: Option<String>,
+) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if candidate.trim().is_empty() {
+        return;
+    }
+    let normalized = if candidate.starts_with('/') {
+        candidate
+    } else {
+        format!("/{candidate}")
+    };
+    if seen_candidates.insert(normalized.clone()) {
+        candidates.push(normalized);
+    }
 }
 
 async fn clear_queue(State(state): State<Context>, headers: HeaderMap) -> Response {
@@ -2327,6 +2842,7 @@ struct AdminIndexTemplate<'a> {
     stats: &'a AdminDatasetStats,
     artifact_settings: &'a ArtifactCollectionSettings,
     tagging_settings: &'a TaggingSettings,
+    pending_tags: &'a [hyperlink_tagging::PendingTag],
     has_missing_artifacts_to_process: bool,
     chromium: &'a ChromiumDiagnostics,
     fonts: &'a FontDiagnostics,
@@ -2360,6 +2876,7 @@ fn render_index(
     stats: &AdminDatasetStats,
     artifact_settings: &ArtifactCollectionSettings,
     tagging_settings: &TaggingSettings,
+    pending_tags: &[hyperlink_tagging::PendingTag],
     chromium: &ChromiumDiagnostics,
     fonts: &FontDiagnostics,
     mathpix: &MathpixStatus,
@@ -2370,6 +2887,7 @@ fn render_index(
         stats,
         artifact_settings,
         tagging_settings,
+        pending_tags,
         has_missing_artifacts_to_process: summary.snapshot_will_queue > 0
             || summary.og_will_queue > 0
             || summary.readability_will_queue > 0,
@@ -2382,6 +2900,63 @@ fn render_index(
 
 fn response_error(status: StatusCode, message: impl Into<String>) -> Response {
     views::render_error_page(status, message, "/admin", "Back to admin")
+}
+
+fn extract_tagging_model_ids(payload: &serde_json::Value) -> Vec<String> {
+    let mut models = Vec::new();
+
+    if let Some(data) = payload.get("data") {
+        collect_tagging_model_ids(&mut models, data);
+    }
+    if let Some(data) = payload.get("models") {
+        collect_tagging_model_ids(&mut models, data);
+    }
+
+    if models.is_empty() {
+        collect_tagging_model_ids(&mut models, payload);
+    }
+
+    let mut deduped = HashSet::new();
+    models.retain(|model| deduped.insert(model.to_ascii_lowercase()));
+    models.sort_unstable();
+    models
+}
+
+fn collect_tagging_model_ids(models: &mut Vec<String>, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::String(model) => push_tagging_model_id(models, model),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_tagging_model_ids(models, item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(id) = map.get("id").and_then(serde_json::Value::as_str) {
+                push_tagging_model_id(models, id);
+            }
+            if let Some(model) = map.get("model").and_then(serde_json::Value::as_str) {
+                push_tagging_model_id(models, model);
+            }
+            if let Some(name) = map.get("name").and_then(serde_json::Value::as_str) {
+                push_tagging_model_id(models, name);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_tagging_model_id(models: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    models.push(trimmed.to_string());
+}
+
+fn trimmed_non_empty(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -2417,6 +2992,7 @@ mod tests {
         ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter,
         QueryOrder, Statement,
     };
+    use serde_json::json;
     use std::{
         io::Cursor,
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -2438,6 +3014,100 @@ mod tests {
     }
 
     #[test]
+    fn tagging_models_endpoints_prioritizes_openai_candidates() {
+        let endpoints =
+            tagging_models_endpoints("https://api.openai.com/v1").expect("endpoints should parse");
+        let urls: Vec<String> = endpoints
+            .iter()
+            .map(|endpoint| endpoint.as_str().to_string())
+            .collect();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://api.openai.com/v1/models".to_string(),
+                "https://api.openai.com/models".to_string(),
+                "https://api.openai.com/api/tags".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn tagging_models_endpoints_rewrites_chat_completions_suffix() {
+        let endpoints = tagging_models_endpoints("https://api.openai.com/v1/chat/completions")
+            .expect("endpoints should parse");
+        let urls: Vec<String> = endpoints
+            .iter()
+            .map(|endpoint| endpoint.as_str().to_string())
+            .collect();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://api.openai.com/v1/models".to_string(),
+                "https://api.openai.com/models".to_string(),
+                "https://api.openai.com/api/tags".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn tagging_models_endpoints_prioritizes_ollama_candidates() {
+        let endpoints =
+            tagging_models_endpoints("http://ollama:3000/api").expect("endpoints should parse");
+        let urls: Vec<String> = endpoints
+            .iter()
+            .map(|endpoint| endpoint.as_str().to_string())
+            .collect();
+
+        assert_eq!(
+            urls,
+            vec![
+                "http://ollama:3000/api/tags".to_string(),
+                "http://ollama:3000/api/models".to_string(),
+                "http://ollama:3000/v1/models".to_string(),
+                "http://ollama:3000/models".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_tagging_model_ids_reads_openai_data_list() {
+        let payload = json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-4o-mini" },
+                { "id": "gpt-4.1-mini" }
+            ]
+        });
+        let models = extract_tagging_model_ids(&payload);
+        assert_eq!(
+            models,
+            vec!["gpt-4.1-mini".to_string(), "gpt-4o-mini".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_tagging_model_ids_reads_models_array_variants() {
+        let payload = json!({
+            "models": [
+                "llama3.2:3b",
+                { "name": "qwen3:14b" },
+                { "model": "mistral-small" }
+            ]
+        });
+        let models = extract_tagging_model_ids(&payload);
+        assert_eq!(
+            models,
+            vec![
+                "llama3.2:3b".to_string(),
+                "mistral-small".to_string(),
+                "qwen3:14b".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn render_index_shows_chromium_setup_when_missing() {
         let summary = MissingArtifactsSummary::default();
         let stats = AdminDatasetStats::default();
@@ -2454,6 +3124,7 @@ mod tests {
             &stats,
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
+            &[],
             &chromium,
             &fonts,
             &mathpix,
@@ -2480,6 +3151,7 @@ mod tests {
             &stats,
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
+            &[],
             &chromium,
             &fonts,
             &mathpix,
@@ -2523,6 +3195,7 @@ mod tests {
             &stats,
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
+            &[],
             &chromium,
             &fonts,
             &mathpix,
@@ -2553,6 +3226,7 @@ mod tests {
             &stats,
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
+            &[],
             &chromium,
             &fonts,
             &mathpix,
@@ -2582,6 +3256,7 @@ mod tests {
             &stats,
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
+            &[],
             &chromium,
             &fonts,
             &mathpix,
@@ -2689,6 +3364,8 @@ mod tests {
                 processing_queue: None,
                 backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
                 backup_imports: crate::server::admin_import::AdminImportManager::default(),
+                tag_reclassify:
+                    crate::server::admin_tag_reclassify::AdminTagReclassifyManager::default(),
             });
         (
             axum_test::TestServer::new(app).expect("test server should initialize"),
