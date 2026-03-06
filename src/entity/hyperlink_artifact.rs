@@ -49,6 +49,8 @@ pub enum HyperlinkArtifactKind {
     ScreenshotThumbDarkWebp,
     #[sea_orm(string_value = "screenshot_error")]
     ScreenshotError,
+    #[sea_orm(string_value = "tag_meta")]
+    TagMeta,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]

@@ -90,6 +90,54 @@
     </form>
   </section>
 
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Tag classification settings</h3>
+    <p class="text-sm text-tertiary">
+      Configure OpenAI-compatible tag classification. API key is optional for local/custom endpoints.
+    </p>
+    <form action="/admin/tagging-settings" method="post" class="flex flex-col gap-3 text-sm">
+      <label class="flex items-start gap-2">
+        <input type="checkbox" name="tagging_enabled" value="1"<% if self.tagging_settings.enabled { %> checked<% } %> class="mt-0.5 h-4 w-4 shrink-0 rounded border border-form-control-border bg-form-control accent-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+        <span>Enable automatic tag classification jobs</span>
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span>Base URL</span>
+        <input type="text" name="base_url" value="<%= self.tagging_settings.base_url %>" class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span>Model</span>
+        <input type="text" name="model" value="<%= self.tagging_settings.model %>" class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span>API key (optional)</span>
+        <input type="password" name="api_key" value="" autocomplete="off" class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+        <span class="text-sm text-tertiary">Leave blank to keep existing key.</span>
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span>Auth header name (optional)</span>
+        <input type="text" name="auth_header_name" value="<%= self.tagging_settings.auth_header_name.as_deref().unwrap_or("") %>" class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span>Auth header prefix (optional)</span>
+        <input type="text" name="auth_header_prefix" value="<%= self.tagging_settings.auth_header_prefix.as_deref().unwrap_or("") %>" class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+      </label>
+
+      <label class="flex flex-col gap-1">
+        <span>Vocabulary (comma or newline separated)</span>
+        <textarea name="vocabulary" rows="6" class="w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"><%= self.tagging_vocabulary_lines() %></textarea>
+      </label>
+
+      <div>
+        <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Save tag settings</button>
+      </div>
+    </form>
+  </section>
+
   <% if self.chromium.has_missing_binary() { %>
     <section class="flex flex-col gap-3 rounded-[0.4rem] border border-invalid bg-form-control px-3 py-3" aria-labelledby="chrome-setup-heading">
       <h3 id="chrome-setup-heading" class="text-lg font-semibold leading-7 tracking-tight text-alert">Screenshot browser setup required</h3>

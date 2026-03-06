@@ -44,6 +44,29 @@
         </div>
       </dl>
 
+      <section class="flex flex-col gap-2 text-sm">
+        <h4 class="text-base font-semibold leading-6">Tags</h4>
+        <% if self.ranked_tags().is_empty() { %>
+          <p class="text-sm text-tertiary">No tags yet.</p>
+        <% } else { %>
+          <ul class="flex flex-row flex-wrap gap-2">
+            <% for ranked in self.ranked_tags() { %>
+              <li><%= ranked.tag %> (<%= format!("{:.2}", ranked.confidence) %>)</li>
+            <% } %>
+          </ul>
+        <% } %>
+        <form action="/hyperlinks/<%= self.link.id %>/tags" method="post" class="flex flex-col gap-2">
+          <label class="flex flex-col gap-1">
+            <span>Manual tags (comma or newline separated)</span>
+            <textarea name="tags" rows="3" class="w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"><%= self.manual_tags_input_value() %></textarea>
+          </label>
+          <p class="text-sm text-tertiary">Allowed tags: <%= self.tagging_vocabulary_hint() %></p>
+          <div>
+            <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Save manual tags</button>
+          </div>
+        </form>
+      </section>
+
       <% if let Some(pdf_preview_path) = self.pdf_preview_path() { %>
         <div
           class="block overflow-hidden rounded-[0.4rem] border border-form-control-border bg-form-control md:min-h-0 md:flex-1"

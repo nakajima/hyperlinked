@@ -144,7 +144,9 @@ impl Processor for SnapshotFetcher {
                     return Ok(output);
                 }
 
-                if should_skip_screenshot_capture_for_source(&output.source_artifact_kind) {
+                if should_skip_screenshot_capture_for_source(&output.source_artifact_kind)
+                    || source_url_looks_like_pdf(&source_url)
+                {
                     if let Some(pdf_payload) = pdf_source_payload_for_thumbnail.as_deref() {
                         match build_pdf_thumbnail_from_source(
                             pdf_payload,
@@ -343,6 +345,12 @@ impl Processor for SnapshotFetcher {
 
 fn should_skip_screenshot_capture_for_source(source_kind: &HyperlinkArtifactKind) -> bool {
     matches!(source_kind, HyperlinkArtifactKind::PdfSource)
+}
+
+fn source_url_looks_like_pdf(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .is_some_and(|parsed| path_looks_like_pdf(parsed.path()))
 }
 
 enum SnapshotCapture {
@@ -685,7 +693,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
     {
         Ok(response) => response,
         Err(failure) => {
-            if snapshot_content_use_chromium() && !path_has_pdf_extension(parsed.path()) {
+            if snapshot_content_use_chromium() && !path_looks_like_pdf(parsed.path()) {
                 return match capture_html_with_chromium_response(parsed.clone(), deadline).await {
                     Ok(chromium_response) => {
                         capture_snapshot_from_html_response(
@@ -740,7 +748,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
         ));
     }
 
-    if snapshot_content_use_chromium() && !path_has_pdf_extension(parsed.path()) {
+    if snapshot_content_use_chromium() && !path_looks_like_pdf(parsed.path()) {
         match capture_html_with_chromium_response(parsed.clone(), deadline).await {
             Ok(chromium_response) => {
                 if looks_like_pdf_viewer_dom(&chromium_response.body) {
@@ -2009,9 +2017,9 @@ fn classify_source_kind(content_type: Option<&str>, path: &str) -> SnapshotSourc
 
     match content_type {
         Some(content_type) if is_html_content_type(content_type) => SnapshotSourceKind::Html,
-        Some(_) if path_has_pdf_extension(path) => SnapshotSourceKind::Pdf,
+        Some(_) if path_looks_like_pdf(path) => SnapshotSourceKind::Pdf,
         Some(_) => SnapshotSourceKind::Unsupported,
-        None if path_has_pdf_extension(path) => SnapshotSourceKind::Pdf,
+        None if path_looks_like_pdf(path) => SnapshotSourceKind::Pdf,
         None => SnapshotSourceKind::Html,
     }
 }
@@ -2027,8 +2035,9 @@ fn is_pdf_content_type(content_type: &str) -> bool {
         .contains("application/pdf")
 }
 
-fn path_has_pdf_extension(path: &str) -> bool {
-    path.to_ascii_lowercase().ends_with(".pdf")
+fn path_looks_like_pdf(path: &str) -> bool {
+    let normalized = path.to_ascii_lowercase();
+    normalized.ends_with(".pdf") || normalized.ends_with("/pdf") || normalized.contains("/pdf/")
 }
 
 fn looks_like_pdf_viewer_dom(payload: &[u8]) -> bool {
@@ -2283,6 +2292,10 @@ mod tests {
             classify_source_kind(Some("application/octet-stream"), "/files/paper.pdf"),
             SnapshotSourceKind::Pdf
         );
+        assert_eq!(
+            classify_source_kind(None, "/pdf/2602.11988"),
+            SnapshotSourceKind::Pdf
+        );
     }
 
     #[test]
@@ -2327,6 +2340,13 @@ mod tests {
         assert!(!should_skip_screenshot_capture_for_source(
             &HyperlinkArtifactKind::SnapshotWarc
         ));
+        assert!(source_url_looks_like_pdf(
+            "https://arxiv.org/pdf/2602.11988"
+        ));
+        assert!(source_url_looks_like_pdf(
+            "https://example.com/files/paper.pdf"
+        ));
+        assert!(!source_url_looks_like_pdf("https://example.com/article"));
     }
 
     #[test]

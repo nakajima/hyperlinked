@@ -187,6 +187,7 @@ pub fn kind_name(kind: HyperlinkProcessingJobKind) -> &'static str {
         HyperlinkProcessingJobKind::Oembed => "oembed",
         HyperlinkProcessingJobKind::Readability => "readability",
         HyperlinkProcessingJobKind::SublinkDiscovery => "sublink_discovery",
+        HyperlinkProcessingJobKind::TagClassification => "tag_classification",
     }
 }
 

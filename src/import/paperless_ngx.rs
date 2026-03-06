@@ -15,7 +15,10 @@ use crate::{
         hyperlink_artifact::{self, HyperlinkArtifactKind},
         hyperlink_processing_job::HyperlinkProcessingJobKind,
     },
-    model::{hyperlink_artifact as hyperlink_artifact_model, hyperlink_processing_job, settings},
+    model::{
+        hyperlink_artifact as hyperlink_artifact_model, hyperlink_processing_job, settings,
+        tagging_settings,
+    },
 };
 
 const PDF_CONTENT_TYPE: &str = "application/pdf";
@@ -524,6 +527,20 @@ async fn enqueue_processing_jobs(
         )
         .await
         .map_err(|err| format!("failed to enqueue readability processing job: {err}"))?;
+    }
+
+    let tagging_settings = tagging_settings::load(connection)
+        .await
+        .map_err(|err| format!("failed to load tagging settings: {err}"))?;
+    if tagging_settings.classification_enabled() {
+        hyperlink_processing_job::enqueue_for_hyperlink_kind(
+            connection,
+            hyperlink_id,
+            HyperlinkProcessingJobKind::TagClassification,
+            Some(queue),
+        )
+        .await
+        .map_err(|err| format!("failed to enqueue tag classification job: {err}"))?;
     }
 
     Ok(())

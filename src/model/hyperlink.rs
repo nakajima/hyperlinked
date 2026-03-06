@@ -9,10 +9,11 @@ use sea_orm::{
 use serde::Deserialize;
 
 use crate::{
+    entity::hyperlink_processing_job::HyperlinkProcessingJobKind,
     entity::hyperlink,
     model::{
         hyperlink_processing_job::{self, ProcessingQueueSender},
-        settings, url_canonicalize,
+        settings, tagging_settings, url_canonicalize,
     },
 };
 
@@ -206,11 +207,22 @@ pub async fn enqueue_reprocess_by_id(
     };
 
     let settings = settings::load(connection).await?;
+    let tagging_settings = tagging_settings::load(connection).await?;
     let mut queued = false;
     if let Some(queue) = processing_queue {
         if settings.collect_source {
             hyperlink_processing_job::enqueue_for_hyperlink(connection, model.id, Some(queue))
                 .await?;
+            queued = true;
+        }
+        if tagging_settings.classification_enabled() {
+            hyperlink_processing_job::enqueue_for_hyperlink_kind(
+                connection,
+                model.id,
+                HyperlinkProcessingJobKind::TagClassification,
+                Some(queue),
+            )
+            .await?;
             queued = true;
         }
     }
@@ -356,10 +368,20 @@ async fn enqueue_processing_if_enabled(
     hyperlink_id: i32,
 ) -> Result<(), sea_orm::DbErr> {
     if let Some(queue) = processing_queue {
-        let settings = settings::load(connection).await?;
-        if settings.collect_source {
+        let artifact_settings = settings::load(connection).await?;
+        let tagging_settings = tagging_settings::load(connection).await?;
+        if artifact_settings.collect_source {
             hyperlink_processing_job::enqueue_for_hyperlink(connection, hyperlink_id, Some(queue))
                 .await?;
+        }
+        if tagging_settings.classification_enabled() {
+            hyperlink_processing_job::enqueue_for_hyperlink_kind(
+                connection,
+                hyperlink_id,
+                HyperlinkProcessingJobKind::TagClassification,
+                Some(queue),
+            )
+            .await?;
         }
     }
     Ok(())

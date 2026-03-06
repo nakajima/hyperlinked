@@ -19,8 +19,12 @@ use crate::{
     entity::{
         hyperlink,
         hyperlink_artifact::{self, HyperlinkArtifactKind},
+        hyperlink_processing_job::HyperlinkProcessingJobKind,
     },
-    model::{hyperlink_artifact as hyperlink_artifact_model, hyperlink_processing_job, settings},
+    model::{
+        hyperlink_artifact as hyperlink_artifact_model, hyperlink_processing_job, settings,
+        tagging_settings,
+    },
     server::context::Context,
 };
 
@@ -359,7 +363,7 @@ async fn enqueue_upload_processing_jobs(state: &Context, hyperlink_id: i32) -> R
         hyperlink_processing_job::enqueue_for_hyperlink_kind(
             &state.connection,
             hyperlink_id,
-            crate::entity::hyperlink_processing_job::HyperlinkProcessingJobKind::Og,
+            HyperlinkProcessingJobKind::Og,
             Some(queue),
         )
         .await
@@ -370,11 +374,25 @@ async fn enqueue_upload_processing_jobs(state: &Context, hyperlink_id: i32) -> R
         hyperlink_processing_job::enqueue_for_hyperlink_kind(
             &state.connection,
             hyperlink_id,
-            crate::entity::hyperlink_processing_job::HyperlinkProcessingJobKind::Readability,
+            HyperlinkProcessingJobKind::Readability,
             Some(queue),
         )
         .await
         .map_err(|err| format!("failed to enqueue readability job: {err}"))?;
+    }
+
+    let tagging_settings = tagging_settings::load(&state.connection)
+        .await
+        .map_err(|err| format!("failed to load tagging settings: {err}"))?;
+    if tagging_settings.classification_enabled() {
+        hyperlink_processing_job::enqueue_for_hyperlink_kind(
+            &state.connection,
+            hyperlink_id,
+            HyperlinkProcessingJobKind::TagClassification,
+            Some(queue),
+        )
+        .await
+        .map_err(|err| format!("failed to enqueue tag classification job: {err}"))?;
     }
 
     Ok(())

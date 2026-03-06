@@ -134,6 +134,7 @@ fn kind_slug(kind: &HyperlinkArtifactKind) -> &'static str {
         HyperlinkArtifactKind::ScreenshotDarkWebp => "screenshot_dark_webp",
         HyperlinkArtifactKind::ScreenshotThumbDarkWebp => "screenshot_thumb_dark_webp",
         HyperlinkArtifactKind::ScreenshotError => "screenshot_error",
+        HyperlinkArtifactKind::TagMeta => "tag_meta",
     }
 }
 
@@ -156,6 +157,7 @@ fn extension(kind: &HyperlinkArtifactKind) -> &'static str {
         HyperlinkArtifactKind::ScreenshotDarkWebp => "webp",
         HyperlinkArtifactKind::ScreenshotThumbDarkWebp => "webp",
         HyperlinkArtifactKind::ScreenshotError => "json",
+        HyperlinkArtifactKind::TagMeta => "json",
     }
 }
 

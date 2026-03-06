@@ -21,7 +21,10 @@ use crate::{
         hyperlink_artifact::{self, HyperlinkArtifactKind},
         hyperlink_processing_job,
     },
-    model::{hyperlink::HyperlinkInput, hyperlink_search_doc, hyperlink_title},
+    model::{
+        hyperlink::HyperlinkInput, hyperlink_search_doc, hyperlink_tagging, hyperlink_title,
+        tagging_settings,
+    },
     server::{
         context::Context,
         flash::{Flash, FlashName, redirect_with_flash},
@@ -53,6 +56,7 @@ pub fn links() -> Router<Context> {
         .route("/hyperlinks/{id}/update", routing::post(update_html_post))
         .route("/hyperlinks/{id}/delete", routing::post(delete_html_post))
         .route("/hyperlinks/{id}/reprocess", routing::post(reprocess))
+        .route("/hyperlinks/{id}/tags", routing::post(update_tags_html_post))
         .route(
             "/hyperlinks/{id}/artifacts/{kind}",
             routing::get(download_latest_artifact),
@@ -130,6 +134,11 @@ struct HyperlinkLookupResponse {
     status: String,
     id: Option<i32>,
     canonical_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct HyperlinkTagsForm {
+    tags: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -353,6 +362,66 @@ async fn reprocess(
         Ok(None) => hyperlink_not_found(ResponseKind::Text, id),
         Err(err) => hyperlink_internal_error(ResponseKind::Text, id, "enqueue for processing", err),
     }
+}
+
+async fn update_tags_html_post(
+    Path(id): Path<i32>,
+    State(state): State<Context>,
+    headers: HeaderMap,
+    Form(form): Form<HyperlinkTagsForm>,
+) -> Response {
+    let link = match hyperlink::Entity::find_by_id(id)
+        .one(&state.connection)
+        .await
+    {
+        Ok(Some(link)) => link,
+        Ok(None) => return hyperlink_not_found(ResponseKind::Text, id),
+        Err(err) => return hyperlink_internal_error(ResponseKind::Text, id, "fetch", err),
+    };
+
+    let tagging_settings = match tagging_settings::load(&state.connection).await {
+        Ok(settings) => settings,
+        Err(err) => {
+            return hyperlink_internal_error(
+                ResponseKind::Text,
+                id,
+                "load tagging settings for",
+                err,
+            );
+        }
+    };
+
+    let parsed_tags = hyperlink_tagging::parse_manual_tags_input(&form.tags);
+    let normalized_tags =
+        hyperlink_tagging::normalize_manual_tags_for_vocabulary(&parsed_tags, &tagging_settings.vocabulary);
+
+    if !parsed_tags.is_empty() && normalized_tags.is_empty() {
+        return redirect_with_flash(
+            &headers,
+            &show_path(link.id),
+            FlashName::Alert,
+            "No valid tags matched the configured vocabulary.",
+        );
+    }
+
+    if let Err(err) = hyperlink_tagging::persist_manual_tags(
+        &state.connection,
+        link.id,
+        normalized_tags.clone(),
+        chrono::Utc::now().to_rfc3339(),
+    )
+    .await
+    {
+        return hyperlink_internal_error(ResponseKind::Text, id, "save manual tags for", err);
+    }
+
+    let message = if normalized_tags.is_empty() {
+        "Saved manual tags (empty override)."
+    } else {
+        "Saved manual tags."
+    };
+
+    redirect_with_flash(&headers, &show_path(link.id), FlashName::Notice, message)
 }
 
 async fn delete_artifact_kind(
@@ -654,10 +723,26 @@ async fn index_with_kind(
             );
         }
     };
+    let hyperlink_ids = results.links.iter().map(|link| link.id).collect::<Vec<_>>();
+    let tags_by_hyperlink =
+        match hyperlink_tagging::latest_for_hyperlinks(&state.connection, &hyperlink_ids).await {
+            Ok(tags) => tags,
+            Err(err) => {
+                return response_error(
+                    kind,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to load hyperlink tags: {err}"),
+                );
+            }
+        };
 
     match kind {
         ResponseKind::Text => {
-            views::render_html_page_with_flash("Hyperlinks", render_index(&results), flash)
+            views::render_html_page_with_flash(
+                "Hyperlinks",
+                render_index(&results, &tags_by_hyperlink),
+                flash,
+            )
         }
         ResponseKind::Json => {
             let items = results
@@ -843,6 +928,31 @@ async fn show_with_kind(state: &Context, id: i32, kind: ResponseKind, flash: Fla
                         );
                     }
                 };
+            let link_tag_meta = match hyperlink_tagging::latest_for_hyperlink(&state.connection, id)
+                .await
+            {
+                Ok(tags) => tags,
+                Err(err) => {
+                    return hyperlink_internal_error(kind, id, "load tags for", err);
+                }
+            };
+            let discovered_tags_by_hyperlink = match hyperlink_tagging::latest_for_hyperlinks(
+                &state.connection,
+                &discovered_link_ids,
+            )
+            .await
+            {
+                Ok(tags) => tags,
+                Err(err) => {
+                    return hyperlink_internal_error(kind, id, "load discovered tags for", err);
+                }
+            };
+            let tagging_settings = match tagging_settings::load(&state.connection).await {
+                Ok(settings) => settings,
+                Err(err) => {
+                    return hyperlink_internal_error(kind, id, "load tagging settings for", err);
+                }
+            };
 
             match kind {
                 ResponseKind::Text => {
@@ -860,6 +970,9 @@ async fn show_with_kind(state: &Context, id: i32, kind: ResponseKind, flash: Fla
                             &discovered_thumbnail_artifacts,
                             &discovered_dark_thumbnail_artifacts,
                             &discovered_latest_source_artifacts,
+                            link_tag_meta.as_ref(),
+                            &discovered_tags_by_hyperlink,
+                            &tagging_settings.vocabulary,
                             display_title,
                             og_summary,
                         ),
@@ -1145,6 +1258,7 @@ struct HyperlinksIndexTemplate<'a> {
     thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     dark_thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     latest_source_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
+    tags_by_hyperlink: &'a HashMap<i32, hyperlink_tagging::TagMeta>,
     match_snippets: &'a HashMap<i32, String>,
     parsed_query: &'a crate::server::hyperlink_fetcher::ParsedHyperlinkQuery,
     query_input: &'a str,
@@ -1282,9 +1396,18 @@ impl<'a> HyperlinksIndexTemplate<'a> {
 
         url_path_looks_pdf(hyperlink.url.as_str())
     }
+
+    fn link_primary_tag(&self, hyperlink_id: i32) -> Option<&str> {
+        self.tags_by_hyperlink
+            .get(&hyperlink_id)
+            .and_then(|meta| meta.primary_tag.as_deref())
+    }
 }
 
-fn render_index(results: &HyperlinkFetchResults) -> Result<String, sailfish::RenderError> {
+fn render_index(
+    results: &HyperlinkFetchResults,
+    tags_by_hyperlink: &HashMap<i32, hyperlink_tagging::TagMeta>,
+) -> Result<String, sailfish::RenderError> {
     let prev_page_href = if results.page > 1 {
         Some(hyperlinks_index_href(&results.raw_q, results.page - 1))
     } else {
@@ -1303,6 +1426,7 @@ fn render_index(results: &HyperlinkFetchResults) -> Result<String, sailfish::Ren
         thumbnail_artifacts: &results.thumbnail_artifacts,
         dark_thumbnail_artifacts: &results.dark_thumbnail_artifacts,
         latest_source_artifacts: &results.latest_source_artifacts,
+        tags_by_hyperlink,
         match_snippets: &results.match_snippets,
         parsed_query: &results.parsed_query,
         query_input: &results.raw_q,
@@ -1349,6 +1473,9 @@ struct HyperlinksShowTemplate<'a> {
     discovered_thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     discovered_dark_thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     discovered_latest_source_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
+    tag_meta: Option<&'a hyperlink_tagging::TagMeta>,
+    discovered_tags_by_hyperlink: &'a HashMap<i32, hyperlink_tagging::TagMeta>,
+    tagging_vocabulary: &'a [String],
     display_title: String,
     og_summary: Option<OgSummary>,
 }
@@ -1496,6 +1623,34 @@ impl<'a> HyperlinksShowTemplate<'a> {
 
         url_path_looks_pdf(hyperlink.url.as_str())
     }
+
+    fn link_primary_tag(&self, hyperlink_id: i32) -> Option<&str> {
+        if hyperlink_id == self.link.id {
+            return self.tag_meta.and_then(|meta| meta.primary_tag.as_deref());
+        }
+
+        self.discovered_tags_by_hyperlink
+            .get(&hyperlink_id)
+            .and_then(|meta| meta.primary_tag.as_deref())
+    }
+
+    fn ranked_tags(&self) -> &[hyperlink_tagging::RankedTag] {
+        self.tag_meta
+            .map(|meta| meta.ranked_tags.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn manual_tags_input_value(&self) -> String {
+        self.ranked_tags()
+            .iter()
+            .map(|ranked| ranked.tag.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn tagging_vocabulary_hint(&self) -> String {
+        self.tagging_vocabulary.join(", ")
+    }
 }
 
 fn render_show(
@@ -1508,6 +1663,9 @@ fn render_show(
     discovered_thumbnail_artifacts: &HashMap<i32, hyperlink_artifact::Model>,
     discovered_dark_thumbnail_artifacts: &HashMap<i32, hyperlink_artifact::Model>,
     discovered_latest_source_artifacts: &HashMap<i32, hyperlink_artifact::Model>,
+    tag_meta: Option<&hyperlink_tagging::TagMeta>,
+    discovered_tags_by_hyperlink: &HashMap<i32, hyperlink_tagging::TagMeta>,
+    tagging_vocabulary: &[String],
     display_title: String,
     og_summary: Option<OgSummary>,
 ) -> Result<String, sailfish::RenderError> {
@@ -1521,6 +1679,9 @@ fn render_show(
         discovered_thumbnail_artifacts,
         discovered_dark_thumbnail_artifacts,
         discovered_latest_source_artifacts,
+        tag_meta,
+        discovered_tags_by_hyperlink,
+        tagging_vocabulary,
         display_title,
         og_summary,
     }
@@ -1900,6 +2061,7 @@ fn artifact_kind_info(
         HyperlinkArtifactKind::ScreenshotError => {
             ("screenshot_error", "Screenshot Error", "json", true)
         }
+        HyperlinkArtifactKind::TagMeta => ("tag_meta", "Tag Metadata", "json", false),
     }
 }
 
@@ -2001,7 +2163,8 @@ fn artifact_fetch_job_kind(
         }
         HyperlinkArtifactKind::PaperlessMetadata
         | HyperlinkArtifactKind::OembedMeta
-        | HyperlinkArtifactKind::OembedError => None,
+        | HyperlinkArtifactKind::OembedError
+        | HyperlinkArtifactKind::TagMeta => None,
     }
 }
 

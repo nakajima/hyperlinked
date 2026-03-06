@@ -35,6 +35,7 @@ use crate::{
         hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
         hyperlink_search_doc,
         settings::{self, ArtifactCollectionSettings},
+        tagging_settings::{self, TaggingProvider, TaggingSettings},
     },
     server::{
         admin_backup::{
@@ -95,6 +96,10 @@ pub fn routes() -> Router<Context> {
             "/admin/process-missing-artifacts",
             routing::post(process_missing_artifacts),
         )
+        .route(
+            "/admin/tagging-settings",
+            routing::post(update_tagging_settings),
+        )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -150,6 +155,17 @@ struct ArtifactSettingsForm {
     queue_screenshots_on_enable: Option<String>,
     queue_og_on_enable: Option<String>,
     queue_readability_on_enable: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaggingSettingsForm {
+    tagging_enabled: Option<String>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    auth_header_name: Option<String>,
+    auth_header_prefix: Option<String>,
+    vocabulary: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -315,6 +331,15 @@ async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
             );
         }
     };
+    let tagging_settings = match tagging_settings::load(&state.connection).await {
+        Ok(settings) => settings,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load tagging settings: {err}"),
+            );
+        }
+    };
     let chromium = crate::server::chromium_diagnostics::current();
     let fonts = crate::server::font_diagnostics::current();
     let mathpix = crate::integrations::mathpix::current_status();
@@ -325,6 +350,7 @@ async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
             &plan.summary,
             &stats,
             &artifact_settings,
+            &tagging_settings,
             &chromium,
             &fonts,
             &mathpix,
@@ -826,6 +852,55 @@ async fn update_artifact_settings(
             queue_warning.as_deref(),
         ),
     )
+}
+
+async fn update_tagging_settings(
+    State(state): State<Context>,
+    headers: HeaderMap,
+    Form(form): Form<TaggingSettingsForm>,
+) -> Response {
+    let current = match tagging_settings::load(&state.connection).await {
+        Ok(settings) => settings,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load current tagging settings: {err}"),
+            );
+        }
+    };
+
+    let vocabulary_input = form.vocabulary.unwrap_or_default();
+    let settings = TaggingSettings {
+        enabled: checkbox_checked(&form.tagging_enabled),
+        provider: TaggingProvider::OpenAiCompatible,
+        base_url: form.base_url.unwrap_or_default(),
+        api_key: match form.api_key {
+            Some(value) if value.trim().is_empty() => current.api_key,
+            other => other,
+        },
+        model: form.model.unwrap_or_default(),
+        auth_header_name: form.auth_header_name,
+        auth_header_prefix: form.auth_header_prefix,
+        vocabulary: tagging_settings::parse_vocabulary_lines(&vocabulary_input),
+    };
+
+    let saved = match tagging_settings::save(&state.connection, settings).await {
+        Ok(saved) => saved,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to save tagging settings: {err}"),
+            );
+        }
+    };
+
+    let message = if saved.classification_enabled() {
+        "Updated tagging settings. Auto-classification is enabled."
+    } else {
+        "Updated tagging settings. Auto-classification is disabled."
+    };
+
+    redirect_with_flash(&headers, "/admin", FlashName::Notice, message)
 }
 
 async fn clear_queue(State(state): State<Context>, headers: HeaderMap) -> Response {
@@ -2251,6 +2326,7 @@ struct AdminIndexTemplate<'a> {
     summary: &'a MissingArtifactsSummary,
     stats: &'a AdminDatasetStats,
     artifact_settings: &'a ArtifactCollectionSettings,
+    tagging_settings: &'a TaggingSettings,
     has_missing_artifacts_to_process: bool,
     chromium: &'a ChromiumDiagnostics,
     fonts: &'a FontDiagnostics,
@@ -2273,12 +2349,17 @@ impl AdminIndexTemplate<'_> {
         let average_bytes = total_bytes.max(0) as f64 / count as f64;
         format_bytes_f64(average_bytes)
     }
+
+    fn tagging_vocabulary_lines(&self) -> String {
+        self.tagging_settings.vocabulary.join("\n")
+    }
 }
 
 fn render_index(
     summary: &MissingArtifactsSummary,
     stats: &AdminDatasetStats,
     artifact_settings: &ArtifactCollectionSettings,
+    tagging_settings: &TaggingSettings,
     chromium: &ChromiumDiagnostics,
     fonts: &FontDiagnostics,
     mathpix: &MathpixStatus,
@@ -2288,6 +2369,7 @@ fn render_index(
         summary,
         stats,
         artifact_settings,
+        tagging_settings,
         has_missing_artifacts_to_process: summary.snapshot_will_queue > 0
             || summary.og_will_queue > 0
             || summary.readability_will_queue > 0,
@@ -2351,6 +2433,10 @@ mod tests {
         }
     }
 
+    fn default_tagging_settings() -> TaggingSettings {
+        TaggingSettings::default()
+    }
+
     #[test]
     fn render_index_shows_chromium_setup_when_missing() {
         let summary = MissingArtifactsSummary::default();
@@ -2367,6 +2453,7 @@ mod tests {
             &summary,
             &stats,
             &ArtifactCollectionSettings::default(),
+            &default_tagging_settings(),
             &chromium,
             &fonts,
             &mathpix,
@@ -2392,6 +2479,7 @@ mod tests {
             &summary,
             &stats,
             &ArtifactCollectionSettings::default(),
+            &default_tagging_settings(),
             &chromium,
             &fonts,
             &mathpix,
@@ -2434,6 +2522,7 @@ mod tests {
             &summary,
             &stats,
             &ArtifactCollectionSettings::default(),
+            &default_tagging_settings(),
             &chromium,
             &fonts,
             &mathpix,
@@ -2463,6 +2552,7 @@ mod tests {
             &summary,
             &stats,
             &ArtifactCollectionSettings::default(),
+            &default_tagging_settings(),
             &chromium,
             &fonts,
             &mathpix,
@@ -2491,6 +2581,7 @@ mod tests {
             &summary,
             &stats,
             &ArtifactCollectionSettings::default(),
+            &default_tagging_settings(),
             &chromium,
             &fonts,
             &mathpix,

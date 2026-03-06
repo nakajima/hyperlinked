@@ -168,6 +168,40 @@ pub async fn process_job(
                 }
             }
         }
+        HyperlinkProcessingJobKind::TagClassification => {
+            match pipeline.process_tag_classification(connection).await {
+                Ok(output) => {
+                    if let Some(reason) = output.skipped_reason.as_deref() {
+                        tracing::info!(
+                            hyperlink_id = running_job.hyperlink_id,
+                            job_id = running_job.id,
+                            kind = "tag_classification",
+                            skipped_reason = reason,
+                            "tag classification skipped"
+                        );
+                    } else {
+                        tracing::info!(
+                            hyperlink_id = running_job.hyperlink_id,
+                            job_id = running_job.id,
+                            kind = "tag_classification",
+                            tag_count = output.tag_count,
+                            "tag classification completed"
+                        );
+                    }
+                    mark_job_succeeded(connection, running_job.id).await?;
+                }
+                Err(error) => {
+                    mark_job_failed(connection, running_job.id, &error.to_string()).await?;
+                    tracing::warn!(
+                        hyperlink_id = running_job.hyperlink_id,
+                        job_id = running_job.id,
+                        kind = "tag_classification",
+                        error = %error,
+                        "hyperlink processing job failed"
+                    );
+                }
+            }
+        }
     }
 
     Ok(())

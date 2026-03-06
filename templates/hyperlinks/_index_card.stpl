@@ -30,6 +30,9 @@
         <% if is_pdf { %>
           <span class="inline-block whitespace-nowrap rounded-[0.25rem] bg-badge px-[0.2rem] py-1 text-[0.5rem] leading-[0.5rem] text-center align-baseline text-black">PDF</span>
         <% } %>
+        <% if let Some(primary_tag) = self.link_primary_tag(link.id) { %>
+          <span class="whitespace-nowrap text-sm text-tertiary">Tag: <%= primary_tag %></span>
+        <% } %>
       </p>
       
       <div class="flex flex-row flex-wrap items-center gap-[0.4rem] text-sm leading-4 text-tertiary">
