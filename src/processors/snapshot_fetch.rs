@@ -1,5 +1,9 @@
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use futures_util::{SinkExt, StreamExt};
+use chromiumoxide::{
+    browser::{Browser, BrowserConfig},
+    cdp::browser_protocol::{emulation::SetDeviceMetricsOverrideParams, page::CaptureScreenshotFormat},
+    page::ScreenshotParams,
+};
+use futures_util::StreamExt;
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
@@ -7,17 +11,15 @@ use hayro::{RenderSettings as HayroRenderSettings, render as hayro_render};
 use image::{GenericImageView, imageops::FilterType};
 use reqwest::{Url, header::CONTENT_TYPE};
 use sea_orm::DatabaseConnection;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Serialize;
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::net::IpAddr;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::{net::lookup_host, process::Command, time::sleep};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio::{net::lookup_host, time::sleep};
 
 use crate::{
     entity::{
@@ -41,7 +43,7 @@ const PDF_SIGNATURE: &[u8] = b"%PDF-";
 const SCREENSHOT_CONTENT_TYPE: &str = "image/webp";
 const SCREENSHOT_ERROR_CONTENT_TYPE: &str = "application/json";
 const SCREENSHOT_WEBP_QUALITY: f32 = 85.0;
-const SCREENSHOT_CDP_WEBP_QUALITY: u8 = 85;
+const SCREENSHOT_CAPTURE_WEBP_QUALITY: i64 = 85;
 
 const RETRY_ATTEMPTS: usize = 4;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -52,9 +54,12 @@ const DEFAULT_SNAPSHOT_CONTENT_TIMEOUT_SECS: u64 = 20;
 const DEFAULT_SNAPSHOT_CONTENT_RENDER_WAIT_MS: u64 = 5000;
 const DEFAULT_SCREENSHOT_TIMEOUT_SECS: u64 = 20;
 const CHROMIUM_PATH_ENV: &str = "CHROMIUM_PATH";
-const CHROMIUM_NO_SANDBOX_ENV: &str = "CHROMIUM_NO_SANDBOX";
 const CHROMIUM_RUNTIME_DIR_ENV: &str = "CHROMIUM_RUNTIME_DIR";
 const DEFAULT_CHROMIUM_RUNTIME_DIR: &str = "hyperlinked-chromium-runtime";
+const DEFAULT_SNAPSHOT_CONTENT_VIEWPORT: Viewport = Viewport {
+    width: 1366,
+    height: 4096,
+};
 const DEFAULT_SCREENSHOT_DESKTOP_VIEWPORT: Viewport = Viewport {
     width: 1366,
     height: 4096,
@@ -67,8 +72,6 @@ const DEFAULT_SCREENSHOT_EXACT_HEIGHT_ATTEMPTS: u64 = 3;
 const DEFAULT_SCREENSHOT_FIXED_VIEWPORT_ATTEMPTS: u64 = 2;
 const DEFAULT_SCREENSHOT_RETRY_BASE_BACKOFF_MS: u64 = 200;
 const DEFAULT_SCREENSHOT_RETRY_JITTER_MAX_MS: u64 = 125;
-const CDP_CAPTURE_RELAYOUT_WAIT_MS: u64 = 120;
-const CDP_STARTUP_POLL_INTERVAL_MS: u64 = 75;
 
 pub struct SnapshotFetcher {
     job_id: i32,
@@ -488,136 +491,88 @@ struct PageHeightBounds {
     max: u32,
 }
 
-#[derive(Deserialize)]
-struct ChromiumDebugTarget {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(rename = "webSocketDebuggerUrl")]
-    websocket_debugger_url: Option<String>,
+struct ChromiumoxideSession {
+    browser: Browser,
+    handler_task: tokio::task::JoinHandle<()>,
+    profile_dir: PathBuf,
 }
 
-struct CdpSession {
-    stream: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    next_id: i64,
-}
-
-impl CdpSession {
-    fn new(
-        stream: tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    ) -> Self {
-        Self { stream, next_id: 1 }
-    }
-
-    async fn send_command(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let payload = json!({
-            "id": id,
-            "method": method,
-            "params": params
-        })
-        .to_string();
-        self.stream
-            .send(Message::Text(payload.into()))
+impl ChromiumoxideSession {
+    async fn launch(
+        window_size: Viewport,
+        timeout: Duration,
+        variant: Option<ScreenshotVariant>,
+        render_wait_ms: u64,
+    ) -> Result<Self, String> {
+        let profile_dir = screenshot_profile_dir();
+        tokio::fs::create_dir_all(&profile_dir)
             .await
-            .map_err(|err| format!("failed to send chromium devtools command `{method}`: {err}"))?;
+            .map_err(|err| {
+                format!(
+                    "failed to create temporary chromium profile {}: {err}",
+                    profile_dir.display()
+                )
+            })?;
+        let profile_slug = profile_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "profile".to_string());
+        let runtime_dir = chromium_runtime_dir().join(profile_slug);
+        ensure_chromium_runtime_dir_at(&runtime_dir).await?;
 
-        loop {
-            let Some(message) = self.stream.next().await else {
-                return Err(format!(
-                    "chromium devtools connection closed while waiting for `{method}` response"
-                ));
-            };
+        let config = BrowserConfig::builder()
+            .new_headless_mode()
+            .chrome_executable(chromium_path())
+            .window_size(window_size.width, window_size.height.max(1))
+            .request_timeout(timeout)
+            .user_data_dir(profile_dir.clone())
+            .env("XDG_RUNTIME_DIR", runtime_dir.to_string_lossy().to_string())
+            .args(chromium_launch_args(variant, render_wait_ms))
+            .no_sandbox()
+            .build()
+            .map_err(|err| format!("failed to build chromiumoxide browser config: {err}"))?;
 
-            match message {
-                Ok(Message::Text(text)) => {
-                    if let Some(result) = handle_cdp_text_message(id, method, text.as_ref())? {
-                        return Ok(result);
-                    }
-                }
-                Ok(Message::Binary(payload)) => {
-                    let text = String::from_utf8(payload.to_vec()).map_err(|err| {
-                        format!(
-                            "chromium devtools sent non-utf8 binary response for `{method}`: {err}"
-                        )
-                    })?;
-                    if let Some(result) = handle_cdp_text_message(id, method, &text)? {
-                        return Ok(result);
-                    }
-                }
-                Ok(Message::Ping(payload)) => {
-                    self.stream
-                        .send(Message::Pong(payload))
-                        .await
-                        .map_err(|err| {
-                            format!("failed to respond to chromium devtools ping: {err}")
-                        })?;
-                }
-                Ok(Message::Close(frame)) => {
-                    return Err(format!(
-                        "chromium devtools closed the connection while waiting for `{method}`: {frame:?}"
-                    ));
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    return Err(format!(
-                        "failed to read chromium devtools response for `{method}`: {err}"
-                    ));
+        let (browser, mut handler) = Browser::launch(config)
+            .await
+            .map_err(|err| format!("failed to launch chromium browser: {err}"))?;
+
+        let handler_task = tokio::spawn(async move {
+            while let Some(event) = handler.next().await {
+                if let Err(error) = event {
+                    tracing::warn!(error = %error, "chromiumoxide handler error");
+                    break;
                 }
             }
+        });
+
+        Ok(Self {
+            browser,
+            handler_task,
+            profile_dir,
+        })
+    }
+
+    async fn shutdown(mut self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        if let Err(error) = self.browser.close().await {
+            errors.push(format!("failed to close chromium browser: {error}"));
         }
-    }
-}
+        self.handler_task.abort();
 
-fn handle_cdp_text_message(
-    expected_id: i64,
-    method: &str,
-    text: &str,
-) -> Result<Option<Value>, String> {
-    let payload: Value = serde_json::from_str(text).map_err(|err| {
-        format!("failed to decode chromium devtools response for `{method}`: {err}")
-    })?;
+        match tokio::fs::remove_dir_all(&self.profile_dir).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => errors.push(format!(
+                "failed to clean up temporary chromium profile {}: {error}",
+                self.profile_dir.display()
+            )),
+        }
 
-    let Some(id) = payload.get("id").and_then(Value::as_i64).or_else(|| {
-        payload
-            .get("id")
-            .and_then(Value::as_u64)
-            .map(|value| value as i64)
-    }) else {
-        return Ok(None);
-    };
-    if id != expected_id {
-        return Ok(None);
-    }
-
-    if let Some(error) = payload.get("error") {
-        return Err(format!(
-            "chromium devtools command `{method}` failed: {}",
-            cdp_error_message(error)
-        ));
-    }
-
-    Ok(Some(payload.get("result").cloned().unwrap_or(Value::Null)))
-}
-
-fn cdp_error_message(error: &Value) -> String {
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown error");
-    let data = error
-        .get("data")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if data.is_empty() {
-        message.to_string()
-    } else {
-        format!("{message}: {data}")
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 }
 
@@ -1064,48 +1019,53 @@ async fn capture_html_with_chromium_response(
         return Err("snapshot deadline reached before chromium content capture".to_string());
     }
 
-    let runtime_dir = ensure_chromium_runtime_dir().await?;
-    let mut command = Command::new(snapshot_content_chromium_path());
-    configure_chromium_command(&mut command, runtime_dir.as_path());
-    command
-        .arg("--headless=new")
-        .arg("--disable-gpu")
-        .arg("--dump-dom")
-        .arg("--run-all-compositor-stages-before-draw")
-        .arg(format!(
-            "--virtual-time-budget={}",
-            snapshot_content_render_wait_ms()
-        ))
-        .arg(url.as_str());
-
     let timeout =
         snapshot_content_timeout().min(deadline.saturating_duration_since(Instant::now()));
     if timeout.is_zero() {
         return Err("snapshot deadline reached before chromium content capture".to_string());
     }
 
-    let output = tokio::time::timeout(timeout, command.output())
-        .await
-        .map_err(|_| {
-            format!(
-                "chromium content capture timed out after {}s",
-                timeout.as_secs()
-            )
-        })?
-        .map_err(|err| format!("failed to launch chromium for content capture: {err}"))?;
+    let session = ChromiumoxideSession::launch(
+        content_capture_viewport(),
+        timeout,
+        None,
+        snapshot_content_render_wait_ms(),
+    )
+    .await?;
+    let capture_result = tokio::time::timeout(timeout, async {
+        let page = session
+            .browser
+            .new_page("about:blank")
+            .await
+            .map_err(|err| format!("failed to create chromium page for content capture: {err}"))?;
 
-    if !output.status.success() {
-        let stderr = truncate_for_error_message(&String::from_utf8_lossy(&output.stderr), 400);
-        let stdout = truncate_for_error_message(&String::from_utf8_lossy(&output.stdout), 200);
-        return Err(format!(
-            "chromium content capture failed with status {}: stderr={stderr}, stdout={stdout}",
-            output.status
-        ));
-    }
+        page.goto(url.as_str())
+            .await
+            .map_err(|err| format!("chromium content capture navigation failed: {err}"))?;
+        sleep(Duration::from_millis(snapshot_content_render_wait_ms())).await;
 
-    let mut body = output.stdout;
-    if body.is_empty() {
-        return Err("chromium content capture produced an empty DOM".to_string());
+        let body = page
+            .content_bytes()
+            .await
+            .map_err(|err| format!("chromium content capture failed to read page html: {err}"))?;
+        if body.is_empty() {
+            return Err("chromium content capture produced an empty DOM".to_string());
+        }
+
+        Ok::<Vec<u8>, String>(body.to_vec())
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "chromium content capture timed out after {}s",
+            timeout.as_secs()
+        )
+    })?;
+
+    let shutdown_error = session.shutdown().await.err();
+    let mut body = capture_result?;
+    if let Some(error) = shutdown_error {
+        return Err(error);
     }
 
     let mut truncated = false;
@@ -1363,210 +1323,84 @@ async fn capture_single_screenshot_exact_height_inner(
     viewport: Viewport,
     variant: ScreenshotVariant,
 ) -> Result<Vec<u8>, String> {
-    let debug_port = reserve_local_debug_port()?;
-    let profile_dir = screenshot_profile_dir();
-    tokio::fs::create_dir_all(&profile_dir)
-        .await
-        .map_err(|err| {
-            format!(
-                "failed to create temporary chromium profile {}: {err}",
-                profile_dir.display()
+    let timeout = screenshot_timeout();
+    let session = ChromiumoxideSession::launch(
+        viewport,
+        timeout,
+        Some(variant),
+        screenshot_render_wait_ms(),
+    )
+    .await?;
+    let capture_result = tokio::time::timeout(timeout, async {
+        let page = session
+            .browser
+            .new_page("about:blank")
+            .await
+            .map_err(|err| format!("failed to create chromium page for screenshot: {err}"))?;
+        page.goto(url)
+            .await
+            .map_err(|err| format!("chromium screenshot navigation failed: {err}"))?;
+        sleep(Duration::from_millis(screenshot_render_wait_ms())).await;
+
+        let measured_height: f64 = page
+            .evaluate_expression(page_height_expression())
+            .await
+            .map_err(|err| {
+                format!("failed to evaluate chromium page-height expression: {err}")
+            })?
+            .into_value()
+            .map_err(|err| {
+                format!("chromium page-height evaluation returned a non-numeric result: {err}")
+            })?;
+        let page_height = clamp_page_height(
+            parse_page_height_from_value(measured_height)?,
+            screenshot_page_height_bounds(),
+        );
+        let params = screenshot_params(true);
+        let screenshot_bytes = page
+            .execute(
+                SetDeviceMetricsOverrideParams::builder()
+                    .width(viewport.width)
+                    .height(page_height)
+                    .device_scale_factor(1.0)
+                    .mobile(false)
+                    .build()
+                    .map_err(|err| {
+                        format!("failed to build chromium metrics override command: {err}")
+                    })?,
             )
-        })?;
-    let runtime_dir = profile_dir.join("runtime");
-    ensure_chromium_runtime_dir_at(&runtime_dir).await?;
+            .await
+            .map_err(|err| format!("failed to set chromium page-height metrics: {err}"))?;
+        drop(screenshot_bytes);
 
-    let mut command = Command::new(screenshot_chromium_path());
-    configure_chromium_command(&mut command, runtime_dir.as_path());
-    command
-        .arg("--headless=new")
-        .arg("--disable-gpu")
-        .arg("--hide-scrollbars")
-        .arg("--run-all-compositor-stages-before-draw")
-        .arg(format!(
-            "--virtual-time-budget={}",
-            screenshot_render_wait_ms()
-        ))
-        .arg(format!(
-            "--window-size={},{}",
-            viewport.width,
-            viewport.height.max(1)
-        ))
-        .arg("--no-first-run")
-        .arg("--no-default-browser-check")
-        .arg(format!("--remote-debugging-port={debug_port}"))
-        .arg(format!("--user-data-dir={}", profile_dir.display()))
-        .arg("about:blank");
-    if matches!(variant, ScreenshotVariant::Dark) {
-        command
-            .arg("--force-dark-mode")
-            .arg("--enable-features=WebContentsForceDark");
-    }
-
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("failed to launch chromium for exact-height screenshot: {err}"))?;
-
-    let result = capture_screenshot_with_cdp(url, viewport, debug_port).await;
-    let _ = cleanup_exact_height_chromium(&mut child, &profile_dir).await;
-    result
-}
-
-async fn cleanup_exact_height_chromium(
-    child: &mut tokio::process::Child,
-    profile_dir: &PathBuf,
-) -> Result<(), String> {
-    match child.try_wait() {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-        }
-        Err(error) => {
-            return Err(format!(
-                "failed to inspect chromium process status: {error}"
-            ));
-        }
-    }
-
-    match tokio::fs::remove_dir_all(profile_dir).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!(
-            "failed to clean up temporary chromium profile {}: {error}",
-            profile_dir.display()
-        )),
-    }
-}
-
-async fn capture_screenshot_with_cdp(
-    url: &str,
-    viewport: Viewport,
-    debug_port: u16,
-) -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .map_err(|err| format!("failed to initialize chromium debug client: {err}"))?;
-    let websocket_url = wait_for_chromium_page_websocket_url(&client, debug_port).await?;
-    let (stream, _) = connect_async(websocket_url.as_str())
-        .await
-        .map_err(|err| format!("failed to connect to chromium devtools: {err}"))?;
-    let mut cdp = CdpSession::new(stream);
-
-    cdp.send_command("Page.enable", json!({})).await?;
-    cdp.send_command("Runtime.enable", json!({})).await?;
-    cdp.send_command(
-        "Emulation.setDeviceMetricsOverride",
-        json!({
-            "width": viewport.width,
-            "height": viewport.height.max(1),
-            "deviceScaleFactor": 1,
-            "mobile": false
-        }),
-    )
-    .await?;
-    cdp.send_command("Page.navigate", json!({ "url": url }))
-        .await?;
-
-    sleep(Duration::from_millis(screenshot_render_wait_ms())).await;
-
-    let evaluation = cdp
-        .send_command(
-            "Runtime.evaluate",
-            json!({
-                "expression": page_height_expression(),
-                "returnByValue": true
-            }),
+        page.screenshot(params)
+            .await
+            .map_err(|err| format!("failed to capture chromium screenshot: {err}"))
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "exact-height screenshot capture timed out after {}s",
+            timeout.as_secs()
         )
-        .await?;
-    let page_height = clamp_page_height(
-        parse_page_height_from_evaluation(&evaluation)?,
-        screenshot_page_height_bounds(),
-    );
+    })?;
 
-    cdp.send_command(
-        "Emulation.setDeviceMetricsOverride",
-        json!({
-            "width": viewport.width,
-            "height": page_height,
-            "deviceScaleFactor": 1,
-            "mobile": false
-        }),
-    )
-    .await?;
-    sleep(Duration::from_millis(CDP_CAPTURE_RELAYOUT_WAIT_MS)).await;
-
-    let screenshot = cdp
-        .send_command(
-            "Page.captureScreenshot",
-            json!({
-                "format": "webp",
-                "quality": SCREENSHOT_CDP_WEBP_QUALITY,
-                "fromSurface": true,
-                "captureBeyondViewport": true
-            }),
-        )
-        .await?;
-    parse_webp_from_capture_screenshot_result(&screenshot)
-}
-
-fn reserve_local_debug_port() -> Result<u16, String> {
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-        .map_err(|err| format!("failed to reserve local chromium debug port: {err}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|err| format!("failed to read chromium debug listener address: {err}"))?
-        .port();
-    drop(listener);
-    Ok(port)
-}
-
-async fn wait_for_chromium_page_websocket_url(
-    client: &reqwest::Client,
-    debug_port: u16,
-) -> Result<String, String> {
-    let endpoint = format!("http://127.0.0.1:{debug_port}/json/list");
-    let deadline = Instant::now() + Duration::from_secs(5);
-
-    loop {
-        if Instant::now() >= deadline {
-            return Err("timed out waiting for chromium devtools endpoint".to_string());
-        }
-
-        if let Ok(response) = client.get(&endpoint).send().await
-            && response.status().is_success()
-            && let Ok(body) = response.bytes().await
-            && let Ok(targets) = serde_json::from_slice::<Vec<ChromiumDebugTarget>>(&body)
-        {
-            if let Some(websocket_url) = targets
-                .into_iter()
-                .find(|target| target.kind == "page")
-                .and_then(|target| target.websocket_debugger_url)
-            {
-                return Ok(websocket_url);
-            }
-        }
-
-        sleep(Duration::from_millis(CDP_STARTUP_POLL_INTERVAL_MS)).await;
+    let shutdown_error = session.shutdown().await.err();
+    let screenshot_bytes = capture_result?;
+    if let Some(error) = shutdown_error {
+        return Err(error);
     }
+    if screenshot_bytes.is_empty() {
+        return Err("chromium screenshot response contained an empty payload".to_string());
+    }
+    Ok(screenshot_bytes)
 }
 
 fn page_height_expression() -> &'static str {
     "Math.max(document.documentElement?.scrollHeight || 0, document.body?.scrollHeight || 0, document.documentElement?.offsetHeight || 0, document.body?.offsetHeight || 0, document.documentElement?.clientHeight || 0)"
 }
 
-fn parse_page_height_from_evaluation(value: &Value) -> Result<u32, String> {
-    if value.get("exceptionDetails").is_some() {
-        return Err("chromium page-height evaluation raised an exception".to_string());
-    }
-
-    let height = value
-        .pointer("/result/value")
-        .and_then(Value::as_f64)
-        .ok_or_else(|| {
-            "chromium page-height evaluation returned a non-numeric result".to_string()
-        })?;
+fn parse_page_height_from_value(height: f64) -> Result<u32, String> {
     if !height.is_finite() || height <= 0.0 {
         return Err(format!(
             "chromium page-height evaluation returned an invalid value: {height}"
@@ -1580,18 +1414,12 @@ fn parse_page_height_from_evaluation(value: &Value) -> Result<u32, String> {
     Ok(rounded as u32)
 }
 
-fn parse_webp_from_capture_screenshot_result(value: &Value) -> Result<Vec<u8>, String> {
-    let encoded = value
-        .get("data")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "chromium screenshot response was missing webp data".to_string())?;
-    let bytes = BASE64_STANDARD
-        .decode(encoded)
-        .map_err(|err| format!("failed to decode chromium screenshot payload: {err}"))?;
-    if bytes.is_empty() {
-        return Err("chromium screenshot response contained an empty payload".to_string());
-    }
-    Ok(bytes)
+fn screenshot_params(full_page: bool) -> ScreenshotParams {
+    ScreenshotParams::builder()
+        .format(CaptureScreenshotFormat::Webp)
+        .quality(SCREENSHOT_CAPTURE_WEBP_QUALITY)
+        .full_page(full_page)
+        .build()
 }
 
 fn clamp_page_height(height: u32, bounds: PageHeightBounds) -> u32 {
@@ -1634,66 +1462,40 @@ async fn capture_single_screenshot_fixed_viewport(
     viewport: Viewport,
     variant: ScreenshotVariant,
 ) -> Result<Vec<u8>, String> {
-    let screenshot_path = screenshot_temp_path();
-    let window_size = format!("{},{}", viewport.width, viewport.height);
-    let runtime_dir = ensure_chromium_runtime_dir().await?;
-
-    let mut command = Command::new(screenshot_chromium_path());
-    configure_chromium_command(&mut command, runtime_dir.as_path());
-    command
-        .arg("--headless=new")
-        .arg("--disable-gpu")
-        .arg("--hide-scrollbars")
-        .arg("--run-all-compositor-stages-before-draw")
-        .arg(format!(
-            "--virtual-time-budget={}",
-            screenshot_render_wait_ms()
-        ))
-        .arg(format!("--window-size={window_size}"))
-        .arg(format!("--screenshot={}", screenshot_path.display()))
-        .arg(url);
-    if matches!(variant, ScreenshotVariant::Dark) {
-        command
-            .arg("--force-dark-mode")
-            .arg("--enable-features=WebContentsForceDark");
-    }
-
     let timeout = screenshot_timeout();
-    let output = tokio::time::timeout(timeout, command.output())
-        .await
-        .map_err(|_| format!("screenshot capture timed out after {}s", timeout.as_secs()))?
-        .map_err(|err| format!("failed to launch chromium for screenshot: {err}"))?;
+    let session = ChromiumoxideSession::launch(
+        viewport,
+        timeout,
+        Some(variant),
+        screenshot_render_wait_ms(),
+    )
+    .await?;
+    let capture_result = tokio::time::timeout(timeout, async {
+        let page = session
+            .browser
+            .new_page("about:blank")
+            .await
+            .map_err(|err| format!("failed to create chromium page for screenshot: {err}"))?;
+        page.goto(url)
+            .await
+            .map_err(|err| format!("chromium screenshot navigation failed: {err}"))?;
+        sleep(Duration::from_millis(screenshot_render_wait_ms())).await;
+        page.screenshot(screenshot_params(false))
+            .await
+            .map_err(|err| format!("failed to capture chromium screenshot: {err}"))
+    })
+    .await
+    .map_err(|_| format!("screenshot capture timed out after {}s", timeout.as_secs()))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let _ = tokio::fs::remove_file(&screenshot_path).await;
-        return Err(format!(
-            "chromium exited with status {}: stderr={}, stdout={}",
-            output.status, stderr, stdout
-        ));
+    let shutdown_error = session.shutdown().await.err();
+    let screenshot_bytes = capture_result?;
+    if let Some(error) = shutdown_error {
+        return Err(error);
     }
-
-    let screenshot_bytes = tokio::fs::read(&screenshot_path)
-        .await
-        .map_err(|err| format!("failed to read screenshot file {screenshot_path:?}: {err}"))?;
-    let _ = tokio::fs::remove_file(&screenshot_path).await;
-
     if screenshot_bytes.is_empty() {
         return Err("chromium created an empty screenshot payload".to_string());
     }
-
-    encode_webp_from_image_bytes(&screenshot_bytes)
-}
-
-fn screenshot_temp_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let jitter = jitter_ms();
-    // Chromium --screenshot is most reliable when targeting a .png file.
-    std::env::temp_dir().join(format!("hyperlinked-screenshot-{nanos:x}-{jitter:x}.png"))
+    Ok(screenshot_bytes)
 }
 
 fn screenshot_profile_dir() -> PathBuf {
@@ -1711,8 +1513,23 @@ fn screenshot_chromium_path() -> String {
     chromium_path()
 }
 
-fn snapshot_content_chromium_path() -> String {
-    chromium_path()
+fn chromium_launch_args(variant: Option<ScreenshotVariant>, render_wait_ms: u64) -> Vec<String> {
+    let mut args = vec![
+        "--disable-gpu".to_string(),
+        "--hide-scrollbars".to_string(),
+        "--run-all-compositor-stages-before-draw".to_string(),
+        format!("--virtual-time-budget={render_wait_ms}"),
+        "--disable-dev-shm-usage".to_string(),
+        "--no-first-run".to_string(),
+        "--no-default-browser-check".to_string(),
+        "--no-sandbox".to_string(),
+        "--disable-setuid-sandbox".to_string(),
+    ];
+    if matches!(variant, Some(ScreenshotVariant::Dark)) {
+        args.push("--force-dark-mode".to_string());
+        args.push("--enable-features=WebContentsForceDark".to_string());
+    }
+    args
 }
 
 fn chromium_path() -> String {
@@ -1754,12 +1571,6 @@ fn command_looks_available(command: &str) -> bool {
     })
 }
 
-async fn ensure_chromium_runtime_dir() -> Result<PathBuf, String> {
-    let runtime_dir = chromium_runtime_dir();
-    ensure_chromium_runtime_dir_at(&runtime_dir).await?;
-    Ok(runtime_dir)
-}
-
 async fn ensure_chromium_runtime_dir_at(runtime_dir: &Path) -> Result<(), String> {
     tokio::fs::create_dir_all(runtime_dir)
         .await
@@ -1781,13 +1592,6 @@ async fn ensure_chromium_runtime_dir_at(runtime_dir: &Path) -> Result<(), String
     Ok(())
 }
 
-fn configure_chromium_command(command: &mut Command, runtime_dir: &Path) {
-    command.env("XDG_RUNTIME_DIR", runtime_dir.as_os_str());
-    if chromium_no_sandbox() {
-        command.arg("--no-sandbox").arg("--disable-setuid-sandbox");
-    }
-}
-
 fn chromium_runtime_dir() -> PathBuf {
     if let Some(path) = std::env::var(CHROMIUM_RUNTIME_DIR_ENV)
         .ok()
@@ -1798,26 +1602,6 @@ fn chromium_runtime_dir() -> PathBuf {
     }
 
     std::env::temp_dir().join(DEFAULT_CHROMIUM_RUNTIME_DIR)
-}
-
-fn chromium_no_sandbox() -> bool {
-    env_bool(CHROMIUM_NO_SANDBOX_ENV, process_is_root())
-}
-
-#[cfg(unix)]
-fn process_is_root() -> bool {
-    // Safety: `geteuid` has no preconditions and simply reports the effective uid.
-    unsafe { geteuid() == 0 }
-}
-
-#[cfg(not(unix))]
-fn process_is_root() -> bool {
-    false
-}
-
-#[cfg(unix)]
-unsafe extern "C" {
-    fn geteuid() -> u32;
 }
 
 fn snapshot_content_timeout() -> Duration {
@@ -1855,6 +1639,13 @@ fn screenshot_desktop_viewport() -> Viewport {
     parse_viewport_env(
         "SCREENSHOT_DESKTOP_VIEWPORT",
         DEFAULT_SCREENSHOT_DESKTOP_VIEWPORT,
+    )
+}
+
+fn content_capture_viewport() -> Viewport {
+    parse_viewport_env(
+        "SNAPSHOT_CONTENT_VIEWPORT",
+        DEFAULT_SNAPSHOT_CONTENT_VIEWPORT,
     )
 }
 
@@ -2267,21 +2058,6 @@ fn format_retry_failure(error: &RetryFailure) -> String {
         error.final_error.message,
         error.attempts.len()
     )
-}
-
-fn truncate_for_error_message(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let mut out = String::new();
-    for _ in 0..max_chars {
-        let Some(ch) = chars.next() else {
-            return out;
-        };
-        out.push(ch);
-    }
-    if chars.next().is_some() {
-        out.push_str("...");
-    }
-    out
 }
 
 fn snapshot_capture_error(

@@ -31,7 +31,6 @@ pub struct HyperlinkFetchResults {
     pub active_processing_job_ids: HashSet<i32>,
     pub thumbnail_artifacts: HashMap<i32, hyperlink_artifact::Model>,
     pub dark_thumbnail_artifacts: HashMap<i32, hyperlink_artifact::Model>,
-    pub latest_source_artifacts: HashMap<i32, hyperlink_artifact::Model>,
     pub match_snippets: HashMap<i32, String>,
     pub parsed_query: ParsedHyperlinkQuery,
     pub ignored_tokens: Vec<String>,
@@ -160,11 +159,6 @@ impl<'a> HyperlinkFetcher<'a> {
             HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
         )
         .await?;
-        let latest_source_artifacts = hyperlink_artifact_model::latest_source_for_hyperlinks(
-            self.connection,
-            &shown_hyperlink_ids,
-        )
-        .await?;
 
         Ok(HyperlinkFetchResults {
             links,
@@ -172,7 +166,6 @@ impl<'a> HyperlinkFetcher<'a> {
             active_processing_job_ids,
             thumbnail_artifacts,
             dark_thumbnail_artifacts,
-            latest_source_artifacts,
             match_snippets,
             parsed_query: parsed.parsed_query,
             ignored_tokens: parsed.ignored_tokens,

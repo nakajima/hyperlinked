@@ -942,23 +942,6 @@ async fn show_with_kind(state: &Context, id: i32, kind: ResponseKind, flash: Fla
                         );
                     }
                 };
-            let discovered_latest_source_artifacts =
-                match crate::model::hyperlink_artifact::latest_source_for_hyperlinks(
-                    &state.connection,
-                    &discovered_link_ids,
-                )
-                .await
-                {
-                    Ok(artifacts) => artifacts,
-                    Err(err) => {
-                        return hyperlink_internal_error(
-                            kind,
-                            id,
-                            "load discovered link source artifacts for",
-                            err,
-                        );
-                    }
-                };
             let link_tag_set =
                 match hyperlink_tagging::latest_for_hyperlink(&state.connection, id).await {
                     Ok(tags) => tags,
@@ -999,7 +982,6 @@ async fn show_with_kind(state: &Context, id: i32, kind: ResponseKind, flash: Fla
                             &discovered_latest_jobs,
                             &discovered_thumbnail_artifacts,
                             &discovered_dark_thumbnail_artifacts,
-                            &discovered_latest_source_artifacts,
                             link_tag_set.as_ref(),
                             &discovered_tags_by_hyperlink,
                             &tagging_settings.vocabulary,
@@ -1296,7 +1278,6 @@ struct HyperlinksIndexTemplate<'a> {
     active_processing_job_ids: &'a HashSet<i32>,
     thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     dark_thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
-    latest_source_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     tags_by_hyperlink: &'a HashMap<i32, hyperlink_tagging::TagSet>,
     match_snippets: &'a HashMap<i32, String>,
     parsed_query: &'a crate::server::hyperlink_fetcher::ParsedHyperlinkQuery,
@@ -1460,7 +1441,6 @@ fn render_index(
         active_processing_job_ids: &results.active_processing_job_ids,
         thumbnail_artifacts: &results.thumbnail_artifacts,
         dark_thumbnail_artifacts: &results.dark_thumbnail_artifacts,
-        latest_source_artifacts: &results.latest_source_artifacts,
         tags_by_hyperlink,
         match_snippets: &results.match_snippets,
         parsed_query: &results.parsed_query,
@@ -1507,7 +1487,6 @@ struct HyperlinksShowTemplate<'a> {
     discovered_latest_jobs: &'a HashMap<i32, hyperlink_processing_job::Model>,
     discovered_thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     discovered_dark_thumbnail_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
-    discovered_latest_source_artifacts: &'a HashMap<i32, hyperlink_artifact::Model>,
     tag_set: Option<&'a hyperlink_tagging::TagSet>,
     discovered_tags_by_hyperlink: &'a HashMap<i32, hyperlink_tagging::TagSet>,
     tagging_vocabulary: &'a [String],
@@ -1692,7 +1671,6 @@ fn render_show(
     discovered_latest_jobs: &HashMap<i32, hyperlink_processing_job::Model>,
     discovered_thumbnail_artifacts: &HashMap<i32, hyperlink_artifact::Model>,
     discovered_dark_thumbnail_artifacts: &HashMap<i32, hyperlink_artifact::Model>,
-    discovered_latest_source_artifacts: &HashMap<i32, hyperlink_artifact::Model>,
     tag_set: Option<&hyperlink_tagging::TagSet>,
     discovered_tags_by_hyperlink: &HashMap<i32, hyperlink_tagging::TagSet>,
     tagging_vocabulary: &[String],
@@ -1708,7 +1686,6 @@ fn render_show(
         discovered_latest_jobs,
         discovered_thumbnail_artifacts,
         discovered_dark_thumbnail_artifacts,
-        discovered_latest_source_artifacts,
         tag_set,
         discovered_tags_by_hyperlink,
         tagging_vocabulary,
