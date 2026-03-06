@@ -297,6 +297,7 @@ mod tests {
                         title varchar NOT NULL,
                         url varchar NOT NULL,
                         raw_url varchar NOT NULL DEFAULT '',
+                        source_type varchar NOT NULL DEFAULT 'unknown',
                         og_title text NULL,
                         og_description text NULL,
                         og_type text NULL,

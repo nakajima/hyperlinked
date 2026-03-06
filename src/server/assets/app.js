@@ -418,6 +418,227 @@ function initializeUrlIntent() {
   scheduleLookup();
 }
 
+function initializeTaggingModelDiscovery() {
+  const form = document.querySelector("[data-tagging-settings-form]");
+  if (!(form instanceof HTMLFormElement)) {
+    return;
+  }
+
+  const baseUrlInput = form.querySelector("[data-tagging-base-url]");
+  const modelSelect = form.querySelector("[data-tagging-model-select]");
+  const apiKeyInput = form.querySelector("[data-tagging-api-key]");
+  const authHeaderNameInput = form.querySelector("[data-tagging-auth-header-name]");
+  const authHeaderPrefixInput = form.querySelector("[data-tagging-auth-header-prefix]");
+  const modelStatus = form.querySelector("[data-tagging-model-status]");
+
+  if (
+    !(baseUrlInput instanceof HTMLInputElement) ||
+    !(modelSelect instanceof HTMLSelectElement) ||
+    !(modelStatus instanceof HTMLElement)
+  ) {
+    return;
+  }
+
+  let lookupTimer = null;
+  let activeController = null;
+  let latestLookupRequestId = 0;
+  let lastLookupKey = "";
+
+  const trimmedOrEmpty = (value) => (typeof value === "string" ? value.trim() : "");
+  const readInputValue = (input) =>
+    input instanceof HTMLInputElement ? trimmedOrEmpty(input.value) : "";
+
+  const selectedModel = () => {
+    const value = trimmedOrEmpty(modelSelect.value);
+    if (value) {
+      return value;
+    }
+    const selected = modelSelect.selectedOptions.item(0);
+    if (!selected) {
+      return "";
+    }
+    return trimmedOrEmpty(selected.value || selected.textContent || "");
+  };
+
+  const setStatus = (text) => {
+    modelStatus.textContent = text;
+  };
+
+  const applyModelOptions = (models, preferredModel) => {
+    const options = [];
+    const seen = new Set();
+
+    for (const model of models) {
+      const normalized = trimmedOrEmpty(model);
+      if (!normalized) {
+        continue;
+      }
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      options.push(normalized);
+    }
+
+    const preferred = trimmedOrEmpty(preferredModel);
+    if (preferred && !seen.has(preferred.toLowerCase())) {
+      options.unshift(preferred);
+    }
+
+    modelSelect.innerHTML = "";
+    if (options.length === 0) {
+      const placeholder = document.createElement("option");
+      placeholder.value = preferred;
+      placeholder.textContent = preferred || "No models found";
+      modelSelect.append(placeholder);
+      modelSelect.disabled = !preferred;
+      if (preferred) {
+        modelSelect.value = preferred;
+      }
+      return;
+    }
+
+    for (const model of options) {
+      const option = document.createElement("option");
+      option.value = model;
+      option.textContent = model;
+      modelSelect.append(option);
+    }
+
+    modelSelect.disabled = false;
+    if (preferred) {
+      modelSelect.value = preferred;
+    } else {
+      modelSelect.selectedIndex = 0;
+    }
+  };
+
+  const buildRequestPayload = () => ({
+    base_url: trimmedOrEmpty(baseUrlInput.value),
+    api_key: readInputValue(apiKeyInput),
+    auth_header_name: readInputValue(authHeaderNameInput),
+    auth_header_prefix: readInputValue(authHeaderPrefixInput),
+  });
+
+  const cancelLookup = () => {
+    if (lookupTimer !== null) {
+      window.clearTimeout(lookupTimer);
+      lookupTimer = null;
+    }
+
+    if (activeController) {
+      activeController.abort();
+      activeController = null;
+    }
+  };
+
+  const runLookup = async () => {
+    const requestPayload = buildRequestPayload();
+    if (!requestPayload.base_url) {
+      lastLookupKey = "";
+      cancelLookup();
+      setStatus("Model options load from the configured endpoint.");
+      return;
+    }
+
+    const requestKey = JSON.stringify(requestPayload);
+    if (requestKey === lastLookupKey) {
+      return;
+    }
+    lastLookupKey = requestKey;
+
+    if (activeController) {
+      activeController.abort();
+    }
+
+    const lookupRequestId = ++latestLookupRequestId;
+    const controller = new AbortController();
+    activeController = controller;
+    const previousSelection = selectedModel();
+    setStatus("Loading model options...");
+
+    try {
+      const response = await fetch("/admin/tagging-models", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(requestPayload),
+        signal: controller.signal,
+      });
+
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (_) {}
+
+      if (lookupRequestId !== latestLookupRequestId) {
+        return;
+      }
+
+      if (!response.ok) {
+        const errorMessage =
+          typeof payload?.error === "string" && payload.error.trim().length > 0
+            ? payload.error.trim()
+            : `Model lookup failed (${response.status}).`;
+        setStatus(errorMessage);
+        return;
+      }
+
+      const models = Array.isArray(payload?.models) ? payload.models : [];
+      applyModelOptions(models, previousSelection);
+
+      if (models.length > 0) {
+        setStatus(
+          `Loaded ${models.length} model option${models.length === 1 ? "" : "s"}.`,
+        );
+      } else {
+        setStatus("Endpoint returned no models. Keeping the current model.");
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+      if (lookupRequestId !== latestLookupRequestId) {
+        return;
+      }
+      setStatus("Could not load models from the endpoint.");
+    } finally {
+      if (activeController === controller) {
+        activeController = null;
+      }
+    }
+  };
+
+  const scheduleLookup = () => {
+    if (lookupTimer !== null) {
+      window.clearTimeout(lookupTimer);
+    }
+
+    lookupTimer = window.setTimeout(() => {
+      lookupTimer = null;
+      void runLookup();
+    }, 350);
+  };
+
+  const watchInput = (input) => {
+    if (!(input instanceof HTMLInputElement)) {
+      return;
+    }
+    input.addEventListener("input", scheduleLookup);
+    input.addEventListener("change", scheduleLookup);
+  };
+
+  watchInput(baseUrlInput);
+  watchInput(apiKeyInput);
+  watchInput(authHeaderNameInput);
+  watchInput(authHeaderPrefixInput);
+
+  void runLookup();
+}
+
 document.addEventListener(
   "change",
   (event) => {
@@ -495,6 +716,7 @@ document.addEventListener(
 );
 
 initializeUrlIntent();
+initializeTaggingModelDiscovery();
 
 function updateQueuePendingBadge(pending) {
   const badge = document.querySelector("[data-queue-pending-badge]");

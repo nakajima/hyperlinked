@@ -20,7 +20,10 @@ use tokio::{net::lookup_host, process::Command, time::sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::{
-    entity::{hyperlink, hyperlink_artifact::HyperlinkArtifactKind},
+    entity::{
+        hyperlink::{self, HyperlinkSourceType},
+        hyperlink_artifact::HyperlinkArtifactKind,
+    },
     model::{hyperlink_artifact, settings},
     processors::processor::{ProcessingError, Processor},
     server::font_diagnostics::{self, ScreenshotFontDiagnostics},
@@ -34,6 +37,7 @@ const MAX_TOTAL_CSS_BYTES: usize = 20 * 1024 * 1024;
 const SNAPSHOT_CONTENT_TYPE: &str = hyperlink_artifact::SNAPSHOT_WARC_GZIP_CONTENT_TYPE;
 const SNAPSHOT_ERROR_CONTENT_TYPE: &str = "application/json";
 const PDF_SOURCE_DEFAULT_CONTENT_TYPE: &str = "application/pdf";
+const PDF_SIGNATURE: &[u8] = b"%PDF-";
 const SCREENSHOT_CONTENT_TYPE: &str = "image/webp";
 const SCREENSHOT_ERROR_CONTENT_TYPE: &str = "application/json";
 const SCREENSHOT_WEBP_QUALITY: f32 = 85.0;
@@ -92,6 +96,83 @@ impl Processor for SnapshotFetcher {
     ) -> Result<Self::Output, super::processor::ProcessingError> {
         let hyperlink_id = *hyperlink.id.as_ref();
         let source_url = hyperlink.url.as_ref().to_string();
+        let collection_settings = settings::load(connection)
+            .await
+            .map_err(ProcessingError::DB)?;
+
+        if hyperlink_source_type(hyperlink) == HyperlinkSourceType::Pdf {
+            if let Some(source_artifact) = hyperlink_artifact::latest_for_hyperlink_kind(
+                connection,
+                hyperlink_id,
+                HyperlinkArtifactKind::PdfSource,
+            )
+            .await
+            .map_err(ProcessingError::DB)?
+            {
+                let mut output = SnapshotFetchOutput {
+                    source_artifact_id: source_artifact.id,
+                    source_artifact_kind: HyperlinkArtifactKind::PdfSource,
+                    screenshot_artifact_id: None,
+                    screenshot_dark_artifact_id: None,
+                    screenshot_thumb_artifact_id: None,
+                    screenshot_thumb_dark_artifact_id: None,
+                    screenshot_error_artifact_id: None,
+                };
+
+                if collection_settings.collect_screenshots {
+                    let pdf_payload = hyperlink_artifact::load_payload(&source_artifact)
+                        .await
+                        .map_err(ProcessingError::DB)?;
+                    match build_pdf_thumbnail_from_source(&pdf_payload, screenshot_thumbnail_size())
+                    {
+                        Ok(thumbnail_webp) => {
+                            let thumbnail_artifact = hyperlink_artifact::insert(
+                                connection,
+                                hyperlink_id,
+                                Some(self.job_id),
+                                HyperlinkArtifactKind::ScreenshotThumbWebp,
+                                thumbnail_webp,
+                                SCREENSHOT_CONTENT_TYPE,
+                            )
+                            .await
+                            .map_err(ProcessingError::DB)?;
+                            output.screenshot_thumb_artifact_id = Some(thumbnail_artifact.id);
+                        }
+                        Err(error) => {
+                            let font_diagnostics = current_screenshot_font_diagnostics();
+                            let payload = serde_json::to_vec_pretty(&ScreenshotFailureArtifact {
+                                source_url: source_url.clone(),
+                                failed_at: now_utc().to_string(),
+                                errors: vec![format!("failed to render pdf thumbnail: {error}")],
+                                chromium_path: screenshot_chromium_path(),
+                                timeout_secs: screenshot_timeout().as_secs(),
+                                font_diagnostics,
+                            })
+                            .unwrap_or_else(|encode_error| {
+                                format!(
+                                    "{{\"error\":\"failed to encode screenshot error payload: {encode_error}\"}}"
+                                )
+                                .into_bytes()
+                            });
+                            let error_artifact = hyperlink_artifact::insert(
+                                connection,
+                                hyperlink_id,
+                                Some(self.job_id),
+                                HyperlinkArtifactKind::ScreenshotError,
+                                payload,
+                                SCREENSHOT_ERROR_CONTENT_TYPE,
+                            )
+                            .await
+                            .map_err(ProcessingError::DB)?;
+                            output.screenshot_error_artifact_id = Some(error_artifact.id);
+                        }
+                    }
+                }
+
+                hyperlink.source_type = sea_orm::ActiveValue::Set(HyperlinkSourceType::Pdf);
+                return Ok(output);
+            }
+        }
 
         match capture_snapshot(hyperlink.url.as_ref()).await {
             Ok(capture) => {
@@ -116,6 +197,12 @@ impl Processor for SnapshotFetcher {
                     }
                 };
 
+                hyperlink.source_type = sea_orm::ActiveValue::Set(match kind {
+                    HyperlinkArtifactKind::PdfSource => HyperlinkSourceType::Pdf,
+                    HyperlinkArtifactKind::SnapshotWarc => HyperlinkSourceType::Html,
+                    _ => HyperlinkSourceType::Unknown,
+                });
+
                 let source_artifact = hyperlink_artifact::insert(
                     connection,
                     hyperlink_id,
@@ -137,16 +224,11 @@ impl Processor for SnapshotFetcher {
                     screenshot_error_artifact_id: None,
                 };
 
-                let collection_settings = settings::load(connection)
-                    .await
-                    .map_err(ProcessingError::DB)?;
                 if !collection_settings.collect_screenshots {
                     return Ok(output);
                 }
 
-                if should_skip_screenshot_capture_for_source(&output.source_artifact_kind)
-                    || source_url_looks_like_pdf(&source_url)
-                {
+                if should_skip_screenshot_capture_for_source(&output.source_artifact_kind) {
                     if let Some(pdf_payload) = pdf_source_payload_for_thumbnail.as_deref() {
                         match build_pdf_thumbnail_from_source(
                             pdf_payload,
@@ -347,10 +429,11 @@ fn should_skip_screenshot_capture_for_source(source_kind: &HyperlinkArtifactKind
     matches!(source_kind, HyperlinkArtifactKind::PdfSource)
 }
 
-fn source_url_looks_like_pdf(url: &str) -> bool {
-    Url::parse(url)
-        .ok()
-        .is_some_and(|parsed| path_looks_like_pdf(parsed.path()))
+fn hyperlink_source_type(hyperlink: &hyperlink::ActiveModel) -> HyperlinkSourceType {
+    match &hyperlink.source_type {
+        sea_orm::ActiveValue::Set(value) | sea_orm::ActiveValue::Unchanged(value) => value.clone(),
+        sea_orm::ActiveValue::NotSet => HyperlinkSourceType::Unknown,
+    }
 }
 
 enum SnapshotCapture {
@@ -693,7 +776,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
     {
         Ok(response) => response,
         Err(failure) => {
-            if snapshot_content_use_chromium() && !path_looks_like_pdf(parsed.path()) {
+            if snapshot_content_use_chromium() {
                 return match capture_html_with_chromium_response(parsed.clone(), deadline).await {
                     Ok(chromium_response) => {
                         capture_snapshot_from_html_response(
@@ -729,7 +812,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
 
     let source_kind = classify_source_kind(
         source_response.content_type.as_deref(),
-        source_response.url.path(),
+        &source_response.body,
     );
     if matches!(source_kind, SnapshotSourceKind::Pdf) {
         return Ok(SnapshotCapture::Pdf {
@@ -748,7 +831,7 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
         ));
     }
 
-    if snapshot_content_use_chromium() && !path_looks_like_pdf(parsed.path()) {
+    if snapshot_content_use_chromium() {
         match capture_html_with_chromium_response(parsed.clone(), deadline).await {
             Ok(chromium_response) => {
                 if looks_like_pdf_viewer_dom(&chromium_response.body) {
@@ -2010,16 +2093,18 @@ fn retry_policy() -> SnapshotRetryPolicy {
     }
 }
 
-fn classify_source_kind(content_type: Option<&str>, path: &str) -> SnapshotSourceKind {
+fn classify_source_kind(content_type: Option<&str>, payload: &[u8]) -> SnapshotSourceKind {
+    if payload.len() >= PDF_SIGNATURE.len() && &payload[..PDF_SIGNATURE.len()] == PDF_SIGNATURE {
+        return SnapshotSourceKind::Pdf;
+    }
+
     if content_type.is_some_and(is_pdf_content_type) {
         return SnapshotSourceKind::Pdf;
     }
 
     match content_type {
         Some(content_type) if is_html_content_type(content_type) => SnapshotSourceKind::Html,
-        Some(_) if path_looks_like_pdf(path) => SnapshotSourceKind::Pdf,
         Some(_) => SnapshotSourceKind::Unsupported,
-        None if path_looks_like_pdf(path) => SnapshotSourceKind::Pdf,
         None => SnapshotSourceKind::Html,
     }
 }
@@ -2033,11 +2118,6 @@ fn is_pdf_content_type(content_type: &str) -> bool {
     content_type
         .to_ascii_lowercase()
         .contains("application/pdf")
-}
-
-fn path_looks_like_pdf(path: &str) -> bool {
-    let normalized = path.to_ascii_lowercase();
-    normalized.ends_with(".pdf") || normalized.ends_with("/pdf") || normalized.contains("/pdf/")
 }
 
 fn looks_like_pdf_viewer_dom(payload: &[u8]) -> bool {
@@ -2277,23 +2357,15 @@ mod tests {
     #[test]
     fn classifies_pdf_sources() {
         assert_eq!(
-            classify_source_kind(Some("application/pdf; charset=binary"), "/doc"),
+            classify_source_kind(Some("application/pdf; charset=binary"), b"not-a-pdf"),
             SnapshotSourceKind::Pdf
         );
         assert_eq!(
-            classify_source_kind(Some("application/pdf"), "/pdf/2602.11988"),
+            classify_source_kind(Some("application/pdf"), b"%PDF-1.7"),
             SnapshotSourceKind::Pdf
         );
         assert_eq!(
-            classify_source_kind(None, "/files/paper.PDF"),
-            SnapshotSourceKind::Pdf
-        );
-        assert_eq!(
-            classify_source_kind(Some("application/octet-stream"), "/files/paper.pdf"),
-            SnapshotSourceKind::Pdf
-        );
-        assert_eq!(
-            classify_source_kind(None, "/pdf/2602.11988"),
+            classify_source_kind(None, b"%PDF-1.6\n%"),
             SnapshotSourceKind::Pdf
         );
     }
@@ -2301,15 +2373,15 @@ mod tests {
     #[test]
     fn classifies_html_and_unsupported_sources() {
         assert_eq!(
-            classify_source_kind(Some("text/html; charset=utf-8"), "/"),
+            classify_source_kind(Some("text/html; charset=utf-8"), b"<html></html>"),
             SnapshotSourceKind::Html
         );
         assert_eq!(
-            classify_source_kind(Some("text/html"), "/docs/landing.pdf"),
+            classify_source_kind(Some("text/html"), b"<html></html>"),
             SnapshotSourceKind::Html
         );
         assert_eq!(
-            classify_source_kind(Some("application/json"), "/api/data"),
+            classify_source_kind(Some("application/json"), b"{\"ok\":true}"),
             SnapshotSourceKind::Unsupported
         );
     }
@@ -2340,13 +2412,12 @@ mod tests {
         assert!(!should_skip_screenshot_capture_for_source(
             &HyperlinkArtifactKind::SnapshotWarc
         ));
-        assert!(source_url_looks_like_pdf(
-            "https://arxiv.org/pdf/2602.11988"
-        ));
-        assert!(source_url_looks_like_pdf(
-            "https://example.com/files/paper.pdf"
-        ));
-        assert!(!source_url_looks_like_pdf("https://example.com/article"));
+    }
+
+    #[test]
+    fn defaults_hyperlink_source_type_to_unknown_when_unset() {
+        let active = hyperlink::ActiveModel::default();
+        assert_eq!(hyperlink_source_type(&active), HyperlinkSourceType::Unknown);
     }
 
     #[test]

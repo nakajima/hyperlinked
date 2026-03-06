@@ -157,7 +157,8 @@ async fn classify_tags_openai_compatible(
     settings: &TaggingSettings,
     request: &LlmTaggingRequest,
 ) -> Result<LlmTaggingResponse, ProcessingError> {
-    let endpoint = chat_completions_endpoint(&settings.base_url).map_err(ProcessingError::FetchError)?;
+    let endpoint =
+        chat_completions_endpoint(&settings.base_url).map_err(ProcessingError::FetchError)?;
     let system_prompt = build_system_prompt();
     let user_prompt = build_user_prompt(request);
 
@@ -204,9 +205,10 @@ async fn classify_tags_openai_compatible(
         builder = builder.header(header_name, header_value);
     }
 
-    let response = builder.send().await.map_err(|error| {
-        ProcessingError::FetchError(format!("llm request failed: {error}"))
-    })?;
+    let response = builder
+        .send()
+        .await
+        .map_err(|error| ProcessingError::FetchError(format!("llm request failed: {error}")))?;
     let status = response.status();
     let body_text = response.text().await.map_err(|error| {
         ProcessingError::FetchError(format!("failed to read llm response body: {error}"))
@@ -222,7 +224,9 @@ async fn classify_tags_openai_compatible(
         ProcessingError::FetchError(format!("failed to parse llm response json: {error}"))
     })?;
     let content = extract_chat_message_content(&response_json).ok_or_else(|| {
-        ProcessingError::FetchError("llm response did not include choices[0].message.content".to_string())
+        ProcessingError::FetchError(
+            "llm response did not include choices[0].message.content".to_string(),
+        )
     })?;
     let parsed = parse_ranked_tags_content(&content)?;
 

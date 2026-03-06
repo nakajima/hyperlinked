@@ -9,8 +9,8 @@ use sea_orm::{
 use serde::Deserialize;
 
 use crate::{
-    entity::hyperlink_processing_job::HyperlinkProcessingJobKind,
     entity::hyperlink,
+    entity::hyperlink_processing_job::HyperlinkProcessingJobKind,
     model::{
         hyperlink_processing_job::{self, ProcessingQueueSender},
         settings, tagging_settings, url_canonicalize,

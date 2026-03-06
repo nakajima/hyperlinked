@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     entity::{
-        hyperlink,
+        hyperlink::{self, HyperlinkSourceType},
         hyperlink_artifact::{self, HyperlinkArtifactKind},
         hyperlink_processing_job,
     },
@@ -56,7 +56,10 @@ pub fn links() -> Router<Context> {
         .route("/hyperlinks/{id}/update", routing::post(update_html_post))
         .route("/hyperlinks/{id}/delete", routing::post(delete_html_post))
         .route("/hyperlinks/{id}/reprocess", routing::post(reprocess))
-        .route("/hyperlinks/{id}/tags", routing::post(update_tags_html_post))
+        .route(
+            "/hyperlinks/{id}/tags",
+            routing::post(update_tags_html_post),
+        )
         .route(
             "/hyperlinks/{id}/artifacts/{kind}",
             routing::get(download_latest_artifact),
@@ -92,6 +95,7 @@ struct HyperlinkResponse {
     title: String,
     url: String,
     raw_url: String,
+    source_type: String,
     clicks_count: i32,
     last_clicked_at: Option<String>,
     processing_state: String,
@@ -392,8 +396,10 @@ async fn update_tags_html_post(
     };
 
     let parsed_tags = hyperlink_tagging::parse_manual_tags_input(&form.tags);
-    let normalized_tags =
-        hyperlink_tagging::normalize_manual_tags_for_vocabulary(&parsed_tags, &tagging_settings.vocabulary);
+    let normalized_tags = hyperlink_tagging::normalize_manual_tags_for_vocabulary(
+        &parsed_tags,
+        &tagging_settings.vocabulary,
+    );
 
     if !parsed_tags.is_empty() && normalized_tags.is_empty() {
         return redirect_with_flash(
@@ -737,13 +743,11 @@ async fn index_with_kind(
         };
 
     match kind {
-        ResponseKind::Text => {
-            views::render_html_page_with_flash(
-                "Hyperlinks",
-                render_index(&results, &tags_by_hyperlink),
-                flash,
-            )
-        }
+        ResponseKind::Text => views::render_html_page_with_flash(
+            "Hyperlinks",
+            render_index(&results, &tags_by_hyperlink),
+            flash,
+        ),
         ResponseKind::Json => {
             let items = results
                 .links
@@ -928,14 +932,13 @@ async fn show_with_kind(state: &Context, id: i32, kind: ResponseKind, flash: Fla
                         );
                     }
                 };
-            let link_tag_meta = match hyperlink_tagging::latest_for_hyperlink(&state.connection, id)
-                .await
-            {
-                Ok(tags) => tags,
-                Err(err) => {
-                    return hyperlink_internal_error(kind, id, "load tags for", err);
-                }
-            };
+            let link_tag_meta =
+                match hyperlink_tagging::latest_for_hyperlink(&state.connection, id).await {
+                    Ok(tags) => tags,
+                    Err(err) => {
+                        return hyperlink_internal_error(kind, id, "load tags for", err);
+                    }
+                };
             let discovered_tags_by_hyperlink = match hyperlink_tagging::latest_for_hyperlinks(
                 &state.connection,
                 &discovered_link_ids,
@@ -1149,6 +1152,7 @@ fn to_response(
         ),
         url: model.url.clone(),
         raw_url: model.raw_url.clone(),
+        source_type: hyperlink_source_type_name(&model.source_type).to_string(),
         clicks_count: model.clicks_count,
         last_clicked_at: model.last_clicked_at.as_ref().map(ToString::to_string),
         processing_state: processing_state_name(latest_job).to_string(),
@@ -1161,6 +1165,14 @@ fn processing_state_name(job: Option<&hyperlink_processing_job::Model>) -> &'sta
     match job {
         Some(job) => crate::model::hyperlink_processing_job::state_name(job.state.clone()),
         None => "idle",
+    }
+}
+
+fn hyperlink_source_type_name(source_type: &HyperlinkSourceType) -> &'static str {
+    match source_type {
+        HyperlinkSourceType::Unknown => "unknown",
+        HyperlinkSourceType::Html => "html",
+        HyperlinkSourceType::Pdf => "pdf",
     }
 }
 
@@ -1390,11 +1402,7 @@ impl<'a> HyperlinksIndexTemplate<'a> {
     }
 
     fn link_is_pdf(&self, hyperlink: &hyperlink::Model) -> bool {
-        if let Some(source_artifact) = self.latest_source_artifacts.get(&hyperlink.id) {
-            return source_artifact.kind == HyperlinkArtifactKind::PdfSource;
-        }
-
-        url_path_looks_pdf(hyperlink.url.as_str())
+        matches!(hyperlink.source_type, HyperlinkSourceType::Pdf)
     }
 
     fn link_primary_tag(&self, hyperlink_id: i32) -> Option<&str> {
@@ -1520,7 +1528,7 @@ impl<'a> HyperlinksShowTemplate<'a> {
     }
 
     fn missing_artifact_kinds(&self) -> Vec<HyperlinkArtifactKind> {
-        required_show_artifact_kinds(&self.link.url, self.latest_artifacts)
+        required_show_artifact_kinds(&self.link.source_type, self.latest_artifacts)
             .into_iter()
             .filter(|kind| !self.latest_artifacts.contains_key(kind))
             .collect()
@@ -1611,17 +1619,7 @@ impl<'a> HyperlinksShowTemplate<'a> {
     }
 
     fn link_is_pdf(&self, hyperlink: &hyperlink::Model) -> bool {
-        if hyperlink.id == self.link.id {
-            if let Some(kind) = latest_source_artifact_kind(self.latest_artifacts) {
-                return kind == HyperlinkArtifactKind::PdfSource;
-            }
-        } else if let Some(source_artifact) =
-            self.discovered_latest_source_artifacts.get(&hyperlink.id)
-        {
-            return source_artifact.kind == HyperlinkArtifactKind::PdfSource;
-        }
-
-        url_path_looks_pdf(hyperlink.url.as_str())
+        matches!(hyperlink.source_type, HyperlinkSourceType::Pdf)
     }
 
     fn link_primary_tag(&self, hyperlink_id: i32) -> Option<&str> {
@@ -1956,11 +1954,11 @@ fn show_artifact_kinds() -> [HyperlinkArtifactKind; 15] {
 }
 
 fn required_show_artifact_kinds(
-    hyperlink_url: &str,
+    source_type: &HyperlinkSourceType,
     latest_artifacts: &HashMap<HyperlinkArtifactKind, hyperlink_artifact::Model>,
 ) -> Vec<HyperlinkArtifactKind> {
     vec![
-        required_source_artifact_kind(hyperlink_url, latest_artifacts),
+        required_source_artifact_kind(source_type, latest_artifacts),
         HyperlinkArtifactKind::ScreenshotWebp,
         HyperlinkArtifactKind::ScreenshotDarkWebp,
         HyperlinkArtifactKind::ScreenshotThumbWebp,
@@ -1972,14 +1970,14 @@ fn required_show_artifact_kinds(
 }
 
 fn required_source_artifact_kind(
-    hyperlink_url: &str,
+    source_type: &HyperlinkSourceType,
     latest_artifacts: &HashMap<HyperlinkArtifactKind, hyperlink_artifact::Model>,
 ) -> HyperlinkArtifactKind {
     if let Some(kind) = latest_source_artifact_kind(latest_artifacts) {
         return kind;
     }
 
-    if url_path_looks_pdf(hyperlink_url) {
+    if matches!(source_type, HyperlinkSourceType::Pdf) {
         HyperlinkArtifactKind::PdfSource
     } else {
         HyperlinkArtifactKind::SnapshotWarc
@@ -2012,12 +2010,6 @@ fn artifact_is_newer(
 ) -> bool {
     candidate.created_at > current.created_at
         || (candidate.created_at == current.created_at && candidate.id > current.id)
-}
-
-fn url_path_looks_pdf(url: &str) -> bool {
-    url.split(['?', '#'])
-        .next()
-        .is_some_and(|prefix| prefix.to_ascii_lowercase().ends_with(".pdf"))
 }
 
 fn artifact_kind_info(
@@ -2629,8 +2621,8 @@ mod tests {
     async fn show_missing_artifacts_uses_pdf_source_for_pdf_links() {
         let server = new_server_with_seed(Some(
             r#"
-                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
-                VALUES (1, 'Paper', 'https://example.com/paper.pdf', 'https://example.com/paper.pdf', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Paper', 'https://example.com/paper.pdf', 'https://example.com/paper.pdf', 'pdf', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
                 INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
                 VALUES (1, 1, NULL, 'readable_meta', X'7B7D', 'application/json', 2, '2026-02-19 00:00:01');
             "#,
@@ -2650,8 +2642,8 @@ mod tests {
     async fn show_missing_artifacts_prefers_existing_snapshot_source_for_pdf_url() {
         let server = new_server_with_seed(Some(
             r#"
-                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
-                VALUES (1, 'Paper', 'https://example.com/paper.pdf', 'https://example.com/paper.pdf', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Paper', 'https://example.com/paper.pdf', 'https://example.com/paper.pdf', 'pdf', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
                 INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
                 VALUES
                     (1, 1, NULL, 'snapshot_warc', X'57415243', 'application/warc', 4, '2026-02-19 00:00:01'),
@@ -2920,12 +2912,13 @@ mod tests {
     async fn show_renders_pdf_iframe_and_skips_screenshot_preview_for_pdf_sources() {
         let server = new_server_with_seed(Some(
             r#"
-                INSERT INTO hyperlink (id, title, url, raw_url, clicks_count, last_clicked_at, created_at, updated_at)
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, clicks_count, last_clicked_at, created_at, updated_at)
                 VALUES (
                     1,
                     'Example paper',
                     'https://example.com/paper.pdf',
                     'https://example.com/paper.pdf',
+                    'pdf',
                     0,
                     NULL,
                     '2026-02-22 00:00:00',
@@ -3615,19 +3608,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn index_query_type_pdf_uses_artifact_classification_with_url_fallback() {
+    async fn index_query_type_pdf_uses_source_type_not_url_or_artifact_fallbacks() {
         let server = new_server_with_seed(Some(
             r#"
-                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
                 VALUES
-                    (1, 'ArXiv', 'https://arxiv.org/pdf/2602.11988', 'https://arxiv.org/pdf/2602.11988', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00'),
-                    (2, 'Pdf Suffix Html', 'https://example.com/report.pdf', 'https://example.com/report.pdf', 0, 0, NULL, '2026-02-19 00:00:01', '2026-02-19 00:00:01'),
-                    (3, 'Pending Pdf', 'https://example.com/pending.pdf', 'https://example.com/pending.pdf', 0, 0, NULL, '2026-02-19 00:00:02', '2026-02-19 00:00:02'),
-                    (4, 'Article', 'https://example.com/article', 'https://example.com/article', 0, 0, NULL, '2026-02-19 00:00:03', '2026-02-19 00:00:03');
+                    (1, 'ArXiv', 'https://arxiv.org/pdf/2602.11988', 'https://arxiv.org/pdf/2602.11988', 'pdf', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00'),
+                    (2, 'Pdf Suffix Html', 'https://example.com/report.pdf', 'https://example.com/report.pdf', 'html', 0, 0, NULL, '2026-02-19 00:00:01', '2026-02-19 00:00:01'),
+                    (3, 'Pending Pdf', 'https://example.com/pending.pdf', 'https://example.com/pending.pdf', 'pdf', 0, 0, NULL, '2026-02-19 00:00:02', '2026-02-19 00:00:02'),
+                    (4, 'Article', 'https://example.com/article', 'https://example.com/article', 'html', 0, 0, NULL, '2026-02-19 00:00:03', '2026-02-19 00:00:03');
                 INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
                 VALUES
-                    (10, 1, NULL, 'pdf_source', X'25504446', 'application/pdf', 4, '2026-02-19 00:00:04'),
-                    (11, 2, NULL, 'snapshot_warc', X'57415243', 'application/warc', 4, '2026-02-19 00:00:05');
+                    (10, 1, NULL, 'snapshot_warc', X'57415243', 'application/warc', 4, '2026-02-19 00:00:04'),
+                    (11, 2, NULL, 'pdf_source', X'25504446', 'application/pdf', 4, '2026-02-19 00:00:05');
             "#,
         ))
         .await;
@@ -3661,15 +3654,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn index_renders_pdf_badge_for_pdf_source_without_pdf_suffix() {
+    async fn index_renders_pdf_badge_for_pdf_source_type_without_pdf_suffix() {
         let server = new_server_with_seed(Some(
             r#"
-                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
                 VALUES
-                    (1, 'ArXiv', 'https://arxiv.org/pdf/2602.11988', 'https://arxiv.org/pdf/2602.11988', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
-                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
-                VALUES
-                    (10, 1, NULL, 'pdf_source', X'25504446', 'application/pdf', 4, '2026-02-19 00:00:01');
+                    (1, 'ArXiv', 'https://arxiv.org/pdf/2602.11988', 'https://arxiv.org/pdf/2602.11988', 'pdf', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
             "#,
         ))
         .await;
@@ -3685,10 +3675,10 @@ mod tests {
     async fn index_uses_dark_thumbnail_artifacts_without_frontend_pdf_filter() {
         let server = new_server_with_seed(Some(
             r#"
-                INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
                 VALUES
-                    (1, 'PDF Link', 'https://arxiv.org/pdf/2602.11988', 'https://arxiv.org/pdf/2602.11988', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00'),
-                    (2, 'HTML Link', 'https://example.com/article', 'https://example.com/article', 0, 0, NULL, '2026-02-19 00:00:01', '2026-02-19 00:00:01');
+                    (1, 'PDF Link', 'https://arxiv.org/pdf/2602.11988', 'https://arxiv.org/pdf/2602.11988', 'pdf', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00'),
+                    (2, 'HTML Link', 'https://example.com/article', 'https://example.com/article', 'html', 0, 0, NULL, '2026-02-19 00:00:01', '2026-02-19 00:00:01');
                 INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
                 VALUES
                     (10, 1, NULL, 'pdf_source', X'25504446', 'application/pdf', 4, '2026-02-19 00:00:02'),

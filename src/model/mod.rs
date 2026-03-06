@@ -1,9 +1,9 @@
 pub mod hyperlink;
 pub mod hyperlink_artifact;
 pub mod hyperlink_processing_job;
-pub mod hyperlink_tagging;
 pub mod hyperlink_relation;
 pub mod hyperlink_search_doc;
+pub mod hyperlink_tagging;
 pub mod hyperlink_title;
 pub mod hyperlink_tombstone;
 pub mod kv_store;

@@ -3,10 +3,7 @@ use std::collections::{HashMap, HashSet};
 use sea_orm::{DatabaseConnection, DbErr};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    entity::hyperlink_artifact::HyperlinkArtifactKind,
-    model::hyperlink_artifact,
-};
+use crate::{entity::hyperlink_artifact::HyperlinkArtifactKind, model::hyperlink_artifact};
 
 pub const TAG_META_CONTENT_TYPE: &str = "application/json";
 pub const TAGGING_PROMPT_VERSION: &str = "v1";
@@ -192,7 +189,10 @@ pub fn normalize_ranked_tags_for_vocabulary(
     normalized
 }
 
-pub fn normalize_manual_tags_for_vocabulary(raw_tags: &[String], vocabulary: &[String]) -> Vec<String> {
+pub fn normalize_manual_tags_for_vocabulary(
+    raw_tags: &[String],
+    vocabulary: &[String],
+) -> Vec<String> {
     if vocabulary.is_empty() {
         return dedupe_tags(raw_tags.to_vec());
     }

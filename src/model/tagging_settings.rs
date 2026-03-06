@@ -137,7 +137,10 @@ pub async fn load(connection: &DatabaseConnection) -> Result<TaggingSettings, Db
         },
         auth_header_prefix: match values.get(KEY_AUTH_HEADER_PREFIX) {
             Some(value) => parse_non_empty(Some(value.clone())),
-            None => defaults.auth_header_prefix.as_ref().map(ToString::to_string),
+            None => defaults
+                .auth_header_prefix
+                .as_ref()
+                .map(ToString::to_string),
         },
         vocabulary,
     }

@@ -189,6 +189,7 @@ fn schema(
 
     builder.register_enumeration::<hyperlink_processing_job::HyperlinkProcessingJobState>();
     builder.register_enumeration::<hyperlink_processing_job::HyperlinkProcessingJobKind>();
+    builder.register_enumeration::<hyperlink::HyperlinkSourceType>();
     builder.register_enumeration::<hyperlink_artifact::HyperlinkArtifactKind>();
 
     builder

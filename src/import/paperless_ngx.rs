@@ -449,6 +449,7 @@ async fn persist_paperless_document(
         raw_url: Set(placeholder_url),
         discovery_depth: Set(crate::model::hyperlink::ROOT_DISCOVERY_DEPTH),
         clicks_count: Set(0),
+        source_type: Set(hyperlink::HyperlinkSourceType::Pdf),
         created_at: Set(created_at),
         updated_at: Set(now),
         ..Default::default()

@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     io::{ErrorKind, Read, Seek, Write},
     path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 use axum::{
@@ -11,6 +12,10 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing,
+};
+use reqwest::{
+    Url,
+    header::{HeaderName, HeaderValue},
 };
 use sailfish::Template;
 use sea_orm::{
@@ -68,6 +73,9 @@ const BACKUP_ARTIFACTS_DIR: &str = "artifacts";
 const BACKUP_ARTIFACT_READ_CONCURRENCY: usize = 4;
 const BACKUP_DEFLATE_LEVEL_BEST: i32 = 9;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TAGGING_MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_TAGGING_AUTH_HEADER_NAME: &str = "Authorization";
+const DEFAULT_TAGGING_AUTH_HEADER_PREFIX: &str = "Bearer";
 
 pub fn routes() -> Router<Context> {
     Router::new()
@@ -100,6 +108,7 @@ pub fn routes() -> Router<Context> {
             "/admin/tagging-settings",
             routing::post(update_tagging_settings),
         )
+        .route("/admin/tagging-models", routing::post(fetch_tagging_models))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -166,6 +175,14 @@ struct TaggingSettingsForm {
     auth_header_name: Option<String>,
     auth_header_prefix: Option<String>,
     vocabulary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaggingModelsRequest {
+    base_url: Option<String>,
+    api_key: Option<String>,
+    auth_header_name: Option<String>,
+    auth_header_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -289,6 +306,11 @@ struct AdminStatusResponse {
     backup: BackupStatusResponse,
     import: ImportStatusResponse,
     server_time: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TaggingModelsResponse {
+    models: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -901,6 +923,167 @@ async fn update_tagging_settings(
     };
 
     redirect_with_flash(&headers, "/admin", FlashName::Notice, message)
+}
+
+async fn fetch_tagging_models(
+    State(state): State<Context>,
+    Json(request): Json<TaggingModelsRequest>,
+) -> Response {
+    let current = match tagging_settings::load(&state.connection).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AdminApiError {
+                    error: format!("failed to load current tagging settings: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let TaggingSettings {
+        api_key: current_api_key,
+        auth_header_name: current_auth_header_name,
+        auth_header_prefix: current_auth_header_prefix,
+        ..
+    } = current;
+    let TaggingModelsRequest {
+        base_url,
+        api_key,
+        auth_header_name,
+        auth_header_prefix,
+    } = request;
+
+    let base_url = base_url.unwrap_or_default();
+    let endpoint = match tagging_models_endpoint(&base_url) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(AdminApiError {
+                    error: format!("invalid base URL: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(TAGGING_MODELS_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AdminApiError {
+                    error: format!("failed to build model discovery client: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let mut builder = client.get(endpoint);
+    let api_key = trimmed_non_empty(api_key.as_deref()).or(current_api_key);
+    if let Some(api_key) = api_key {
+        let header_name = match auth_header_name {
+            Some(value) => trimmed_non_empty(Some(value.as_str())),
+            None => current_auth_header_name,
+        }
+        .unwrap_or_else(|| DEFAULT_TAGGING_AUTH_HEADER_NAME.to_string());
+        let header_prefix = match auth_header_prefix {
+            Some(value) => trimmed_non_empty(Some(value.as_str())),
+            None => current_auth_header_prefix,
+        }
+        .unwrap_or_else(|| DEFAULT_TAGGING_AUTH_HEADER_PREFIX.to_string());
+        let header_value = if header_prefix.is_empty() {
+            api_key
+        } else {
+            format!("{header_prefix} {api_key}")
+        };
+
+        let header_name = match HeaderName::from_bytes(header_name.as_bytes()) {
+            Ok(header_name) => header_name,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AdminApiError {
+                        error: format!("invalid auth header name: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let header_value = match HeaderValue::from_str(&header_value) {
+            Ok(header_value) => header_value,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AdminApiError {
+                        error: format!("invalid auth header value: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+
+        builder = builder.header(header_name, header_value);
+    }
+
+    let response = match builder.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(AdminApiError {
+                    error: format!("failed to fetch model list: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let status = response.status();
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(AdminApiError {
+                    error: format!("failed to read model list response: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    if !status.is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(AdminApiError {
+                error: format!("model list request failed with status {status}: {body}"),
+            }),
+        )
+            .into_response();
+    }
+
+    let payload: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(AdminApiError {
+                    error: format!("failed to parse model list response json: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    Json(TaggingModelsResponse {
+        models: extract_tagging_model_ids(&payload),
+    })
+    .into_response()
 }
 
 async fn clear_queue(State(state): State<Context>, headers: HeaderMap) -> Response {
@@ -2384,6 +2567,94 @@ fn response_error(status: StatusCode, message: impl Into<String>) -> Response {
     views::render_error_page(status, message, "/admin", "Back to admin")
 }
 
+fn tagging_models_endpoint(base_url: &str) -> Result<Url, String> {
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return Err("base URL is empty".to_string());
+    }
+
+    let mut parsed =
+        Url::parse(base_url).map_err(|error| format!("invalid base URL `{base_url}`: {error}"))?;
+    let base_path = parsed.path().trim_end_matches('/');
+
+    let endpoint_path = if base_path.ends_with("/chat/completions") {
+        let prefix = base_path.trim_end_matches("/chat/completions");
+        if prefix.is_empty() {
+            "/models".to_string()
+        } else {
+            format!("{prefix}/models")
+        }
+    } else if base_path.is_empty() || base_path == "/" {
+        "/models".to_string()
+    } else if base_path.ends_with("/models") {
+        base_path.to_string()
+    } else {
+        format!("{base_path}/models")
+    };
+
+    parsed.set_path(&endpoint_path);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Ok(parsed)
+}
+
+fn extract_tagging_model_ids(payload: &serde_json::Value) -> Vec<String> {
+    let mut models = Vec::new();
+
+    if let Some(data) = payload.get("data") {
+        collect_tagging_model_ids(&mut models, data);
+    }
+    if let Some(data) = payload.get("models") {
+        collect_tagging_model_ids(&mut models, data);
+    }
+
+    if models.is_empty() {
+        collect_tagging_model_ids(&mut models, payload);
+    }
+
+    let mut deduped = HashSet::new();
+    models.retain(|model| deduped.insert(model.to_ascii_lowercase()));
+    models.sort_unstable();
+    models
+}
+
+fn collect_tagging_model_ids(models: &mut Vec<String>, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::String(model) => push_tagging_model_id(models, model),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_tagging_model_ids(models, item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(id) = map.get("id").and_then(serde_json::Value::as_str) {
+                push_tagging_model_id(models, id);
+            }
+            if let Some(model) = map.get("model").and_then(serde_json::Value::as_str) {
+                push_tagging_model_id(models, model);
+            }
+            if let Some(name) = map.get("name").and_then(serde_json::Value::as_str) {
+                push_tagging_model_id(models, name);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_tagging_model_id(models: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    models.push(trimmed.to_string());
+}
+
+fn trimmed_non_empty(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 fn format_bytes(bytes: u64) -> String {
     format_bytes_f64(bytes as f64)
 }
@@ -2417,6 +2688,7 @@ mod tests {
         ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter,
         QueryOrder, Statement,
     };
+    use serde_json::json;
     use std::{
         io::Cursor,
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -2435,6 +2707,56 @@ mod tests {
 
     fn default_tagging_settings() -> TaggingSettings {
         TaggingSettings::default()
+    }
+
+    #[test]
+    fn tagging_models_endpoint_appends_models_suffix() {
+        let endpoint =
+            tagging_models_endpoint("https://api.openai.com/v1").expect("endpoint should parse");
+        assert_eq!(endpoint.as_str(), "https://api.openai.com/v1/models");
+    }
+
+    #[test]
+    fn tagging_models_endpoint_replaces_chat_completions_suffix() {
+        let endpoint = tagging_models_endpoint("https://api.openai.com/v1/chat/completions")
+            .expect("endpoint should parse");
+        assert_eq!(endpoint.as_str(), "https://api.openai.com/v1/models");
+    }
+
+    #[test]
+    fn extract_tagging_model_ids_reads_openai_data_list() {
+        let payload = json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-4o-mini" },
+                { "id": "gpt-4.1-mini" }
+            ]
+        });
+        let models = extract_tagging_model_ids(&payload);
+        assert_eq!(
+            models,
+            vec!["gpt-4.1-mini".to_string(), "gpt-4o-mini".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_tagging_model_ids_reads_models_array_variants() {
+        let payload = json!({
+            "models": [
+                "llama3.2:3b",
+                { "name": "qwen3:14b" },
+                { "model": "mistral-small" }
+            ]
+        });
+        let models = extract_tagging_model_ids(&payload);
+        assert_eq!(
+            models,
+            vec![
+                "llama3.2:3b".to_string(),
+                "mistral-small".to_string(),
+                "qwen3:14b".to_string()
+            ]
+        );
     }
 
     #[test]

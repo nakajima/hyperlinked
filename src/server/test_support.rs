@@ -17,6 +17,7 @@ const HYPERLINK_TABLE_SQL: &str = r#"
         discovery_depth integer NOT NULL DEFAULT 0,
         clicks_count integer NOT NULL DEFAULT 0,
         last_clicked_at datetime_text NULL,
+        source_type varchar NOT NULL DEFAULT 'unknown',
         created_at datetime_text NOT NULL,
         updated_at datetime_text NOT NULL
     );

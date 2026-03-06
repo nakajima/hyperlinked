@@ -1,5 +1,6 @@
 use std::{
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -128,6 +129,7 @@ pub(crate) enum BackupDownloadError {
 
 const BACKUP_FILE_PREFIX: &str = "hyperlinked-backup-";
 const BACKUP_FILE_SUFFIX: &str = ".zip";
+static BACKUP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(test))]
 const BACKUP_LATEST_POINTER_FILE: &str = "hyperlinked-backup-latest-path.txt";
 
@@ -292,10 +294,11 @@ fn backup_output_path(job_id: u64) -> PathBuf {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
+        .as_nanos();
+    let sequence = BACKUP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     std::env::temp_dir().join(format!(
-        "{BACKUP_FILE_PREFIX}{timestamp}-{pid}-{job_id}{BACKUP_FILE_SUFFIX}"
+        "{BACKUP_FILE_PREFIX}{timestamp}-{pid}-{job_id}-{sequence}{BACKUP_FILE_SUFFIX}"
     ))
 }
 

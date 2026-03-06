@@ -45,6 +45,7 @@ type Hyperlink {
 	discoveryDepth: Int!
 	clicksCount: Int!
 	lastClickedAt: String
+	sourceType: HyperlinkSourceTypeEnum!
 	createdAt: String!
 	updatedAt: String!
 	hyperlinkProcessingJob(filters: HyperlinkProcessingJobFilterInput, orderBy: HyperlinkProcessingJobOrderInput, pagination: PaginationInput): HyperlinkProcessingJobConnection!
@@ -151,6 +152,25 @@ enum HyperlinkChangeType {
 	DELETED
 }
 
+enum HyperlinkSourceTypeEnum {
+	unknown
+	html
+	pdf
+}
+
+input HyperlinkSourceTypeEnumFilterInput {
+	eq: HyperlinkSourceTypeEnum
+	ne: HyperlinkSourceTypeEnum
+	gt: HyperlinkSourceTypeEnum
+	gte: HyperlinkSourceTypeEnum
+	lt: HyperlinkSourceTypeEnum
+	lte: HyperlinkSourceTypeEnum
+	is_in: [HyperlinkSourceTypeEnum!]
+	is_not_in: [HyperlinkSourceTypeEnum!]
+	is_null: HyperlinkSourceTypeEnum
+	is_not_null: HyperlinkSourceTypeEnum
+}
+
 type HyperlinkConnection {
 	pageInfo: PageInfo!
 	paginationInfo: PaginationInfo
@@ -177,6 +197,7 @@ input HyperlinkFilterInput {
 	discoveryDepth: IntegerFilterInput
 	clicksCount: IntegerFilterInput
 	lastClickedAt: TextFilterInput
+	sourceType: HyperlinkSourceTypeEnumFilterInput
 	createdAt: TextFilterInput
 	updatedAt: TextFilterInput
 	and: [HyperlinkFilterInput!]
@@ -197,6 +218,7 @@ input HyperlinkOrderInput {
 	discoveryDepth: OrderByEnum
 	clicksCount: OrderByEnum
 	lastClickedAt: OrderByEnum
+	sourceType: OrderByEnum
 	createdAt: OrderByEnum
 	updatedAt: OrderByEnum
 }

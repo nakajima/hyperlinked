@@ -52,6 +52,7 @@ struct HyperlinkResponse {
     title: String,
     url: String,
     raw_url: String,
+    source_type: String,
     clicks_count: i32,
     last_clicked_at: Option<String>,
     processing_state: String,
@@ -120,6 +121,7 @@ async fn create_upload(State(state): State<Context>, mut multipart: Multipart) -
         raw_url: Set(placeholder_url),
         discovery_depth: Set(crate::model::hyperlink::ROOT_DISCOVERY_DEPTH),
         clicks_count: Set(0),
+        source_type: Set(hyperlink::HyperlinkSourceType::Pdf),
         created_at: Set(now_utc()),
         updated_at: Set(now_utc()),
         ..Default::default()
@@ -418,6 +420,11 @@ fn to_response(
         title: link.title.clone(),
         url: link.url.clone(),
         raw_url: link.raw_url.clone(),
+        source_type: match link.source_type {
+            hyperlink::HyperlinkSourceType::Unknown => "unknown".to_string(),
+            hyperlink::HyperlinkSourceType::Html => "html".to_string(),
+            hyperlink::HyperlinkSourceType::Pdf => "pdf".to_string(),
+        },
         clicks_count: link.clicks_count,
         last_clicked_at: link.last_clicked_at.map(|value| value.to_string()),
         processing_state: latest_job
