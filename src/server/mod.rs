@@ -2,6 +2,7 @@ pub mod admin;
 pub(crate) mod admin_backup;
 pub(crate) mod admin_import;
 pub mod admin_jobs;
+pub(crate) mod admin_tag_reclassify;
 mod chromium_diagnostics;
 pub mod context;
 pub mod controllers;
@@ -65,6 +66,7 @@ pub async fn start(
         processing_queue: Some(processing_queue),
         backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
         backup_imports: crate::server::admin_import::AdminImportManager::default(),
+        tag_reclassify: crate::server::admin_tag_reclassify::AdminTagReclassifyManager::default(),
     };
     let app = Router::<context::Context>::new()
         .route("/", get(|| async { Redirect::temporary("/hyperlinks") }))

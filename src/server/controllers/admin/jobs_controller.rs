@@ -895,6 +895,8 @@ mod tests {
                 processing_queue: None,
                 backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
                 backup_imports: crate::server::admin_import::AdminImportManager::default(),
+                tag_reclassify:
+                    crate::server::admin_tag_reclassify::AdminTagReclassifyManager::default(),
             });
 
         (

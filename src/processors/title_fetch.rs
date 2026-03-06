@@ -7,7 +7,7 @@ use tokio::net::lookup_host;
 
 use crate::entity::hyperlink;
 use crate::model::hyperlink_title;
-use crate::processors::processor::{ProcessingError, Processor};
+use crate::processors::processor::Processor;
 
 pub struct TitleFetcher {}
 
@@ -19,16 +19,23 @@ impl Processor for TitleFetcher {
         hyperlink: &'a mut hyperlink::ActiveModel,
         _connection: &'a DatabaseConnection,
     ) -> Result<Self::Output, super::processor::ProcessingError> {
-        if let Some(title) = fetch_title_from_url(hyperlink.url.as_ref())
-            .await
-            .map_err(ProcessingError::FetchError)?
-        {
-            let cleaned_title = hyperlink_title::strip_site_affixes(
-                title.as_str(),
-                hyperlink.url.as_ref(),
-                hyperlink.raw_url.as_ref(),
-            );
-            hyperlink.title = Set(cleaned_title);
+        match fetch_title_from_url(hyperlink.url.as_ref()).await {
+            Ok(Some(title)) => {
+                let cleaned_title = hyperlink_title::strip_site_affixes(
+                    title.as_str(),
+                    hyperlink.url.as_ref(),
+                    hyperlink.raw_url.as_ref(),
+                );
+                hyperlink.title = Set(cleaned_title);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(
+                    url = hyperlink.url.as_ref(),
+                    error = %error,
+                    "skipping title fetch due to non-fatal fetch error"
+                );
+            }
         }
         Ok(())
     }
@@ -152,6 +159,7 @@ fn extract_html_title(document: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{ActiveValue::Set, Database};
 
     #[test]
     fn extracts_title_from_html() {
@@ -172,5 +180,21 @@ mod tests {
         assert!(!is_private_ip(
             "8.8.8.8".parse::<IpAddr>().expect("valid ip")
         ));
+    }
+
+    #[tokio::test]
+    async fn process_ignores_relative_url_parse_errors() {
+        let connection = Database::connect("sqlite::memory:")
+            .await
+            .expect("in-memory db should initialize");
+        let mut hyperlink = hyperlink::ActiveModel {
+            title: Set("Uploaded PDF".to_string()),
+            url: Set("/uploads/1/file.pdf".to_string()),
+            raw_url: Set("/uploads/1/file.pdf".to_string()),
+            ..Default::default()
+        };
+
+        let result = TitleFetcher {}.process(&mut hyperlink, &connection).await;
+        assert!(result.is_ok());
     }
 }

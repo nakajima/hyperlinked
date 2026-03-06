@@ -57,6 +57,32 @@ const HYPERLINK_ARTIFACT_TABLE_SQL: &str = r#"
 "#;
 
 #[cfg(test)]
+const TAG_TABLE_SQL: &str = r#"
+    CREATE TABLE tag (
+        id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+        name varchar NOT NULL,
+        name_key varchar NOT NULL,
+        state varchar NOT NULL DEFAULT 'AI_PENDING',
+        created_at datetime_text NOT NULL,
+        updated_at datetime_text NOT NULL,
+        UNIQUE(name_key)
+    );
+"#;
+
+#[cfg(test)]
+const HYPERLINK_TAG_TABLE_SQL: &str = r#"
+    CREATE TABLE hyperlink_tag (
+        id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+        hyperlink_id integer NOT NULL,
+        tag_id integer NOT NULL,
+        source varchar NOT NULL DEFAULT 'AI',
+        created_at datetime_text NOT NULL,
+        updated_at datetime_text NOT NULL,
+        UNIQUE(hyperlink_id, tag_id)
+    );
+"#;
+
+#[cfg(test)]
 const HYPERLINK_RELATION_TABLE_SQL: &str = r#"
     CREATE TABLE hyperlink_relation (
         id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -222,6 +248,8 @@ pub(crate) async fn initialize_jobs_schema(connection: &DatabaseConnection) {
 pub(crate) async fn initialize_hyperlinks_schema(connection: &DatabaseConnection) {
     initialize_jobs_schema(connection).await;
     execute_sql(connection, HYPERLINK_ARTIFACT_TABLE_SQL).await;
+    execute_sql(connection, TAG_TABLE_SQL).await;
+    execute_sql(connection, HYPERLINK_TAG_TABLE_SQL).await;
     execute_sql(connection, HYPERLINK_RELATION_TABLE_SQL).await;
     execute_sql(connection, HYPERLINK_TOMBSTONE_TABLE_SQL).await;
 }

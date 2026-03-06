@@ -141,6 +141,39 @@
     </form>
   </section>
 
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3" data-admin-tag-reclassify>
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Reclassify tags</h3>
+    <p class="text-sm text-tertiary">Run an AI pass across every link and collect pending tag suggestions.</p>
+    <div class="flex flex-row flex-wrap items-center gap-[0.4rem]">
+      <button type="button" data-admin-tag-reclassify-start class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Reclassify all links</button>
+      <button type="button" data-admin-tag-reclassify-cancel class="hidden min-h-10 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65" disabled>Cancel reclassify</button>
+    </div>
+    <p class="text-sm text-tertiary" data-admin-tag-reclassify-status aria-live="polite">Reclassify is idle.</p>
+    <p class="text-sm text-tertiary hidden" data-admin-tag-reclassify-progress aria-live="polite"></p>
+  </section>
+
+  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3" data-admin-pending-tags>
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Pending discovered tags</h3>
+    <p class="text-sm text-tertiary">Select tags to approve. Approved tags are added to vocabulary.</p>
+    <% if self.pending_tags.is_empty() { %>
+      <p class="text-sm text-tertiary">No pending tags.</p>
+    <% } else { %>
+      <form action="/admin/tags/approve" method="post" class="flex flex-col gap-2">
+        <div class="flex flex-col gap-1">
+          <% for pending in self.pending_tags { %>
+            <label class="flex items-start gap-2 text-sm">
+              <input type="checkbox" name="tag_ids" value="<%= pending.id %>" class="mt-0.5 h-4 w-4 shrink-0 rounded border border-form-control-border bg-form-control accent-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+              <span><%= pending.name %> (<%= pending.hyperlink_count %> links)</span>
+            </label>
+          <% } %>
+        </div>
+        <div>
+          <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Approve selected tags</button>
+        </div>
+      </form>
+    <% } %>
+  </section>
+
   <% if self.chromium.has_missing_binary() { %>
     <section class="flex flex-col gap-3 rounded-[0.4rem] border border-invalid bg-form-control px-3 py-3" aria-labelledby="chrome-setup-heading">
       <h3 id="chrome-setup-heading" class="text-lg font-semibold leading-7 tracking-tight text-alert">Screenshot browser setup required</h3>

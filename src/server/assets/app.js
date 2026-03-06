@@ -1071,12 +1071,161 @@ function initializeAdminImportControls() {
   return true;
 }
 
+function initializeAdminTagReclassifyControls() {
+  const container = document.querySelector("[data-admin-tag-reclassify]");
+  if (!(container instanceof HTMLElement)) {
+    return false;
+  }
+
+  const startButton = container.querySelector("[data-admin-tag-reclassify-start]");
+  const cancelButton = container.querySelector("[data-admin-tag-reclassify-cancel]");
+  const statusText = container.querySelector("[data-admin-tag-reclassify-status]");
+  const progressText = container.querySelector("[data-admin-tag-reclassify-progress]");
+
+  if (
+    !(startButton instanceof HTMLButtonElement) ||
+    !(cancelButton instanceof HTMLButtonElement) ||
+    !(statusText instanceof HTMLElement) ||
+    !(progressText instanceof HTMLElement)
+  ) {
+    return false;
+  }
+
+  let actionInFlight = false;
+  let latestStatus = null;
+  let previousState = "idle";
+  let reloadedAfterReady = false;
+
+  const applyStatus = (status) => {
+    latestStatus = status;
+    const state = typeof status?.state === "string" ? status.state : "idle";
+    const isRunning = state === "running";
+    startButton.disabled = actionInFlight || isRunning;
+    cancelButton.disabled = actionInFlight || !isRunning;
+    cancelButton.classList.toggle("hidden", !isRunning);
+
+    if (isRunning) {
+      const processed = Number(status?.processed);
+      const total = Number(status?.total);
+      statusText.textContent = "Reclassifying tags...";
+      if (Number.isFinite(processed) && Number.isFinite(total) && total >= 0) {
+        progressText.textContent = `${processed}/${total} links`;
+      } else {
+        progressText.textContent = "Working";
+      }
+      progressText.classList.remove("hidden");
+      return;
+    }
+
+    progressText.classList.add("hidden");
+    progressText.textContent = "";
+
+    if (state === "ready") {
+      const processed = Number(status?.processed);
+      const total = Number(status?.total);
+      if (Number.isFinite(processed) && Number.isFinite(total) && total >= 0) {
+        statusText.textContent = `Reclassify complete (${processed}/${total} links).`;
+      } else {
+        statusText.textContent = "Reclassify complete.";
+      }
+      if (previousState === "running" && !reloadedAfterReady) {
+        reloadedAfterReady = true;
+        window.setTimeout(() => {
+          window.location.reload();
+        }, 350);
+      }
+      previousState = state;
+      return;
+    }
+
+    if (state === "failed") {
+      const error =
+        typeof status?.error === "string" && status.error.trim().length > 0
+          ? status.error.trim()
+          : "unknown error";
+      statusText.textContent = `Reclassify failed: ${error}`;
+      previousState = state;
+      return;
+    }
+
+    if (state === "cancelled") {
+      statusText.textContent = "Reclassify canceled.";
+      previousState = state;
+      return;
+    }
+
+    statusText.textContent = "Reclassify is idle.";
+    previousState = state;
+  };
+
+  async function postReclassifyStart() {
+    if (actionInFlight) {
+      return;
+    }
+    actionInFlight = true;
+    applyStatus(latestStatus);
+    try {
+      await fetch("/admin/tags/reclassify/start", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+    } catch (_) {
+    } finally {
+      actionInFlight = false;
+      applyStatus(latestStatus);
+      await refreshAdminStatus();
+    }
+  }
+
+  async function postReclassifyCancel() {
+    if (actionInFlight) {
+      return;
+    }
+    actionInFlight = true;
+    applyStatus(latestStatus);
+    try {
+      await fetch("/admin/tags/reclassify/cancel", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+    } catch (_) {
+    } finally {
+      actionInFlight = false;
+      applyStatus(latestStatus);
+      await refreshAdminStatus();
+    }
+  }
+
+  startButton.addEventListener("click", () => {
+    void postReclassifyStart();
+  });
+  cancelButton.addEventListener("click", () => {
+    void postReclassifyCancel();
+  });
+
+  window.addEventListener(ADMIN_STATUS_EVENT, (event) => {
+    if (!(event instanceof CustomEvent)) {
+      return;
+    }
+    applyStatus(event.detail?.tag_reclassify);
+  });
+
+  applyStatus(null);
+  return true;
+}
+
 function initializeAdminStatusPolling() {
   const hasQueueBadge = document.querySelector("[data-queue-pending-badge]");
   const hasBackupControls = initializeAdminBackupControls();
   const hasImportControls = initializeAdminImportControls();
+  const hasTagReclassifyControls = initializeAdminTagReclassifyControls();
 
-  if (!hasQueueBadge && !hasBackupControls && !hasImportControls) {
+  if (
+    !hasQueueBadge &&
+    !hasBackupControls &&
+    !hasImportControls &&
+    !hasTagReclassifyControls
+  ) {
     return;
   }
 

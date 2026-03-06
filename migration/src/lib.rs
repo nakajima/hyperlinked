@@ -19,6 +19,7 @@ mod m20260226_000016_add_hyperlink_tombstones;
 mod m20260226_000017_add_hyperlink_artifact_size_index;
 mod m20260227_000018_create_app_kv_store;
 mod m20260306_000019_add_hyperlink_source_type;
+mod m20260306_000020_create_tags_and_hyperlink_tags;
 
 pub struct Migrator;
 
@@ -45,6 +46,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260226_000017_add_hyperlink_artifact_size_index::Migration),
             Box::new(m20260227_000018_create_app_kv_store::Migration),
             Box::new(m20260306_000019_add_hyperlink_source_type::Migration),
+            Box::new(m20260306_000020_create_tags_and_hyperlink_tags::Migration),
         ]
     }
 }

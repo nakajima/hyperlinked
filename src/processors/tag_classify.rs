@@ -12,7 +12,7 @@ use serde_json::json;
 use crate::{
     entity::hyperlink,
     model::{
-        hyperlink_tagging::{self, LlmPersistInput, RankedTag},
+        hyperlink_tagging::{self, LlmPersistInput, PersistedRankedTag, RankedTag, TagState},
         tagging_settings::{TaggingProvider, TaggingSettings},
     },
     processors::processor::{ProcessingError, Processor},
@@ -23,6 +23,12 @@ const MINIMUM_TAG_CONFIDENCE: f32 = 0.35;
 
 pub struct TagClassifier {
     job_id: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TagClassificationMode {
+    VocabularyOnly,
+    DiscoverWithPending,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -46,69 +52,97 @@ impl Processor for TagClassifier {
         hyperlink: &'a mut hyperlink::ActiveModel,
         connection: &'a DatabaseConnection,
     ) -> Result<Self::Output, ProcessingError> {
-        let settings = crate::model::tagging_settings::load(connection)
-            .await
-            .map_err(ProcessingError::DB)?;
-
-        if !settings.classification_enabled() {
-            return Ok(TagClassificationOutput {
-                classified: false,
-                skipped_reason: Some("tagging disabled".to_string()),
-                tag_count: 0,
-            });
-        }
-
-        let hyperlink_id = *hyperlink.id.as_ref();
-        if let Some(existing) = hyperlink_tagging::latest_for_hyperlink(connection, hyperlink_id)
-            .await
-            .map_err(ProcessingError::DB)?
-        {
-            if existing.manual_override {
-                return Ok(TagClassificationOutput {
-                    classified: false,
-                    skipped_reason: Some("manual override".to_string()),
-                    tag_count: existing.ranked_tags.len(),
-                });
-            }
-        }
-
-        let request = LlmTaggingRequest {
-            title: hyperlink.title.as_ref().to_string(),
-            url: hyperlink.url.as_ref().to_string(),
-            og_title: hyperlink.og_title.as_ref().clone(),
-            og_description: hyperlink.og_description.as_ref().clone(),
-            vocabulary: settings.vocabulary.clone(),
-        };
-
-        let llm_response = classify_tags_with_provider(&settings, &request).await?;
-        let normalized_tags = hyperlink_tagging::normalize_ranked_tags_for_vocabulary(
-            llm_response.ranked_tags,
-            &settings.vocabulary,
-            MINIMUM_TAG_CONFIDENCE,
-        );
-
-        hyperlink_tagging::persist_llm_tags(
+        classify_hyperlink(
             connection,
-            hyperlink_id,
-            self.job_id,
-            LlmPersistInput {
-                ranked_tags: normalized_tags.clone(),
-                overall_confidence: llm_response.overall_confidence,
-                rationale: llm_response.rationale,
-                provider: settings.provider.as_storage().to_string(),
-                model: settings.model.clone(),
-                prompt_version: hyperlink_tagging::TAGGING_PROMPT_VERSION.to_string(),
-                classified_at: Utc::now().to_rfc3339(),
-            },
+            hyperlink,
+            Some(self.job_id),
+            TagClassificationMode::VocabularyOnly,
         )
+        .await
+    }
+}
+
+pub async fn classify_hyperlink(
+    connection: &DatabaseConnection,
+    hyperlink: &mut hyperlink::ActiveModel,
+    job_id: Option<i32>,
+    mode: TagClassificationMode,
+) -> Result<TagClassificationOutput, ProcessingError> {
+    let settings = crate::model::tagging_settings::load(connection)
         .await
         .map_err(ProcessingError::DB)?;
 
-        Ok(TagClassificationOutput {
-            classified: true,
-            skipped_reason: None,
-            tag_count: normalized_tags.len(),
-        })
+    if !settings.classification_enabled() {
+        return Ok(TagClassificationOutput {
+            classified: false,
+            skipped_reason: Some("tagging disabled".to_string()),
+            tag_count: 0,
+        });
+    }
+
+    let hyperlink_id = *hyperlink.id.as_ref();
+    let request = LlmTaggingRequest {
+        title: hyperlink.title.as_ref().to_string(),
+        url: hyperlink.url.as_ref().to_string(),
+        og_title: hyperlink.og_title.as_ref().clone(),
+        og_description: hyperlink.og_description.as_ref().clone(),
+        vocabulary: settings.vocabulary.clone(),
+    };
+
+    let llm_response = classify_tags_with_provider(&settings, &request, mode).await?;
+    let normalized_tags = normalize_for_mode(llm_response.ranked_tags, &settings.vocabulary, mode);
+
+    hyperlink_tagging::persist_llm_tags(
+        connection,
+        hyperlink_id,
+        job_id,
+        LlmPersistInput {
+            ranked_tags: normalized_tags.clone(),
+            overall_confidence: llm_response.overall_confidence,
+            rationale: llm_response.rationale,
+            provider: settings.provider.as_storage().to_string(),
+            model: settings.model.clone(),
+            prompt_version: hyperlink_tagging::TAGGING_PROMPT_VERSION.to_string(),
+            classified_at: Utc::now().to_rfc3339(),
+        },
+    )
+    .await
+    .map_err(ProcessingError::DB)?;
+
+    Ok(TagClassificationOutput {
+        classified: true,
+        skipped_reason: None,
+        tag_count: normalized_tags.len(),
+    })
+}
+
+fn normalize_for_mode(
+    ranked_tags: Vec<RankedTag>,
+    vocabulary: &[String],
+    mode: TagClassificationMode,
+) -> Vec<PersistedRankedTag> {
+    match mode {
+        TagClassificationMode::VocabularyOnly => {
+            hyperlink_tagging::normalize_ranked_tags_for_vocabulary(
+                ranked_tags,
+                vocabulary,
+                MINIMUM_TAG_CONFIDENCE,
+            )
+            .into_iter()
+            .map(|ranked| PersistedRankedTag {
+                tag: ranked.tag,
+                confidence: ranked.confidence,
+                state_if_new: TagState::AiApproved,
+            })
+            .collect()
+        }
+        TagClassificationMode::DiscoverWithPending => {
+            hyperlink_tagging::normalize_ranked_tags_with_discovery(
+                ranked_tags,
+                vocabulary,
+                MINIMUM_TAG_CONFIDENCE,
+            )
+        }
     }
 }
 
@@ -145,10 +179,11 @@ struct ParsedRankedTag {
 async fn classify_tags_with_provider(
     settings: &TaggingSettings,
     request: &LlmTaggingRequest,
+    mode: TagClassificationMode,
 ) -> Result<LlmTaggingResponse, ProcessingError> {
     match settings.provider {
         TaggingProvider::OpenAiCompatible => {
-            classify_tags_openai_compatible(settings, request).await
+            classify_tags_openai_compatible(settings, request, mode).await
         }
     }
 }
@@ -156,11 +191,12 @@ async fn classify_tags_with_provider(
 async fn classify_tags_openai_compatible(
     settings: &TaggingSettings,
     request: &LlmTaggingRequest,
+    mode: TagClassificationMode,
 ) -> Result<LlmTaggingResponse, ProcessingError> {
     let endpoint =
         chat_completions_endpoint(&settings.base_url).map_err(ProcessingError::FetchError)?;
-    let system_prompt = build_system_prompt();
-    let user_prompt = build_user_prompt(request);
+    let system_prompt = build_system_prompt(mode);
+    let user_prompt = build_user_prompt(request, mode);
 
     let body = json!({
         "model": settings.model,
@@ -251,8 +287,10 @@ async fn classify_tags_openai_compatible(
     })
 }
 
-fn build_system_prompt() -> &'static str {
-    "You classify a hyperlink into ranked tags.
+fn build_system_prompt(mode: TagClassificationMode) -> &'static str {
+    match mode {
+        TagClassificationMode::VocabularyOnly => {
+            "You classify a hyperlink into ranked tags.
 Return strict JSON only.
 Output schema:
 {
@@ -265,15 +303,37 @@ Rules:
 - Rank tags from best to worst.
 - Include only tags that are actually justified; zero tags is valid.
 - Confidence must be between 0.0 and 1.0."
+        }
+        TagClassificationMode::DiscoverWithPending => {
+            "You classify a hyperlink into ranked tags.
+Return strict JSON only.
+Output schema:
+{
+  \"ranked_tags\": [{\"tag\": \"string\", \"confidence\": 0.0}],
+  \"overall_confidence\": 0.0,
+  \"rationale\": \"optional short reason\"
+}
+Rules:
+- Prefer tags from the provided vocabulary when they fit.
+- You may propose concise new tags when none of the provided vocabulary fits well.
+- Rank tags from best to worst.
+- Include only tags that are actually justified; zero tags is valid.
+- Confidence must be between 0.0 and 1.0."
+        }
+    }
 }
 
-fn build_user_prompt(request: &LlmTaggingRequest) -> String {
+fn build_user_prompt(request: &LlmTaggingRequest, mode: TagClassificationMode) -> String {
     let payload = json!({
         "title": request.title,
         "url": request.url,
         "og_title": request.og_title,
         "og_description": request.og_description,
         "vocabulary": request.vocabulary,
+        "mode": match mode {
+            TagClassificationMode::VocabularyOnly => "vocabulary_only",
+            TagClassificationMode::DiscoverWithPending => "discover_with_pending",
+        }
     });
     format!("Classify this hyperlink payload:\n{payload}")
 }
@@ -306,7 +366,6 @@ fn extract_chat_message_content(response_json: &serde_json::Value) -> Option<Str
         return Some(text.to_string());
     }
 
-    // Some providers return content as a list of typed parts.
     let parts = content.as_array()?;
     let mut joined = String::new();
     for part in parts {
