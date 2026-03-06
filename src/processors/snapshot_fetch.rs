@@ -1,5 +1,9 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::{SinkExt, StreamExt};
+use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_syntax::Pdf;
+use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::{RenderSettings as HayroRenderSettings, render as hayro_render};
 use image::{GenericImageView, imageops::FilterType};
 use reqwest::{Url, header::CONTENT_TYPE};
 use sea_orm::DatabaseConnection;
@@ -10,6 +14,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::{net::lookup_host, process::Command, time::sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -90,6 +95,7 @@ impl Processor for SnapshotFetcher {
 
         match capture_snapshot(hyperlink.url.as_ref()).await {
             Ok(capture) => {
+                let mut pdf_source_payload_for_thumbnail = None;
                 let (kind, payload, content_type) = match capture {
                     SnapshotCapture::Html { archive } => {
                         let compressed =
@@ -104,7 +110,10 @@ impl Processor for SnapshotFetcher {
                     SnapshotCapture::Pdf {
                         payload,
                         content_type,
-                    } => (HyperlinkArtifactKind::PdfSource, payload, content_type),
+                    } => {
+                        pdf_source_payload_for_thumbnail = Some(payload.clone());
+                        (HyperlinkArtifactKind::PdfSource, payload, content_type)
+                    }
                 };
 
                 let source_artifact = hyperlink_artifact::insert(
@@ -128,14 +137,64 @@ impl Processor for SnapshotFetcher {
                     screenshot_error_artifact_id: None,
                 };
 
-                if should_skip_screenshot_capture_for_source(&output.source_artifact_kind) {
-                    return Ok(output);
-                }
-
                 let collection_settings = settings::load(connection)
                     .await
                     .map_err(ProcessingError::DB)?;
                 if !collection_settings.collect_screenshots {
+                    return Ok(output);
+                }
+
+                if should_skip_screenshot_capture_for_source(&output.source_artifact_kind) {
+                    if let Some(pdf_payload) = pdf_source_payload_for_thumbnail.as_deref() {
+                        match build_pdf_thumbnail_from_source(
+                            pdf_payload,
+                            screenshot_thumbnail_size(),
+                        ) {
+                            Ok(thumbnail_webp) => {
+                                let thumbnail_artifact = hyperlink_artifact::insert(
+                                    connection,
+                                    hyperlink_id,
+                                    Some(self.job_id),
+                                    HyperlinkArtifactKind::ScreenshotThumbWebp,
+                                    thumbnail_webp,
+                                    SCREENSHOT_CONTENT_TYPE,
+                                )
+                                .await
+                                .map_err(ProcessingError::DB)?;
+                                output.screenshot_thumb_artifact_id = Some(thumbnail_artifact.id);
+                            }
+                            Err(error) => {
+                                let font_diagnostics = current_screenshot_font_diagnostics();
+                                let payload = serde_json::to_vec_pretty(&ScreenshotFailureArtifact {
+                                    source_url: source_url.clone(),
+                                    failed_at: now_utc().to_string(),
+                                    errors: vec![format!(
+                                        "failed to render pdf thumbnail: {error}"
+                                    )],
+                                    chromium_path: screenshot_chromium_path(),
+                                    timeout_secs: screenshot_timeout().as_secs(),
+                                    font_diagnostics,
+                                })
+                                .unwrap_or_else(|encode_error| {
+                                    format!(
+                                        "{{\"error\":\"failed to encode screenshot error payload: {encode_error}\"}}"
+                                    )
+                                    .into_bytes()
+                                });
+                                let error_artifact = hyperlink_artifact::insert(
+                                    connection,
+                                    hyperlink_id,
+                                    Some(self.job_id),
+                                    HyperlinkArtifactKind::ScreenshotError,
+                                    payload,
+                                    SCREENSHOT_ERROR_CONTENT_TYPE,
+                                )
+                                .await
+                                .map_err(ProcessingError::DB)?;
+                                output.screenshot_error_artifact_id = Some(error_artifact.id);
+                            }
+                        }
+                    }
                     return Ok(output);
                 }
 
@@ -1650,6 +1709,52 @@ fn build_square_thumbnail(source_image_bytes: &[u8], size: u32) -> Result<Vec<u8
     encode_webp_from_dynamic_image(&thumbnail)
 }
 
+fn build_pdf_thumbnail_from_source(
+    pdf_payload: &[u8],
+    thumbnail_size: u32,
+) -> Result<Vec<u8>, String> {
+    let pdf = Pdf::new(Arc::new(pdf_payload.to_vec()))
+        .map_err(|error| format!("failed to parse pdf for thumbnail rendering: {error:?}"))?;
+    let page = pdf
+        .pages()
+        .first()
+        .ok_or_else(|| "pdf did not contain any pages".to_string())?;
+
+    let (page_width, page_height) = page.render_dimensions();
+    if !(page_width.is_finite() && page_height.is_finite())
+        || page_width <= 0.0
+        || page_height <= 0.0
+    {
+        return Err(format!(
+            "pdf page dimensions were invalid: width={page_width}, height={page_height}"
+        ));
+    }
+
+    // Render above thumbnail resolution to preserve text legibility before square crop.
+    let target_longest_edge = thumbnail_size.saturating_mul(3).clamp(thumbnail_size, 2048);
+    let longest_edge = page_width.max(page_height).max(1.0);
+    let scale = (target_longest_edge as f32 / longest_edge).clamp(0.1, 8.0);
+    let width = (page_width * scale).round().clamp(1.0, u16::MAX as f32) as u16;
+    let height = (page_height * scale).round().clamp(1.0, u16::MAX as f32) as u16;
+
+    let pixmap = hayro_render(
+        page,
+        &InterpreterSettings::default(),
+        &HayroRenderSettings {
+            x_scale: scale,
+            y_scale: scale,
+            width: Some(width),
+            height: Some(height),
+            bg_color: WHITE,
+        },
+    );
+    let png = pixmap
+        .into_png()
+        .map_err(|error| format!("failed to encode rendered pdf thumbnail as png: {error}"))?;
+    let rendered_webp = encode_webp_from_image_bytes(&png)?;
+    build_square_thumbnail(&rendered_webp, thumbnail_size)
+}
+
 fn encode_webp_from_image_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let image = image::load_from_memory(bytes)
         .map_err(|err| format!("invalid screenshot image payload: {err}"))?;
@@ -2222,6 +2327,12 @@ mod tests {
         assert!(!should_skip_screenshot_capture_for_source(
             &HyperlinkArtifactKind::SnapshotWarc
         ));
+    }
+
+    #[test]
+    fn pdf_thumbnail_render_rejects_invalid_payloads() {
+        let result = build_pdf_thumbnail_from_source(b"not-a-pdf", 400);
+        assert!(result.is_err());
     }
 
     #[test]
