@@ -7,7 +7,7 @@ edition = "2024"
 name = "hyperlinked"
 
 [dependencies]
-lilqueue = { git = "https://github.com/nakajima/lilqueue", rev = "83a74d84ffc43a9af50c05cb3facc568de99009f" }
+lilqueue = { git = "https://github.com/nakajima/lilqueue", branch = "main" }
 async-trait = "0.1.89"
 axum = { version = "0.8.8", features = ["macros", "multipart", "ws"] }
 base64 = "0.22.1"
