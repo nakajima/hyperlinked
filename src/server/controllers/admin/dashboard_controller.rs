@@ -113,6 +113,10 @@ pub fn routes() -> Router<Context> {
         )
         .route("/admin/tagging-models", routing::post(fetch_tagging_models))
         .route(
+            "/admin/tagging-check",
+            routing::post(check_tagging_endpoint),
+        )
+        .route(
             "/admin/tags/reclassify/start",
             routing::post(start_tag_reclassify),
         )
@@ -196,6 +200,16 @@ struct TaggingModelsRequest {
     api_key: Option<String>,
     auth_header_name: Option<String>,
     auth_header_prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaggingCheckRequest {
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    auth_header_name: Option<String>,
+    auth_header_prefix: Option<String>,
+    backend_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,6 +345,12 @@ struct AdminStatusResponse {
 #[derive(Clone, Debug, Serialize)]
 struct TaggingModelsResponse {
     models: Vec<String>,
+    backend_kind: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TaggingCheckResponse {
+    message: String,
     backend_kind: String,
 }
 
@@ -1271,6 +1291,206 @@ async fn fetch_tagging_models(
         .into_response()
 }
 
+async fn check_tagging_endpoint(
+    State(state): State<Context>,
+    Json(request): Json<TaggingCheckRequest>,
+) -> Response {
+    let current = match tagging_settings::load(&state.connection).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AdminApiError {
+                    error: format!("failed to load current tagging settings: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let base_url =
+        trimmed_non_empty(request.base_url.as_deref()).unwrap_or_else(|| current.base_url.clone());
+    if base_url.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(AdminApiError {
+                error: "base URL is required".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let model = trimmed_non_empty(request.model.as_deref()).unwrap_or(current.model.clone());
+    if model.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(AdminApiError {
+                error: "model is required".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let backend_kind = match request.backend_kind.as_deref() {
+        Some(value) => TaggingBackendKind::from_storage(Some(value)),
+        None => current.backend_kind,
+    };
+    let endpoints =
+        match crate::processors::tag_classify::chat_endpoint_candidates(&base_url, backend_kind) {
+            Ok(endpoints) => endpoints,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AdminApiError {
+                        error: format!("invalid base URL: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+
+    let client = match reqwest::Client::builder()
+        .timeout(TAGGING_MODELS_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AdminApiError {
+                    error: format!("failed to build check client: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let api_key = trimmed_non_empty(request.api_key.as_deref()).or(current.api_key);
+    let header_name = match request.auth_header_name {
+        Some(value) => trimmed_non_empty(Some(value.as_str())),
+        None => current.auth_header_name,
+    }
+    .unwrap_or_else(|| DEFAULT_TAGGING_AUTH_HEADER_NAME.to_string());
+    let header_prefix = match request.auth_header_prefix {
+        Some(value) => trimmed_non_empty(Some(value.as_str())),
+        None => current.auth_header_prefix,
+    }
+    .unwrap_or_else(|| DEFAULT_TAGGING_AUTH_HEADER_PREFIX.to_string());
+
+    let mut auth_header: Option<(HeaderName, HeaderValue)> = None;
+    if let Some(api_key) = api_key {
+        let header_value = if header_prefix.is_empty() {
+            api_key
+        } else {
+            format!("{header_prefix} {api_key}")
+        };
+        let header_name = match HeaderName::from_bytes(header_name.as_bytes()) {
+            Ok(name) => name,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AdminApiError {
+                        error: format!("invalid auth header name: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        let header_value = match HeaderValue::from_str(&header_value) {
+            Ok(value) => value,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(AdminApiError {
+                        error: format!("invalid auth header value: {error}"),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+        auth_header = Some((header_name, header_value));
+    }
+
+    let system_prompt = "Reply with strict JSON only.";
+    let user_prompt = "{\"ok\":true}";
+    let mut attempt_failures = Vec::new();
+    for endpoint in endpoints {
+        let endpoint_display = endpoint.url.to_string();
+        let body = crate::processors::tag_classify::build_chat_request_body(
+            endpoint.api_kind,
+            &model,
+            system_prompt,
+            user_prompt,
+        );
+        let mut builder = client
+            .post(endpoint.url)
+            .header(header::CONTENT_TYPE, "application/json")
+            .json(&body);
+        if let Some((header_name, header_value)) = auth_header.as_ref() {
+            builder = builder.header(header_name.clone(), header_value.clone());
+        }
+
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                attempt_failures.push(format!(
+                    "{} [{}] -> request failed: {error}",
+                    endpoint_display,
+                    endpoint.api_kind.as_str()
+                ));
+                continue;
+            }
+        };
+        let status = response.status();
+        let body_text = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                attempt_failures.push(format!(
+                    "{} [{}] -> failed to read response body: {error}",
+                    endpoint_display,
+                    endpoint.api_kind.as_str()
+                ));
+                continue;
+            }
+        };
+
+        if !status.is_success() {
+            attempt_failures.push(format!(
+                "{} [{}] -> status {status}: {}",
+                endpoint_display,
+                endpoint.api_kind.as_str(),
+                truncate_model_discovery_body(&body_text)
+            ));
+            continue;
+        }
+
+        let detected_backend = tagging_backend_kind_for_chat_api(endpoint.api_kind);
+        return (
+            StatusCode::OK,
+            Json(TaggingCheckResponse {
+                message: format!(
+                    "Check succeeded via {} [{}].",
+                    endpoint_display,
+                    endpoint.api_kind.as_str()
+                ),
+                backend_kind: detected_backend.as_storage().to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(AdminApiError {
+            error: format!(
+                "llm request failed across all endpoint candidates: {}",
+                attempt_failures.join(" | ")
+            ),
+        }),
+    )
+        .into_response()
+}
+
 fn truncate_model_discovery_body(body: &str) -> String {
     const MAX_LEN: usize = 240;
     let trimmed = body.trim();
@@ -1411,6 +1631,17 @@ fn tagging_backend_kind_for_models_path(path: &str) -> TaggingBackendKind {
         return TaggingBackendKind::OpenAiCompatible;
     }
     TaggingBackendKind::Unknown
+}
+
+fn tagging_backend_kind_for_chat_api(
+    api_kind: crate::processors::tag_classify::ChatApiKind,
+) -> TaggingBackendKind {
+    match api_kind {
+        crate::processors::tag_classify::ChatApiKind::OpenAiCompatible => {
+            TaggingBackendKind::OpenAiCompatible
+        }
+        crate::processors::tag_classify::ChatApiKind::OllamaApi => TaggingBackendKind::Ollama,
+    }
 }
 
 fn replace_tagging_path_suffix(base_path: &str, from: &str, to: &str) -> Option<String> {

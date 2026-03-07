@@ -89,6 +89,10 @@ enum Commands {
         #[arg(long, default_value_t = 500)]
         batch_size: u64,
     },
+    CleanupMalformedSublinks {
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        dry_run: bool,
+    },
     ReprocessAllSnapshots,
     ExportGraphqlSchema {
         #[arg(
@@ -186,6 +190,9 @@ async fn run() -> Result<i32, String> {
             run_warcs_compress_backfill(batch_size).await
         }
         Commands::TitlesBackfill { batch_size } => run_titles_backfill(batch_size).await,
+        Commands::CleanupMalformedSublinks { dry_run } => {
+            run_cleanup_malformed_sublinks(dry_run).await
+        }
         Commands::ReprocessAllSnapshots => run_reprocess_all_snapshots().await,
         Commands::ExportGraphqlSchema { out } => run_export_graphql_schema(out).await,
     }
@@ -412,6 +419,99 @@ async fn run_titles_backfill(batch_size: u64) -> Result<i32, String> {
     println!(
         "title backfill: scanned={}, updated={}, unchanged={}",
         report.scanned, report.updated, report.unchanged
+    );
+
+    Ok(0)
+}
+
+async fn run_cleanup_malformed_sublinks(dry_run: bool) -> Result<i32, String> {
+    use hyperlinked::entity::{
+        hyperlink, hyperlink_processing_job::HyperlinkProcessingJobKind, hyperlink_relation,
+    };
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+
+    let connection = hyperlinked::db::connection::init()
+        .await
+        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+
+    let malformed_links = hyperlink::Entity::find()
+        .filter(hyperlink::Column::DiscoveryDepth.gt(0))
+        .filter(
+            sea_orm::Condition::any()
+                .add(hyperlink::Column::Url.contains("&quot;"))
+                .add(hyperlink::Column::Url.contains(")["))
+                .add(hyperlink::Column::Url.contains("]("))
+                .add(hyperlink::Column::Url.like("%)**")),
+        )
+        .all(&connection)
+        .await
+        .map_err(|err| format!("failed to load malformed discovered hyperlinks: {err}"))?;
+
+    let malformed_ids = malformed_links
+        .iter()
+        .map(|link| link.id)
+        .collect::<Vec<_>>();
+    let malformed_count = malformed_ids.len();
+    if malformed_ids.is_empty() {
+        println!(
+            "malformed sublink cleanup: dry_run={dry_run} malformed_links=0 affected_parents=0 deleted=0 queued_sublink_jobs=0"
+        );
+        return Ok(0);
+    }
+
+    let affected_parent_ids = hyperlink_relation::Entity::find()
+        .select_only()
+        .column(hyperlink_relation::Column::ParentHyperlinkId)
+        .filter(hyperlink_relation::Column::ChildHyperlinkId.is_in(malformed_ids.clone()))
+        .into_tuple::<i32>()
+        .all(&connection)
+        .await
+        .map_err(|err| format!("failed to load affected parent hyperlinks: {err}"))?
+        .into_iter()
+        .collect::<HashSet<_>>();
+
+    if dry_run {
+        println!(
+            "malformed sublink cleanup: dry_run=true malformed_links={} affected_parents={} deleted=0 queued_sublink_jobs=0",
+            malformed_count,
+            affected_parent_ids.len(),
+        );
+        return Ok(0);
+    }
+
+    let deleted = hyperlink::Entity::delete_many()
+        .filter(hyperlink::Column::Id.is_in(malformed_ids))
+        .exec(&connection)
+        .await
+        .map_err(|err| format!("failed to delete malformed discovered hyperlinks: {err}"))?
+        .rows_affected;
+
+    let processing_queue = hyperlinked::queue::ProcessingQueue::connect(connection.clone())
+        .await
+        .map_err(|err| format!("failed to initialize processing queue: {err}"))?;
+
+    let mut queued = 0usize;
+    for parent_id in affected_parent_ids.iter().copied() {
+        hyperlinked::model::hyperlink_processing_job::enqueue_for_hyperlink_kind(
+            &connection,
+            parent_id,
+            HyperlinkProcessingJobKind::SublinkDiscovery,
+            Some(&processing_queue),
+        )
+        .await
+        .map_err(|err| {
+            format!(
+                "failed to enqueue sublink discovery job for parent hyperlink {parent_id}: {err}"
+            )
+        })?;
+        queued += 1;
+    }
+
+    println!(
+        "malformed sublink cleanup: dry_run=false malformed_links={} affected_parents={} deleted={} queued_sublink_jobs={queued}",
+        malformed_count,
+        affected_parent_ids.len(),
+        deleted,
     );
 
     Ok(0)

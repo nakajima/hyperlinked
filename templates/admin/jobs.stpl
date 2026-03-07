@@ -37,6 +37,14 @@
         <span class="text-tertiary">Total:</span>
         <span><%= self.stats.total %></span>
       </div>
+      <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
+        <span class="text-tertiary">Worker concurrency:</span>
+        <% if let Some(worker_concurrency) = self.worker_concurrency { %>
+          <span><%= worker_concurrency %></span>
+        <% } else { %>
+          <span>N/A</span>
+        <% } %>
+      </div>
     </div>
   </section>
 

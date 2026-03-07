@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use pulldown_cmark::{Event, Parser as MarkdownParser, Tag};
 use reqwest::Url;
 use sea_orm::DatabaseConnection;
 
@@ -158,117 +159,37 @@ fn normalize_candidate_url(base_url: &str, candidate: &str) -> Option<String> {
 }
 
 fn extract_candidate_urls(markdown: &str) -> Vec<String> {
-    let mut links = extract_bracket_links(markdown);
-    links.extend(extract_autolinks(markdown));
-    links.extend(extract_plain_text_urls(markdown));
+    let mut links = extract_markdown_urls(markdown);
     links.extend(extract_doi_urls(markdown));
     links.extend(extract_arxiv_urls(markdown));
     links
 }
 
-fn extract_bracket_links(markdown: &str) -> Vec<String> {
-    let bytes = markdown.as_bytes();
+fn extract_markdown_urls(markdown: &str) -> Vec<String> {
     let mut links = Vec::new();
-    let mut idx = 0usize;
-
-    while idx < bytes.len() {
-        if bytes[idx] != b'[' {
-            idx += 1;
-            continue;
-        }
-
-        let Some(label_end) = find_byte(bytes, idx + 1, b']') else {
-            break;
-        };
-        if label_end + 1 >= bytes.len() || bytes[label_end + 1] != b'(' {
-            idx = label_end + 1;
-            continue;
-        }
-
-        let Some(dest_end) = find_link_destination_end(bytes, label_end + 2) else {
-            idx = label_end + 1;
-            continue;
+    for event in MarkdownParser::new(markdown) {
+        let destination = match event {
+            Event::Start(Tag::Link { dest_url, .. }) => Some(dest_url),
+            Event::Start(Tag::Image { dest_url, .. }) => Some(dest_url),
+            _ => None,
         };
 
-        let destination_raw = &markdown[label_end + 2..dest_end];
-        if let Some(destination) = parse_link_destination(destination_raw) {
-            links.push(destination.to_string());
+        if let Some(destination) = destination
+            && let Some(normalized) = normalize_markdown_destination(destination.as_ref())
+        {
+            links.push(normalized);
         }
-        idx = dest_end + 1;
     }
 
     links
 }
 
-fn extract_autolinks(markdown: &str) -> Vec<String> {
-    let bytes = markdown.as_bytes();
-    let mut links = Vec::new();
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        if bytes[idx] != b'<' {
-            idx += 1;
-            continue;
-        }
-
-        let Some(end) = find_byte(bytes, idx + 1, b'>') else {
-            break;
-        };
-        let inner = markdown[idx + 1..end].trim();
-        if inner.starts_with("http://") || inner.starts_with("https://") {
-            links.push(inner.to_string());
-        }
-        idx = end + 1;
+fn normalize_markdown_destination(destination: &str) -> Option<String> {
+    let destination = destination.trim();
+    if destination.is_empty() {
+        return None;
     }
-    links
-}
-
-fn extract_plain_text_urls(text: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    let mut cursor = 0usize;
-
-    while cursor < text.len() {
-        let Some((start, scheme_len)) = find_next_http_scheme(text, cursor) else {
-            break;
-        };
-
-        let mut end = start + scheme_len;
-        while end < text.len() {
-            let Some(ch) = text[end..].chars().next() else {
-                break;
-            };
-            if ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '\'' | '`') {
-                break;
-            }
-            end += ch.len_utf8();
-        }
-
-        let raw = &text[start..end];
-        let candidate = trim_trailing_url_punctuation(raw);
-        if candidate.starts_with("http://") || candidate.starts_with("https://") {
-            urls.push(candidate.to_string());
-        }
-
-        cursor = end;
-    }
-
-    urls
-}
-
-fn find_next_http_scheme(text: &str, start: usize) -> Option<(usize, usize)> {
-    let search = &text[start..];
-    let http_pos = search
-        .find("http://")
-        .map(|idx| (start + idx, "http://".len()));
-    let https_pos = search
-        .find("https://")
-        .map(|idx| (start + idx, "https://".len()));
-
-    match (http_pos, https_pos) {
-        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
-        (Some(left), None) => Some(left),
-        (None, Some(right)) => Some(right),
-        (None, None) => None,
-    }
+    Some(destination.to_string())
 }
 
 fn trim_trailing_url_punctuation(value: &str) -> &str {
@@ -467,78 +388,26 @@ fn strip_arxiv_version(candidate: &str) -> &str {
     core
 }
 
-fn find_byte(bytes: &[u8], start: usize, needle: u8) -> Option<usize> {
-    bytes
-        .iter()
-        .enumerate()
-        .skip(start)
-        .find_map(|(idx, b)| if *b == needle { Some(idx) } else { None })
-}
-
-fn find_link_destination_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut idx = start;
-    while idx < bytes.len() {
-        let byte = bytes[idx];
-        if byte == b'\\' && idx + 1 < bytes.len() {
-            idx += 2;
-            continue;
-        }
-        if byte == b'(' {
-            depth += 1;
-        } else if byte == b')' {
-            if depth == 0 {
-                return Some(idx);
-            }
-            depth -= 1;
-        }
-        idx += 1;
-    }
-    None
-}
-
-fn parse_link_destination(destination: &str) -> Option<&str> {
-    let destination = destination.trim();
-    if destination.is_empty() {
-        return None;
-    }
-
-    if destination.starts_with('<') {
-        let close = destination.find('>')?;
-        let inner = destination[1..close].trim();
-        if inner.is_empty() { None } else { Some(inner) }
-    } else {
-        destination
-            .split_whitespace()
-            .next()
-            .filter(|value| !value.is_empty())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn extracts_inline_and_autolink_urls() {
-        let markdown = r#"
-        [Example](https://example.com/a)
-        [Relative](/docs/start)
-        <https://example.net/x>
-        "#;
-
+        let markdown = "[Example](https://example.com/a)\n[Relative](/docs/start)\n![Screenshot](https://cdn.example.com/screenshot.png)\n<https://example.net/x>\n";
         let urls = extract_candidate_urls(markdown);
         assert!(urls.contains(&"https://example.com/a".to_string()));
         assert!(urls.contains(&"/docs/start".to_string()));
+        assert!(urls.contains(&"https://cdn.example.com/screenshot.png".to_string()));
         assert!(urls.contains(&"https://example.net/x".to_string()));
     }
 
     #[test]
-    fn extracts_plain_text_urls_with_trailing_punctuation() {
+    fn high_precision_mode_ignores_plain_text_urls() {
         let text = "Read https://example.com/a, then (https://example.org/b).";
         let urls = extract_candidate_urls(text);
-        assert!(urls.contains(&"https://example.com/a".to_string()));
-        assert!(urls.contains(&"https://example.org/b".to_string()));
+        assert!(!urls.contains(&"https://example.com/a".to_string()));
+        assert!(!urls.contains(&"https://example.org/b".to_string()));
     }
 
     #[test]
@@ -558,12 +427,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_link_destinations_with_title() {
-        let destination = r#"https://example.com "Title""#;
-        assert_eq!(
-            parse_link_destination(destination),
-            Some("https://example.com")
-        );
+    fn malformed_plain_text_markdown_tails_are_not_extracted() {
+        let text = "https://github.com/rtk-ai/rtk)**\nhttps://github.com/getnao/nao)[nao](https://github.com/getnao/nao)\n";
+
+        let urls = extract_candidate_urls(text);
+        assert_eq!(urls, vec!["https://github.com/getnao/nao".to_string()]);
     }
 
     #[test]

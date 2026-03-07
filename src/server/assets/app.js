@@ -430,6 +430,7 @@ function initializeTaggingModelDiscovery() {
   const authHeaderNameInput = form.querySelector("[data-tagging-auth-header-name]");
   const authHeaderPrefixInput = form.querySelector("[data-tagging-auth-header-prefix]");
   const backendKindInput = form.querySelector("[data-tagging-backend-kind]");
+  const checkButton = form.querySelector("[data-tagging-check-button]");
   const modelStatus = form.querySelector("[data-tagging-model-status]");
 
   if (
@@ -539,6 +540,11 @@ function initializeTaggingModelDiscovery() {
     auth_header_name: readInputValue(authHeaderNameInput),
     auth_header_prefix: readInputValue(authHeaderPrefixInput),
   });
+  const buildCheckPayload = () => ({
+    ...buildRequestPayload(),
+    model: selectedModel(),
+    backend_kind: readInputValue(backendKindInput),
+  });
 
   const cancelLookup = () => {
     if (lookupTimer !== null) {
@@ -637,6 +643,64 @@ function initializeTaggingModelDiscovery() {
     }
   };
 
+  const runCheck = async () => {
+    const requestPayload = buildCheckPayload();
+    if (!requestPayload.base_url) {
+      setStatus("Enter a base URL before running check.");
+      return;
+    }
+    if (!requestPayload.model) {
+      setStatus("Choose a model before running check.");
+      return;
+    }
+
+    if (checkButton instanceof HTMLButtonElement) {
+      checkButton.disabled = true;
+    }
+    setStatus("Checking chat endpoint...");
+
+    try {
+      const response = await fetch("/admin/tagging-check", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(requestPayload),
+      });
+
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (_) {}
+
+      if (!response.ok) {
+        const errorMessage =
+          typeof payload?.error === "string" && payload.error.trim().length > 0
+            ? payload.error.trim()
+            : `Check failed (${response.status}).`;
+        setStatus(errorMessage);
+        return;
+      }
+
+      const backendKind = trimmedOrEmpty(payload?.backend_kind);
+      if (backendKind) {
+        updateBackendKind(backendKind);
+      }
+      const successMessage =
+        typeof payload?.message === "string" && payload.message.trim().length > 0
+          ? payload.message.trim()
+          : "Check succeeded.";
+      setStatus(successMessage);
+    } catch (_) {
+      setStatus("Could not run check request.");
+    } finally {
+      if (checkButton instanceof HTMLButtonElement) {
+        checkButton.disabled = false;
+      }
+    }
+  };
+
   const scheduleLookup = () => {
     if (lookupTimer !== null) {
       window.clearTimeout(lookupTimer);
@@ -660,6 +724,11 @@ function initializeTaggingModelDiscovery() {
   watchInput(apiKeyInput);
   watchInput(authHeaderNameInput);
   watchInput(authHeaderPrefixInput);
+  if (checkButton instanceof HTMLButtonElement) {
+    checkButton.addEventListener("click", () => {
+      void runCheck();
+    });
+  }
 
   void runLookup();
 }

@@ -177,13 +177,13 @@ struct ParsedRankedTag {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChatApiKind {
+pub(crate) enum ChatApiKind {
     OpenAiCompatible,
     OllamaApi,
 }
 
 impl ChatApiKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::OpenAiCompatible => "openai_compatible",
             Self::OllamaApi => "ollama_api",
@@ -192,9 +192,9 @@ impl ChatApiKind {
 }
 
 #[derive(Clone, Debug)]
-struct ChatEndpointCandidate {
-    url: Url,
-    api_kind: ChatApiKind,
+pub(crate) struct ChatEndpointCandidate {
+    pub(crate) url: Url,
+    pub(crate) api_kind: ChatApiKind,
 }
 
 async fn classify_tags_with_provider(
@@ -390,7 +390,7 @@ fn build_user_prompt(request: &LlmTaggingRequest, mode: TagClassificationMode) -
     format!("Classify this hyperlink payload:\n{payload}")
 }
 
-fn chat_endpoint_candidates(
+pub(crate) fn chat_endpoint_candidates(
     base_url: &str,
     preferred_backend: TaggingBackendKind,
 ) -> Result<Vec<ChatEndpointCandidate>, String> {
@@ -556,7 +556,7 @@ fn build_auth_header(
     Ok(Some((header_name, header_value)))
 }
 
-fn build_chat_request_body(
+pub(crate) fn build_chat_request_body(
     api_kind: ChatApiKind,
     model: &str,
     system_prompt: &str,
@@ -675,7 +675,10 @@ mod tests {
             TaggingBackendKind::OpenAiCompatible,
         )
         .expect("candidates should parse");
-        let urls: Vec<String> = endpoints.iter().map(|candidate| candidate.url.to_string()).collect();
+        let urls: Vec<String> = endpoints
+            .iter()
+            .map(|candidate| candidate.url.to_string())
+            .collect();
         assert_eq!(urls[0], "http://ollama.local:11434/v1/chat/completions");
         assert!(urls.contains(&"http://ollama.local:11434/api/chat".to_string()));
     }

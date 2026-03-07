@@ -141,6 +141,7 @@ struct AdminJobRowView {
 struct AdminJobsTemplate<'a> {
     stats: &'a QueueStats,
     rows: &'a [AdminJobRowView],
+    worker_concurrency: Option<usize>,
     status_filter: &'a str,
     limit: u64,
     page: u64,
@@ -219,12 +220,14 @@ async fn index(
             );
         }
     };
+    let worker_concurrency = configured_worker_concurrency(state.processing_queue.as_ref());
 
     views::render_html_page_with_flash(
         "Jobs",
         render_index(
             &stats,
             &rows,
+            worker_concurrency,
             status_filter,
             limit,
             page,
@@ -332,6 +335,7 @@ async fn clear_failed_all(State(state): State<Context>, headers: HeaderMap) -> R
 fn render_index(
     stats: &QueueStats,
     rows: &[AdminJobRowView],
+    worker_concurrency: Option<usize>,
     status_filter: QueueStatusFilter,
     limit: u64,
     page: u64,
@@ -363,6 +367,7 @@ fn render_index(
     AdminJobsTemplate {
         stats,
         rows,
+        worker_concurrency,
         status_filter: status_filter.as_str(),
         limit,
         page,
@@ -374,6 +379,20 @@ fn render_index(
         next_page_href,
     }
     .render()
+}
+
+fn configured_worker_concurrency(queue: Option<&crate::queue::ProcessingQueue>) -> Option<usize> {
+    let queue = queue?;
+    match queue.dashboard_runtime_state() {
+        Ok(runtime_state) => Some(runtime_state.configured_concurrency),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to load queue runtime state for admin jobs page"
+            );
+            None
+        }
+    }
 }
 
 async fn fetch_queue_stats(connection: &DatabaseConnection) -> Result<QueueStats, DbErr> {
@@ -986,6 +1005,48 @@ mod tests {
         assert!(body.contains("snapshot"));
         assert!(body.contains("running"));
         assert!(body.contains("/hyperlinks/1"));
+        assert!(body.contains("Worker concurrency"));
+        assert!(body.contains("N/A"));
+    }
+
+    #[tokio::test]
+    async fn jobs_dashboard_renders_worker_concurrency_when_queue_is_available() {
+        let connection = test_support::new_memory_connection().await;
+        test_support::initialize_hyperlinks_schema(&connection).await;
+        test_support::initialize_queue_jobs_schema(&connection).await;
+
+        let queue = crate::queue::ProcessingQueue::connect(connection.clone())
+            .await
+            .expect("processing queue should initialize");
+        let expected_concurrency = queue
+            .dashboard_runtime_state()
+            .expect("queue runtime state should load")
+            .configured_concurrency;
+
+        let app = Router::<Context>::new()
+            .merge(routes())
+            .with_state(Context {
+                connection,
+                processing_queue: Some(queue),
+                backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
+                backup_imports: crate::server::admin_import::AdminImportManager::default(),
+                tag_reclassify:
+                    crate::server::admin_tag_reclassify::AdminTagReclassifyManager::default(),
+            });
+        let server = axum_test::TestServer::new(app).expect("test server should initialize");
+
+        let page = server.get("/admin/jobs").await;
+        page.assert_status_ok();
+        let body = page.text();
+
+        assert!(body.contains("Worker concurrency"));
+        let marker = "Worker concurrency:</span>";
+        let marker_index = body.find(marker).expect("concurrency marker should exist");
+        let worker_section = &body[marker_index..];
+        assert!(
+            worker_section.contains(&format!("<span>{expected_concurrency}</span>")),
+            "expected worker concurrency value {expected_concurrency} in page body"
+        );
     }
 
     #[tokio::test]

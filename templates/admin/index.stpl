@@ -112,7 +112,10 @@
         <select name="model" data-tagging-model-select class="min-h-10 w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30">
           <option value="<%= self.tagging_settings.model %>"><%= self.tagging_settings.model %></option>
         </select>
-        <span class="text-sm text-tertiary" data-tagging-model-status>Model options load from the configured endpoint.</span>
+        <div class="flex flex-row items-center gap-2">
+          <button type="button" data-tagging-check-button class="inline-flex min-h-9 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-1.5 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Check</button>
+          <span class="text-sm text-tertiary" data-tagging-model-status>Model options load from the configured endpoint.</span>
+        </div>
       </label>
 
       <label class="flex flex-col gap-1">
