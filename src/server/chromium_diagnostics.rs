@@ -32,11 +32,17 @@ pub(crate) fn current() -> ChromiumDiagnostics {
 }
 
 fn chromium_path() -> String {
-    if let Some(path) = env::var(CHROMIUM_PATH_ENV)
+    if let Some(configured_path) = env::var(CHROMIUM_PATH_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
     {
-        return path;
+        if resolve_command_path(&configured_path).is_some() {
+            return configured_path;
+        }
+        tracing::warn!(
+            chromium_path = %configured_path,
+            "configured CHROMIUM_PATH was not executable; falling back to autodetected chromium candidates"
+        );
     }
 
     for candidate in chromium_binary_candidates() {

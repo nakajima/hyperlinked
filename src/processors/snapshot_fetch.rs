@@ -1559,11 +1559,17 @@ fn chromium_launch_args(variant: Option<ScreenshotVariant>, render_wait_ms: u64)
 }
 
 fn chromium_path() -> String {
-    if let Some(path) = std::env::var(CHROMIUM_PATH_ENV)
+    if let Some(configured_path) = std::env::var(CHROMIUM_PATH_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
     {
-        return path;
+        if command_looks_available(&configured_path) {
+            return configured_path;
+        }
+        tracing::warn!(
+            chromium_path = %configured_path,
+            "configured CHROMIUM_PATH was not executable; falling back to autodetected chromium candidates"
+        );
     }
 
     for candidate in chromium_binary_candidates() {
@@ -1591,14 +1597,33 @@ fn chromium_binary_candidates() -> [&'static str; 9] {
 
 fn command_looks_available(command: &str) -> bool {
     if command.contains(std::path::MAIN_SEPARATOR) {
-        return Path::new(command).is_file();
+        return is_executable_file(Path::new(command));
     }
 
     std::env::var_os("PATH").is_some_and(|paths| {
         std::env::split_paths(&paths)
             .map(|path| path.join(command))
-            .any(|path| path.is_file())
+            .any(|path| is_executable_file(path.as_path()))
     })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 async fn ensure_chromium_runtime_dir_at(runtime_dir: &Path) -> Result<(), String> {
