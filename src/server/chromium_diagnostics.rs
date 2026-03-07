@@ -32,10 +32,34 @@ pub(crate) fn current() -> ChromiumDiagnostics {
 }
 
 fn chromium_path() -> String {
-    env::var(CHROMIUM_PATH_ENV)
+    if let Some(path) = env::var(CHROMIUM_PATH_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_CHROMIUM_PATH.to_string())
+    {
+        return path;
+    }
+
+    for candidate in chromium_binary_candidates() {
+        if resolve_command_path(candidate).is_some() {
+            return candidate.to_string();
+        }
+    }
+
+    DEFAULT_CHROMIUM_PATH.to_string()
+}
+
+fn chromium_binary_candidates() -> [&'static str; 9] {
+    [
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ]
 }
 
 fn resolve_command_path(command: &str) -> Option<PathBuf> {

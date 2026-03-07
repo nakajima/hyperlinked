@@ -1575,11 +1575,15 @@ fn chromium_path() -> String {
     "chromium".to_string()
 }
 
-fn chromium_binary_candidates() -> [&'static str; 5] {
+fn chromium_binary_candidates() -> [&'static str; 9] {
     [
         "chromium",
+        "chromium-browser",
         "google-chrome",
         "google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium",
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
     ]
@@ -1739,6 +1743,7 @@ fn screenshot_retry_backoff_delay(attempt: usize) -> Duration {
 fn screenshot_capture_error_retryable(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("invalid screenshot url")
+        || normalized.contains("failed to launch chromium browser")
         || normalized.contains("page-height evaluation raised an exception")
         || normalized.contains("page-height evaluation returned a non-numeric result")
         || normalized.contains("page-height evaluation returned an invalid value")
@@ -2546,6 +2551,9 @@ mod tests {
         ));
         assert!(!screenshot_capture_error_retryable(
             "failed to decode chromium screenshot payload: Invalid byte"
+        ));
+        assert!(!screenshot_capture_error_retryable(
+            "failed to launch chromium browser: No such file or directory (os error 2)"
         ));
     }
 
