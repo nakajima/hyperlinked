@@ -130,9 +130,9 @@ impl Processor for SnapshotFetcher {
                     let pdf_payload = hyperlink_artifact::load_payload(&source_artifact)
                         .await
                         .map_err(ProcessingError::DB)?;
-                    match build_pdf_thumbnail_from_source(&pdf_payload, screenshot_thumbnail_size())
+                    match build_pdf_thumbnails_from_source(&pdf_payload, screenshot_thumbnail_size())
                     {
-                        Ok(thumbnail_webp) => {
+                        Ok((thumbnail_webp, thumbnail_dark_webp)) => {
                             let thumbnail_artifact = hyperlink_artifact::insert(
                                 connection,
                                 hyperlink_id,
@@ -144,6 +144,19 @@ impl Processor for SnapshotFetcher {
                             .await
                             .map_err(ProcessingError::DB)?;
                             output.screenshot_thumb_artifact_id = Some(thumbnail_artifact.id);
+
+                            let dark_thumbnail_artifact = hyperlink_artifact::insert(
+                                connection,
+                                hyperlink_id,
+                                Some(self.job_id),
+                                HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
+                                thumbnail_dark_webp,
+                                SCREENSHOT_CONTENT_TYPE,
+                            )
+                            .await
+                            .map_err(ProcessingError::DB)?;
+                            output.screenshot_thumb_dark_artifact_id =
+                                Some(dark_thumbnail_artifact.id);
                         }
                         Err(error) => {
                             let payload = encode_screenshot_failure_payload(
@@ -234,11 +247,11 @@ impl Processor for SnapshotFetcher {
 
                 if should_skip_screenshot_capture_for_source(&output.source_artifact_kind) {
                     if let Some(pdf_payload) = pdf_source_payload_for_thumbnail.as_deref() {
-                        match build_pdf_thumbnail_from_source(
+                        match build_pdf_thumbnails_from_source(
                             pdf_payload,
                             screenshot_thumbnail_size(),
                         ) {
-                            Ok(thumbnail_webp) => {
+                            Ok((thumbnail_webp, thumbnail_dark_webp)) => {
                                 let thumbnail_artifact = hyperlink_artifact::insert(
                                     connection,
                                     hyperlink_id,
@@ -250,6 +263,19 @@ impl Processor for SnapshotFetcher {
                                 .await
                                 .map_err(ProcessingError::DB)?;
                                 output.screenshot_thumb_artifact_id = Some(thumbnail_artifact.id);
+
+                                let dark_thumbnail_artifact = hyperlink_artifact::insert(
+                                    connection,
+                                    hyperlink_id,
+                                    Some(self.job_id),
+                                    HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
+                                    thumbnail_dark_webp,
+                                    SCREENSHOT_CONTENT_TYPE,
+                                )
+                                .await
+                                .map_err(ProcessingError::DB)?;
+                                output.screenshot_thumb_dark_artifact_id =
+                                    Some(dark_thumbnail_artifact.id);
                             }
                             Err(error) => {
                                 let payload = encode_screenshot_failure_payload(
@@ -1850,6 +1876,26 @@ fn build_pdf_thumbnail_from_source(
     build_square_thumbnail(&rendered_webp, thumbnail_size)
 }
 
+fn build_pdf_thumbnails_from_source(
+    pdf_payload: &[u8],
+    thumbnail_size: u32,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let light_thumbnail = build_pdf_thumbnail_from_source(pdf_payload, thumbnail_size)?;
+    let dark_thumbnail = build_dark_thumbnail_from_light_thumbnail(&light_thumbnail)?;
+    Ok((light_thumbnail, dark_thumbnail))
+}
+
+fn build_dark_thumbnail_from_light_thumbnail(source_image_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let image = image::load_from_memory(source_image_bytes)
+        .map_err(|err| format!("invalid screenshot image payload: {err}"))?;
+    let mut rgba = image.to_rgba8();
+    for pixel in rgba.pixels_mut() {
+        let [r, g, b, a] = pixel.0;
+        pixel.0 = [255u8.saturating_sub(r), 255u8.saturating_sub(g), 255u8.saturating_sub(b), a];
+    }
+    encode_webp_from_dynamic_image(&image::DynamicImage::ImageRgba8(rgba))
+}
+
 fn encode_webp_from_image_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let image = image::load_from_memory(bytes)
         .map_err(|err| format!("invalid screenshot image payload: {err}"))?;
@@ -2430,6 +2476,27 @@ mod tests {
     fn pdf_thumbnail_render_rejects_invalid_payloads() {
         let result = build_pdf_thumbnail_from_source(b"not-a-pdf", 400);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn dark_thumbnail_transform_inverts_light_thumbnail_payload() {
+        let light_image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            2,
+            2,
+            image::Rgba([255, 255, 255, 255]),
+        ));
+        let light_webp =
+            encode_webp_from_dynamic_image(&light_image).expect("light image should encode");
+        let dark_webp = build_dark_thumbnail_from_light_thumbnail(&light_webp)
+            .expect("dark thumbnail transform should succeed");
+
+        let decoded_dark = image::load_from_memory(&dark_webp)
+            .expect("dark thumbnail should decode")
+            .to_rgb8();
+        let pixel = decoded_dark.get_pixel(0, 0).0;
+        assert!(pixel[0] < 80);
+        assert!(pixel[1] < 80);
+        assert!(pixel[2] < 80);
     }
 
     #[test]

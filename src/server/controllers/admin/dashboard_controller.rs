@@ -40,7 +40,7 @@ use crate::{
         hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
         hyperlink_search_doc, hyperlink_tagging,
         settings::{self, ArtifactCollectionSettings},
-        tagging_settings::{self, TaggingProvider, TaggingSettings},
+        tagging_settings::{self, TaggingBackendKind, TaggingProvider, TaggingSettings},
     },
     server::{
         admin_backup::{
@@ -186,6 +186,7 @@ struct TaggingSettingsForm {
     model: Option<String>,
     auth_header_name: Option<String>,
     auth_header_prefix: Option<String>,
+    backend_kind: Option<String>,
     vocabulary: Option<String>,
 }
 
@@ -330,6 +331,7 @@ struct AdminStatusResponse {
 #[derive(Clone, Debug, Serialize)]
 struct TaggingModelsResponse {
     models: Vec<String>,
+    backend_kind: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1072,6 +1074,10 @@ async fn update_tagging_settings(
         model: form.model.unwrap_or_default(),
         auth_header_name: form.auth_header_name,
         auth_header_prefix: form.auth_header_prefix,
+        backend_kind: match form.backend_kind {
+            Some(value) => TaggingBackendKind::from_storage(Some(value.as_str())),
+            None => current.backend_kind,
+        },
         vocabulary: tagging_settings::parse_vocabulary_lines(&vocabulary_input),
     };
 
@@ -1203,6 +1209,7 @@ async fn fetch_tagging_models(
     let mut attempt_failures = Vec::new();
 
     for endpoint in endpoints {
+        let detected_backend = tagging_backend_kind_for_models_path(endpoint.path());
         let endpoint_display = endpoint.to_string();
         let mut builder = client.get(endpoint);
         if let Some((header_name, header_value)) = auth_header.as_ref() {
@@ -1247,6 +1254,7 @@ async fn fetch_tagging_models(
 
         return Json(TaggingModelsResponse {
             models: extract_tagging_model_ids(&payload),
+            backend_kind: detected_backend.as_storage().to_string(),
         })
         .into_response();
     }
@@ -1320,6 +1328,11 @@ fn tagging_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
         push_model_endpoint_candidate(
             &mut candidates,
             &mut seen_candidates,
+            replace_tagging_path_suffix(base_path, "/api/tags", "/v1/models"),
+        );
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
             Some(base_path.to_string()),
         );
     }
@@ -1331,6 +1344,11 @@ fn tagging_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
         );
     }
     if base_path.ends_with("/api") {
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            replace_tagging_path_suffix(base_path, "/api", "/v1/models"),
+        );
         push_model_endpoint_candidate(
             &mut candidates,
             &mut seen_candidates,
@@ -1351,7 +1369,7 @@ fn tagging_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
     }
 
     let prioritized_fallbacks = match api_hint {
-        TaggingModelsApiHint::Ollama => ["/api/tags", "/v1/models", "/models"],
+        TaggingModelsApiHint::Ollama => ["/v1/models", "/api/tags", "/models"],
         _ => ["/v1/models", "/models", "/api/tags"],
     };
     for fallback in prioritized_fallbacks {
@@ -1382,6 +1400,17 @@ fn tagging_models_api_hint(base_path: &str) -> TaggingModelsApiHint {
         return TaggingModelsApiHint::OpenAiCompatible;
     }
     TaggingModelsApiHint::Unknown
+}
+
+fn tagging_backend_kind_for_models_path(path: &str) -> TaggingBackendKind {
+    let normalized = path.trim_end_matches('/');
+    if normalized.ends_with("/api/tags") || normalized.ends_with("/api/models") {
+        return TaggingBackendKind::Ollama;
+    }
+    if normalized.ends_with("/v1/models") || normalized.ends_with("/models") {
+        return TaggingBackendKind::OpenAiCompatible;
+    }
+    TaggingBackendKind::Unknown
 }
 
 fn replace_tagging_path_suffix(base_path: &str, from: &str, to: &str) -> Option<String> {
@@ -3063,11 +3092,23 @@ mod tests {
         assert_eq!(
             urls,
             vec![
+                "http://ollama:3000/v1/models".to_string(),
                 "http://ollama:3000/api/tags".to_string(),
                 "http://ollama:3000/api/models".to_string(),
-                "http://ollama:3000/v1/models".to_string(),
                 "http://ollama:3000/models".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn detects_backend_kind_from_models_endpoint_path() {
+        assert_eq!(
+            tagging_backend_kind_for_models_path("/api/tags"),
+            TaggingBackendKind::Ollama
+        );
+        assert_eq!(
+            tagging_backend_kind_for_models_path("/v1/models"),
+            TaggingBackendKind::OpenAiCompatible
         );
     }
 

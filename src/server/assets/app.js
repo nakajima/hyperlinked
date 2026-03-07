@@ -429,6 +429,7 @@ function initializeTaggingModelDiscovery() {
   const apiKeyInput = form.querySelector("[data-tagging-api-key]");
   const authHeaderNameInput = form.querySelector("[data-tagging-auth-header-name]");
   const authHeaderPrefixInput = form.querySelector("[data-tagging-auth-header-prefix]");
+  const backendKindInput = form.querySelector("[data-tagging-backend-kind]");
   const modelStatus = form.querySelector("[data-tagging-model-status]");
 
   if (
@@ -447,6 +448,24 @@ function initializeTaggingModelDiscovery() {
   const trimmedOrEmpty = (value) => (typeof value === "string" ? value.trim() : "");
   const readInputValue = (input) =>
     input instanceof HTMLInputElement ? trimmedOrEmpty(input.value) : "";
+  const backendKindLabel = (kind) => {
+    switch (kind) {
+      case "ollama":
+      case "ollama_api":
+        return "Ollama";
+      case "openai_compatible":
+      case "openai_v1":
+        return "OpenAI-compatible";
+      default:
+        return "Unknown";
+    }
+  };
+  const updateBackendKind = (kind) => {
+    if (!(backendKindInput instanceof HTMLInputElement)) {
+      return;
+    }
+    backendKindInput.value = trimmedOrEmpty(kind) || "unknown";
+  };
 
   const selectedModel = () => {
     const value = trimmedOrEmpty(modelSelect.value);
@@ -538,6 +557,7 @@ function initializeTaggingModelDiscovery() {
     if (!requestPayload.base_url) {
       lastLookupKey = "";
       cancelLookup();
+      updateBackendKind("unknown");
       setStatus("Model options load from the configured endpoint.");
       return;
     }
@@ -588,14 +608,19 @@ function initializeTaggingModelDiscovery() {
       }
 
       const models = Array.isArray(payload?.models) ? payload.models : [];
+      const backendKind = trimmedOrEmpty(payload?.backend_kind);
+      updateBackendKind(backendKind);
       applyModelOptions(models, previousSelection);
 
+      const backendText = backendKindLabel(backendKind);
       if (models.length > 0) {
         setStatus(
-          `Loaded ${models.length} model option${models.length === 1 ? "" : "s"}.`,
+          `Detected ${backendText} backend. Loaded ${models.length} model option${models.length === 1 ? "" : "s"}.`,
         );
       } else {
-        setStatus("Endpoint returned no models. Keeping the current model.");
+        setStatus(
+          `Detected ${backendText} backend. Endpoint returned no models. Keeping the current model.`,
+        );
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {

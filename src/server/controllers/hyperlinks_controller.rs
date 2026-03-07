@@ -1973,14 +1973,10 @@ fn required_show_artifact_kinds(
         HyperlinkArtifactKind::ReadableMeta,
     ];
 
-    if should_require_screenshot_artifacts(source_type, latest_artifacts) {
-        required.extend([
-            HyperlinkArtifactKind::ScreenshotWebp,
-            HyperlinkArtifactKind::ScreenshotDarkWebp,
-            HyperlinkArtifactKind::ScreenshotThumbWebp,
-            HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
-        ]);
-    }
+    required.extend(required_screenshot_artifact_kinds(
+        source_type,
+        latest_artifacts,
+    ));
 
     required
 }
@@ -1997,14 +1993,26 @@ fn required_source_artifact_kind(
     }
 }
 
-fn should_require_screenshot_artifacts(
+fn required_screenshot_artifact_kinds(
     source_type: &HyperlinkSourceType,
     latest_artifacts: &HashMap<HyperlinkArtifactKind, hyperlink_artifact::Model>,
-) -> bool {
-    if !matches!(source_type, HyperlinkSourceType::Pdf) {
-        return true;
+) -> Vec<HyperlinkArtifactKind> {
+    if matches!(source_type, HyperlinkSourceType::Pdf) {
+        if latest_artifacts.contains_key(&HyperlinkArtifactKind::PdfSource) {
+            return vec![
+                HyperlinkArtifactKind::ScreenshotThumbWebp,
+                HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
+            ];
+        }
+        return Vec::new();
     }
-    latest_artifacts.contains_key(&HyperlinkArtifactKind::PdfSource)
+
+    vec![
+        HyperlinkArtifactKind::ScreenshotWebp,
+        HyperlinkArtifactKind::ScreenshotDarkWebp,
+        HyperlinkArtifactKind::ScreenshotThumbWebp,
+        HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
+    ]
 }
 
 fn latest_source_artifact_kind(
@@ -2702,6 +2710,30 @@ mod tests {
         assert!(!body.contains("/hyperlinks/1/artifacts/screenshot_webp/fetch"));
         assert!(!body.contains("/hyperlinks/1/artifacts/screenshot_thumb_webp/fetch"));
         assert!(body.contains("/hyperlinks/1/artifacts/readable_text/fetch"));
+    }
+
+    #[tokio::test]
+    async fn show_missing_artifacts_for_pdf_with_pdf_source_requires_only_thumbnails() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Paper', 'https://example.com/paper.pdf', 'https://example.com/paper.pdf', 'pdf', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (1, 1, NULL, 'pdf_source', X'25504446', 'application/pdf', 4, '2026-02-19 00:00:01'),
+                    (2, 1, NULL, 'screenshot_thumb_webp', X'52494646', 'image/webp', 4, '2026-02-19 00:00:02'),
+                    (3, 1, NULL, 'readable_meta', X'7B7D', 'application/json', 2, '2026-02-19 00:00:03');
+            "#,
+        ))
+        .await;
+
+        let show = server.get("/hyperlinks/1").await;
+        show.assert_status_ok();
+        let body = show.text();
+        assert!(!body.contains("/hyperlinks/1/artifacts/screenshot_webp/fetch"));
+        assert!(!body.contains("/hyperlinks/1/artifacts/screenshot_dark_webp/fetch"));
+        assert!(!body.contains("/hyperlinks/1/artifacts/screenshot_thumb_webp/fetch"));
+        assert!(body.contains("/hyperlinks/1/artifacts/screenshot_thumb_dark_webp/fetch"));
     }
 
     #[tokio::test]

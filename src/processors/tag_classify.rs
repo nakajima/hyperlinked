@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use chrono::Utc;
 use reqwest::{
@@ -13,7 +13,7 @@ use crate::{
     entity::hyperlink,
     model::{
         hyperlink_tagging::{self, LlmPersistInput, PersistedRankedTag, RankedTag, TagState},
-        tagging_settings::{TaggingProvider, TaggingSettings},
+        tagging_settings::{TaggingBackendKind, TaggingProvider, TaggingSettings},
     },
     processors::processor::{ProcessingError, Processor},
 };
@@ -176,6 +176,27 @@ struct ParsedRankedTag {
     confidence: f32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChatApiKind {
+    OpenAiCompatible,
+    OllamaApi,
+}
+
+impl ChatApiKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiCompatible => "openai_compatible",
+            Self::OllamaApi => "ollama_api",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ChatEndpointCandidate {
+    url: Url,
+    api_kind: ChatApiKind,
+}
+
 async fn classify_tags_with_provider(
     settings: &TaggingSettings,
     request: &LlmTaggingRequest,
@@ -193,20 +214,10 @@ async fn classify_tags_openai_compatible(
     request: &LlmTaggingRequest,
     mode: TagClassificationMode,
 ) -> Result<LlmTaggingResponse, ProcessingError> {
-    let endpoint =
-        chat_completions_endpoint(&settings.base_url).map_err(ProcessingError::FetchError)?;
+    let endpoints = chat_endpoint_candidates(&settings.base_url, settings.backend_kind)
+        .map_err(ProcessingError::FetchError)?;
     let system_prompt = build_system_prompt(mode);
     let user_prompt = build_user_prompt(request, mode);
-
-    let body = json!({
-        "model": settings.model,
-        "temperature": 0.0,
-        "response_format": { "type": "json_object" },
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    });
 
     let client = reqwest::Client::builder()
         .timeout(TAG_CLASSIFY_TIMEOUT)
@@ -215,76 +226,117 @@ async fn classify_tags_openai_compatible(
             ProcessingError::FetchError(format!("failed to build llm client: {error}"))
         })?;
 
-    let mut builder = client
-        .post(endpoint)
-        .header(CONTENT_TYPE, "application/json")
-        .json(&body);
+    let auth_header = build_auth_header(settings)?;
+    let mut attempt_failures = Vec::new();
 
-    if let Some(api_key) = settings.api_key.as_deref() {
-        let header_name = settings
-            .auth_header_name
-            .as_deref()
-            .unwrap_or("Authorization");
-        let header_prefix = settings.auth_header_prefix.as_deref().unwrap_or("Bearer");
-        let header_value = if header_prefix.trim().is_empty() {
-            api_key.to_string()
-        } else {
-            format!("{header_prefix} {api_key}")
+    for endpoint in endpoints {
+        let body = build_chat_request_body(
+            endpoint.api_kind,
+            &settings.model,
+            system_prompt,
+            &user_prompt,
+        );
+        let endpoint_display = endpoint.url.to_string();
+
+        let mut builder = client
+            .post(endpoint.url)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&body);
+        if let Some((header_name, header_value)) = auth_header.as_ref() {
+            builder = builder.header(header_name.clone(), header_value.clone());
+        }
+
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                attempt_failures.push(format!(
+                    "{} [{}] -> request failed: {error}",
+                    endpoint_display,
+                    endpoint.api_kind.as_str()
+                ));
+                continue;
+            }
+        };
+        let status = response.status();
+        let body_text = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                attempt_failures.push(format!(
+                    "{} [{}] -> failed to read response body: {error}",
+                    endpoint_display,
+                    endpoint.api_kind.as_str()
+                ));
+                continue;
+            }
         };
 
-        let header_name = HeaderName::from_bytes(header_name.as_bytes()).map_err(|error| {
-            ProcessingError::FetchError(format!("invalid auth header name: {error}"))
-        })?;
-        let header_value = HeaderValue::from_str(&header_value).map_err(|error| {
-            ProcessingError::FetchError(format!("invalid auth header value: {error}"))
-        })?;
-        builder = builder.header(header_name, header_value);
-    }
+        if !status.is_success() {
+            attempt_failures.push(format!(
+                "{} [{}] -> status {status}: {}",
+                endpoint_display,
+                endpoint.api_kind.as_str(),
+                summarize_error_body(&body_text)
+            ));
+            continue;
+        }
 
-    let response = builder
-        .send()
-        .await
-        .map_err(|error| ProcessingError::FetchError(format!("llm request failed: {error}")))?;
-    let status = response.status();
-    let body_text = response.text().await.map_err(|error| {
-        ProcessingError::FetchError(format!("failed to read llm response body: {error}"))
-    })?;
-
-    if !status.is_success() {
-        return Err(ProcessingError::FetchError(format!(
-            "llm request failed with status {status}: {body_text}"
-        )));
-    }
-
-    let response_json: serde_json::Value = serde_json::from_str(&body_text).map_err(|error| {
-        ProcessingError::FetchError(format!("failed to parse llm response json: {error}"))
-    })?;
-    let content = extract_chat_message_content(&response_json).ok_or_else(|| {
-        ProcessingError::FetchError(
-            "llm response did not include choices[0].message.content".to_string(),
-        )
-    })?;
-    let parsed = parse_ranked_tags_content(&content)?;
-
-    Ok(LlmTaggingResponse {
-        ranked_tags: parsed
-            .ranked_tags
-            .into_iter()
-            .map(|ranked| RankedTag {
-                tag: ranked.tag,
-                confidence: ranked.confidence,
-            })
-            .collect(),
-        overall_confidence: parsed.overall_confidence.map(|value| value.clamp(0.0, 1.0)),
-        rationale: parsed.rationale.and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
+        let response_json: serde_json::Value = match serde_json::from_str(&body_text) {
+            Ok(value) => value,
+            Err(error) => {
+                attempt_failures.push(format!(
+                    "{} [{}] -> invalid json response: {error}",
+                    endpoint_display,
+                    endpoint.api_kind.as_str()
+                ));
+                continue;
             }
-        }),
-    })
+        };
+        let Some(content) = extract_chat_message_content(&response_json, endpoint.api_kind) else {
+            attempt_failures.push(format!(
+                "{} [{}] -> response missing assistant content",
+                endpoint_display,
+                endpoint.api_kind.as_str()
+            ));
+            continue;
+        };
+
+        let parsed = match parse_ranked_tags_content(&content) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                attempt_failures.push(format!(
+                    "{} [{}] -> invalid tagging payload: {error}",
+                    endpoint_display,
+                    endpoint.api_kind.as_str()
+                ));
+                continue;
+            }
+        };
+
+        return Ok(LlmTaggingResponse {
+            ranked_tags: parsed
+                .ranked_tags
+                .into_iter()
+                .map(|ranked| RankedTag {
+                    tag: ranked.tag,
+                    confidence: ranked.confidence,
+                })
+                .collect(),
+            overall_confidence: parsed.overall_confidence.map(|value| value.clamp(0.0, 1.0)),
+            rationale: parsed.rationale.and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }),
+        });
+    }
+
+    Err(ProcessingError::FetchError(format!(
+        "llm request failed across all endpoint candidates: {}",
+        attempt_failures.join(" | ")
+    )))
 }
 
 fn build_system_prompt(mode: TagClassificationMode) -> &'static str {
@@ -338,26 +390,228 @@ fn build_user_prompt(request: &LlmTaggingRequest, mode: TagClassificationMode) -
     format!("Classify this hyperlink payload:\n{payload}")
 }
 
-fn chat_completions_endpoint(base_url: &str) -> Result<Url, String> {
+fn chat_endpoint_candidates(
+    base_url: &str,
+    preferred_backend: TaggingBackendKind,
+) -> Result<Vec<ChatEndpointCandidate>, String> {
     let base_url = base_url.trim();
     let mut parsed =
         Url::parse(base_url).map_err(|error| format!("invalid base URL `{base_url}`: {error}"))?;
-
-    if parsed.path().ends_with("/chat/completions") {
-        return Ok(parsed);
-    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
 
     let base_path = parsed.path().trim_end_matches('/');
-    let endpoint_path = if base_path.is_empty() || base_path == "/" {
-        "/chat/completions".to_string()
-    } else {
-        format!("{base_path}/chat/completions")
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::<String>::new();
+
+    if base_path.ends_with("/api/chat") {
+        push_chat_candidate(
+            &mut candidates,
+            &mut seen,
+            &parsed,
+            Some(base_path.to_string()),
+            ChatApiKind::OllamaApi,
+        );
+    }
+    if base_path.ends_with("/chat/completions") {
+        push_chat_candidate(
+            &mut candidates,
+            &mut seen,
+            &parsed,
+            Some(base_path.to_string()),
+            ChatApiKind::OpenAiCompatible,
+        );
+    }
+    if base_path.ends_with("/v1") {
+        push_chat_candidate(
+            &mut candidates,
+            &mut seen,
+            &parsed,
+            Some(format!("{base_path}/chat/completions")),
+            ChatApiKind::OpenAiCompatible,
+        );
+    }
+    if base_path.ends_with("/api") {
+        push_chat_candidate(
+            &mut candidates,
+            &mut seen,
+            &parsed,
+            replace_path_suffix(base_path, "/api", "/v1/chat/completions"),
+            ChatApiKind::OpenAiCompatible,
+        );
+        push_chat_candidate(
+            &mut candidates,
+            &mut seen,
+            &parsed,
+            Some(format!("{base_path}/chat")),
+            ChatApiKind::OllamaApi,
+        );
+    }
+    if !base_path.is_empty()
+        && base_path != "/"
+        && !base_path.ends_with("/api/chat")
+        && !base_path.ends_with("/chat/completions")
+        && !base_path.ends_with("/v1")
+        && !base_path.ends_with("/api")
+    {
+        push_chat_candidate(
+            &mut candidates,
+            &mut seen,
+            &parsed,
+            Some(format!("{base_path}/chat/completions")),
+            ChatApiKind::OpenAiCompatible,
+        );
+    }
+
+    let prioritized_fallbacks: [(ChatApiKind, &str); 2] = match preferred_backend {
+        TaggingBackendKind::Ollama => [
+            (ChatApiKind::OllamaApi, "/api/chat"),
+            (ChatApiKind::OpenAiCompatible, "/v1/chat/completions"),
+        ],
+        _ => [
+            (ChatApiKind::OpenAiCompatible, "/v1/chat/completions"),
+            (ChatApiKind::OllamaApi, "/api/chat"),
+        ],
     };
-    parsed.set_path(&endpoint_path);
-    Ok(parsed)
+    for (api_kind, path) in prioritized_fallbacks {
+        push_chat_candidate(
+            &mut candidates,
+            &mut seen,
+            &parsed,
+            Some(path.to_string()),
+            api_kind,
+        );
+    }
+
+    Ok(candidates)
 }
 
-fn extract_chat_message_content(response_json: &serde_json::Value) -> Option<String> {
+fn push_chat_candidate(
+    candidates: &mut Vec<ChatEndpointCandidate>,
+    seen: &mut HashSet<String>,
+    parsed: &Url,
+    path: Option<String>,
+    api_kind: ChatApiKind,
+) {
+    let Some(path) = path else {
+        return;
+    };
+    let normalized = normalize_candidate_path(&path);
+    let dedupe_key = format!("{}|{}", normalized, api_kind.as_str());
+    if !seen.insert(dedupe_key) {
+        return;
+    }
+
+    let mut url = parsed.clone();
+    url.set_path(&normalized);
+    candidates.push(ChatEndpointCandidate { url, api_kind });
+}
+
+fn normalize_candidate_path(path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
+}
+
+fn replace_path_suffix(base_path: &str, from: &str, to: &str) -> Option<String> {
+    if !base_path.ends_with(from) {
+        return None;
+    }
+
+    let prefix = base_path.trim_end_matches(from);
+    if prefix.is_empty() {
+        Some(to.to_string())
+    } else {
+        Some(format!("{prefix}{to}"))
+    }
+}
+
+fn build_auth_header(
+    settings: &TaggingSettings,
+) -> Result<Option<(HeaderName, HeaderValue)>, ProcessingError> {
+    let Some(api_key) = settings.api_key.as_deref() else {
+        return Ok(None);
+    };
+
+    let header_name = settings
+        .auth_header_name
+        .as_deref()
+        .unwrap_or("Authorization");
+    let header_prefix = settings.auth_header_prefix.as_deref().unwrap_or("Bearer");
+    let header_value = if header_prefix.trim().is_empty() {
+        api_key.to_string()
+    } else {
+        format!("{header_prefix} {api_key}")
+    };
+
+    let header_name = HeaderName::from_bytes(header_name.as_bytes()).map_err(|error| {
+        ProcessingError::FetchError(format!("invalid auth header name: {error}"))
+    })?;
+    let header_value = HeaderValue::from_str(&header_value).map_err(|error| {
+        ProcessingError::FetchError(format!("invalid auth header value: {error}"))
+    })?;
+
+    Ok(Some((header_name, header_value)))
+}
+
+fn build_chat_request_body(
+    api_kind: ChatApiKind,
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> serde_json::Value {
+    match api_kind {
+        ChatApiKind::OpenAiCompatible => json!({
+            "model": model,
+            "temperature": 0.0,
+            "response_format": { "type": "json_object" },
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        }),
+        ChatApiKind::OllamaApi => json!({
+            "model": model,
+            "stream": false,
+            "format": "json",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "options": {"temperature": 0.0}
+        }),
+    }
+}
+
+fn summarize_error_body(body: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_CHARS {
+        compact
+    } else {
+        format!("{}...", compact.chars().take(MAX_CHARS).collect::<String>())
+    }
+}
+
+fn extract_chat_message_content(
+    response_json: &serde_json::Value,
+    api_kind: ChatApiKind,
+) -> Option<String> {
+    if matches!(api_kind, ChatApiKind::OllamaApi) {
+        if let Some(text) = response_json
+            .get("message")
+            .and_then(|value| value.get("content"))
+            .and_then(serde_json::Value::as_str)
+        {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
     let first_choice = response_json.get("choices")?.as_array()?.first()?;
     let message = first_choice.get("message")?;
     let content = message.get("content")?;
@@ -415,13 +669,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chat_completions_endpoint_appends_path_when_missing() {
-        let endpoint =
-            chat_completions_endpoint("https://api.openai.com/v1").expect("endpoint should parse");
-        assert_eq!(
-            endpoint.as_str(),
-            "https://api.openai.com/v1/chat/completions"
-        );
+    fn chat_endpoint_candidates_include_openai_v1_and_ollama_fallbacks() {
+        let endpoints = chat_endpoint_candidates(
+            "http://ollama.local:11434/api",
+            TaggingBackendKind::OpenAiCompatible,
+        )
+        .expect("candidates should parse");
+        let urls: Vec<String> = endpoints.iter().map(|candidate| candidate.url.to_string()).collect();
+        assert_eq!(urls[0], "http://ollama.local:11434/v1/chat/completions");
+        assert!(urls.contains(&"http://ollama.local:11434/api/chat".to_string()));
+    }
+
+    #[test]
+    fn extract_chat_message_content_reads_ollama_shape() {
+        let payload = serde_json::json!({
+            "message": {
+                "role": "assistant",
+                "content": "{\"ranked_tags\":[]}"
+            }
+        });
+        let content = extract_chat_message_content(&payload, ChatApiKind::OllamaApi)
+            .expect("content should parse");
+        assert_eq!(content, "{\"ranked_tags\":[]}");
     }
 
     #[test]

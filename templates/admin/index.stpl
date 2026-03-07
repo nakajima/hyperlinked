@@ -100,6 +100,7 @@
         <input type="checkbox" name="tagging_enabled" value="1"<% if self.tagging_settings.enabled { %> checked<% } %> class="mt-0.5 h-4 w-4 shrink-0 rounded border border-form-control-border bg-form-control accent-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
         <span>Enable automatic tag classification jobs</span>
       </label>
+      <input type="hidden" name="backend_kind" value="<%= self.tagging_settings.backend_kind.as_storage() %>" data-tagging-backend-kind />
 
       <label class="flex flex-col gap-1">
         <span>Base URL</span>
