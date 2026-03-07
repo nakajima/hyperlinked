@@ -27,5 +27,5 @@ formula_name = "hyperlinked"
 
 # [channels.curl]
 
-# [channels.nix]
+[channels.nix]
 flake_repo = "nakajima/hyperlinked"  # defaults to project repo
