@@ -112,13 +112,14 @@ mod tests {
     }
 
     #[test]
-    fn queue_nav_points_to_admin_jobs_with_pending_badge_placeholder() {
+    fn admin_nav_points_to_admin_artifacts_without_queue_badge_placeholder() {
         let mut flash = Flash::default();
         let html = page_with_flags("Title", "<p>Body</p>", &mut flash, None, false)
             .expect("layout should render")
             .0;
-        assert!(html.contains("href=\"/admin/jobs\""));
-        assert!(html.contains("data-queue-pending-badge"));
+        assert!(html.contains("href=\"/admin/artifacts\""));
+        assert!(!html.contains("href=\"/admin/jobs\""));
+        assert!(!html.contains("data-queue-pending-badge"));
     }
 
     #[test]

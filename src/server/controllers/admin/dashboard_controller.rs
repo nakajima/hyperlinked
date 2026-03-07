@@ -34,7 +34,7 @@ use crate::{
         hyperlink_processing_job::{self, HyperlinkProcessingJobKind, HyperlinkProcessingJobState},
         hyperlink_relation,
     },
-    integrations::mathpix::MathpixStatus,
+    integrations::mathpix::{MathpixStatus, MathpixUsageSummary},
     model::{
         hyperlink_artifact as hyperlink_artifact_model,
         hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
@@ -79,10 +79,70 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TAGGING_MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_TAGGING_AUTH_HEADER_NAME: &str = "Authorization";
 const DEFAULT_TAGGING_AUTH_HEADER_PREFIX: &str = "Bearer";
+const ADMIN_TAB_OVERVIEW_PATH: &str = "/admin/overview";
+const ADMIN_TAB_ARTIFACTS_PATH: &str = "/admin/artifacts";
+const ADMIN_TAB_TAGS_PATH: &str = "/admin/tags";
+const ADMIN_TAB_QUEUE_PATH: &str = "/admin/queue";
+const ADMIN_TAB_IMPORT_EXPORT_PATH: &str = "/admin/import-export";
+const ADMIN_TAB_STORAGE_PATH: &str = "/admin/storage";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AdminTab {
+    Overview,
+    Artifacts,
+    Tags,
+    Queue,
+    ImportExport,
+    Storage,
+}
+
+impl AdminTab {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Overview => ADMIN_TAB_OVERVIEW_PATH,
+            Self::Artifacts => ADMIN_TAB_ARTIFACTS_PATH,
+            Self::Tags => ADMIN_TAB_TAGS_PATH,
+            Self::Queue => ADMIN_TAB_QUEUE_PATH,
+            Self::ImportExport => ADMIN_TAB_IMPORT_EXPORT_PATH,
+            Self::Storage => ADMIN_TAB_STORAGE_PATH,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Artifacts => "Artifacts",
+            Self::Tags => "Tags",
+            Self::Queue => "Queue",
+            Self::ImportExport => "Import / Export",
+            Self::Storage => "Storage",
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Self::Overview => "Status and diagnostics for this server.",
+            Self::Artifacts => "Configure collection pipelines and run missing-artifact backfills.",
+            Self::Tags => "Configure AI tagging and approve pending discovered tags.",
+            Self::Queue => "Queue lifecycle controls for worker processing.",
+            Self::ImportExport => "Create backup archives and restore from ZIP exports.",
+            Self::Storage => "Disk and artifact storage utilization by dataset and kind.",
+        }
+    }
+}
 
 pub fn routes() -> Router<Context> {
     Router::new()
-        .route("/admin", routing::get(index))
+        .route("/admin", routing::get(index_artifacts))
+        .route(ADMIN_TAB_OVERVIEW_PATH, routing::get(index_overview))
+        .route(ADMIN_TAB_ARTIFACTS_PATH, routing::get(index_artifacts))
+        .route(ADMIN_TAB_TAGS_PATH, routing::get(index_tags))
+        .route(ADMIN_TAB_QUEUE_PATH, routing::get(index_queue))
+        .route(
+            ADMIN_TAB_IMPORT_EXPORT_PATH,
+            routing::get(index_import_export),
+        )
+        .route(ADMIN_TAB_STORAGE_PATH, routing::get(index_storage))
         .route("/admin/status", routing::get(status))
         .route("/admin/export", routing::get(download_backup_export))
         .route(
@@ -364,7 +424,31 @@ struct BuiltBackupZip {
     summary: BackupCompletionSummary,
 }
 
-async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
+async fn index_overview(State(state): State<Context>, headers: HeaderMap) -> Response {
+    render_admin_tab(AdminTab::Overview, &state, &headers).await
+}
+
+async fn index_artifacts(State(state): State<Context>, headers: HeaderMap) -> Response {
+    render_admin_tab(AdminTab::Artifacts, &state, &headers).await
+}
+
+async fn index_tags(State(state): State<Context>, headers: HeaderMap) -> Response {
+    render_admin_tab(AdminTab::Tags, &state, &headers).await
+}
+
+async fn index_queue(State(state): State<Context>, headers: HeaderMap) -> Response {
+    render_admin_tab(AdminTab::Queue, &state, &headers).await
+}
+
+async fn index_import_export(State(state): State<Context>, headers: HeaderMap) -> Response {
+    render_admin_tab(AdminTab::ImportExport, &state, &headers).await
+}
+
+async fn index_storage(State(state): State<Context>, headers: HeaderMap) -> Response {
+    render_admin_tab(AdminTab::Storage, &state, &headers).await
+}
+
+async fn render_admin_tab(active_tab: AdminTab, state: &Context, headers: &HeaderMap) -> Response {
     let artifact_settings = match settings::load(&state.connection).await {
         Ok(settings) => settings,
         Err(err) => {
@@ -415,10 +499,12 @@ async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
     let chromium = crate::server::chromium_diagnostics::current();
     let fonts = crate::server::font_diagnostics::current();
     let mathpix = crate::integrations::mathpix::current_status();
+    let mathpix_usage = crate::integrations::mathpix::current_usage_summary().await;
 
     views::render_html_page_with_flash(
         "Admin",
         render_index(
+            active_tab,
             &plan.summary,
             &stats,
             &artifact_settings,
@@ -427,8 +513,9 @@ async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
             &chromium,
             &fonts,
             &mathpix,
+            &mathpix_usage,
         ),
-        Flash::from_headers(&headers),
+        Flash::from_headers(headers),
     )
 }
 
@@ -503,7 +590,7 @@ async fn approve_pending_tags(
     if approved_names.is_empty() {
         return redirect_with_flash(
             &headers,
-            "/admin",
+            ADMIN_TAB_TAGS_PATH,
             FlashName::Notice,
             "No pending tags were selected.",
         );
@@ -540,7 +627,7 @@ async fn approve_pending_tags(
 
     redirect_with_flash(
         &headers,
-        "/admin",
+        ADMIN_TAB_TAGS_PATH,
         FlashName::Notice,
         format!("Approved {} tag(s).", approved_names.len()),
     )
@@ -629,11 +716,16 @@ async fn start_backup_export(State(state): State<Context>) -> Response {
 async fn cancel_backup_export(State(state): State<Context>, headers: HeaderMap) -> Response {
     let canceled = state.backup_exports.cancel_running();
     if canceled {
-        return redirect_with_flash(&headers, "/admin", FlashName::Notice, "Backup canceled.");
+        return redirect_with_flash(
+            &headers,
+            ADMIN_TAB_IMPORT_EXPORT_PATH,
+            FlashName::Notice,
+            "Backup canceled.",
+        );
     }
     redirect_with_flash(
         &headers,
-        "/admin",
+        ADMIN_TAB_IMPORT_EXPORT_PATH,
         FlashName::Notice,
         "No backup in progress.",
     )
@@ -693,7 +785,7 @@ async fn import_hyperlinks(
         Err(message) => {
             return redirect_with_flash(
                 &headers,
-                "/admin",
+                ADMIN_TAB_IMPORT_EXPORT_PATH,
                 FlashName::Alert,
                 format!("Import failed: {message}"),
             );
@@ -733,7 +825,7 @@ async fn import_hyperlinks(
     if started.started {
         redirect_with_flash(
             &headers,
-            "/admin",
+            ADMIN_TAB_IMPORT_EXPORT_PATH,
             FlashName::Notice,
             "Import started. Refresh this page to follow progress.",
         )
@@ -741,7 +833,7 @@ async fn import_hyperlinks(
         let state_label = started.status.state;
         redirect_with_flash(
             &headers,
-            "/admin",
+            ADMIN_TAB_IMPORT_EXPORT_PATH,
             FlashName::Notice,
             format!("Import already in progress ({state_label})."),
         )
@@ -751,11 +843,16 @@ async fn import_hyperlinks(
 async fn cancel_backup_import(State(state): State<Context>, headers: HeaderMap) -> Response {
     let canceled = state.backup_imports.cancel_running();
     if canceled {
-        return redirect_with_flash(&headers, "/admin", FlashName::Notice, "Import canceled.");
+        return redirect_with_flash(
+            &headers,
+            ADMIN_TAB_IMPORT_EXPORT_PATH,
+            FlashName::Notice,
+            "Import canceled.",
+        );
     }
     redirect_with_flash(
         &headers,
-        "/admin",
+        ADMIN_TAB_IMPORT_EXPORT_PATH,
         FlashName::Notice,
         "No import in progress.",
     )
@@ -801,7 +898,7 @@ async fn process_missing_artifacts(State(state): State<Context>, headers: Header
 
     redirect_with_flash(
         &headers,
-        "/admin",
+        ADMIN_TAB_ARTIFACTS_PATH,
         FlashName::Notice,
         format!(
             "Queued {} snapshot job(s), {} og job(s), and {} readability job(s).",
@@ -932,7 +1029,7 @@ async fn update_artifact_settings(
             );
             return redirect_with_flash(
                 &headers,
-                "/admin",
+                ADMIN_TAB_ARTIFACTS_PATH,
                 FlashName::Notice,
                 build_artifact_settings_message(
                     deleted_source,
@@ -1051,7 +1148,7 @@ async fn update_artifact_settings(
 
     redirect_with_flash(
         &headers,
-        "/admin",
+        ADMIN_TAB_ARTIFACTS_PATH,
         FlashName::Notice,
         build_artifact_settings_message(
             deleted_source,
@@ -1117,7 +1214,7 @@ async fn update_tagging_settings(
         "Updated tagging settings. Auto-classification is disabled."
     };
 
-    redirect_with_flash(&headers, "/admin", FlashName::Notice, message)
+    redirect_with_flash(&headers, ADMIN_TAB_TAGS_PATH, FlashName::Notice, message)
 }
 
 async fn fetch_tagging_models(
@@ -1691,7 +1788,7 @@ async fn clear_queue(State(state): State<Context>, headers: HeaderMap) -> Respon
 
     redirect_with_flash(
         &headers,
-        "/admin",
+        ADMIN_TAB_QUEUE_PATH,
         FlashName::Notice,
         format!("Cleared {cleared} queued queue row(s)."),
     )
@@ -1701,7 +1798,7 @@ async fn pause_queue(State(state): State<Context>, headers: HeaderMap) -> Respon
     let Some(queue) = state.processing_queue.as_ref() else {
         return redirect_with_flash(
             &headers,
-            "/admin",
+            ADMIN_TAB_QUEUE_PATH,
             FlashName::Alert,
             "Queue controls are unavailable in this environment.",
         );
@@ -1716,7 +1813,7 @@ async fn pause_queue(State(state): State<Context>, headers: HeaderMap) -> Respon
 
     redirect_with_flash(
         &headers,
-        "/admin",
+        ADMIN_TAB_QUEUE_PATH,
         FlashName::Notice,
         "Queue workers paused.",
     )
@@ -1726,7 +1823,7 @@ async fn resume_queue(State(state): State<Context>, headers: HeaderMap) -> Respo
     let Some(queue) = state.processing_queue.as_ref() else {
         return redirect_with_flash(
             &headers,
-            "/admin",
+            ADMIN_TAB_QUEUE_PATH,
             FlashName::Alert,
             "Queue controls are unavailable in this environment.",
         );
@@ -1741,7 +1838,7 @@ async fn resume_queue(State(state): State<Context>, headers: HeaderMap) -> Respo
 
     redirect_with_flash(
         &headers,
-        "/admin",
+        ADMIN_TAB_QUEUE_PATH,
         FlashName::Notice,
         "Queue workers resumed.",
     )
@@ -3097,6 +3194,7 @@ fn file_size_bytes(path: &Path) -> Result<u64, DbErr> {
 #[derive(Template)]
 #[template(path = "admin/index.stpl")]
 struct AdminIndexTemplate<'a> {
+    active_tab: AdminTab,
     app_version: &'a str,
     summary: &'a MissingArtifactsSummary,
     stats: &'a AdminDatasetStats,
@@ -3107,9 +3205,98 @@ struct AdminIndexTemplate<'a> {
     chromium: &'a ChromiumDiagnostics,
     fonts: &'a FontDiagnostics,
     mathpix: &'a MathpixStatus,
+    mathpix_usage: &'a MathpixUsageSummary,
 }
 
 impl AdminIndexTemplate<'_> {
+    fn active_tab_title(&self) -> &'static str {
+        self.active_tab.title()
+    }
+
+    fn active_tab_summary(&self) -> &'static str {
+        self.active_tab.summary()
+    }
+
+    fn is_overview_tab(&self) -> bool {
+        self.active_tab == AdminTab::Overview
+    }
+
+    fn is_artifacts_tab(&self) -> bool {
+        self.active_tab == AdminTab::Artifacts
+    }
+
+    fn is_tags_tab(&self) -> bool {
+        self.active_tab == AdminTab::Tags
+    }
+
+    fn is_queue_tab(&self) -> bool {
+        self.active_tab == AdminTab::Queue
+    }
+
+    fn is_import_export_tab(&self) -> bool {
+        self.active_tab == AdminTab::ImportExport
+    }
+
+    fn is_storage_tab(&self) -> bool {
+        self.active_tab == AdminTab::Storage
+    }
+
+    fn overview_path(&self) -> &'static str {
+        AdminTab::Overview.path()
+    }
+
+    fn artifacts_path(&self) -> &'static str {
+        AdminTab::Artifacts.path()
+    }
+
+    fn tags_path(&self) -> &'static str {
+        AdminTab::Tags.path()
+    }
+
+    fn queue_path(&self) -> &'static str {
+        AdminTab::Queue.path()
+    }
+
+    fn import_export_path(&self) -> &'static str {
+        AdminTab::ImportExport.path()
+    }
+
+    fn storage_path(&self) -> &'static str {
+        AdminTab::Storage.path()
+    }
+
+    fn tab_link_class(&self, tab: AdminTab) -> &'static str {
+        if self.active_tab == tab {
+            "inline-flex min-h-10 w-full items-center justify-between rounded-[0.4rem] border border-accent/60 bg-tertiary/40 px-3 py-2 text-sm font-semibold text-accent no-underline"
+        } else {
+            "inline-flex min-h-10 w-full items-center justify-between rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-2 text-sm text-accent no-underline transition-colors hover:border-accent/60 hover:bg-tertiary/30"
+        }
+    }
+
+    fn overview_link_class(&self) -> &'static str {
+        self.tab_link_class(AdminTab::Overview)
+    }
+
+    fn artifacts_link_class(&self) -> &'static str {
+        self.tab_link_class(AdminTab::Artifacts)
+    }
+
+    fn tags_link_class(&self) -> &'static str {
+        self.tab_link_class(AdminTab::Tags)
+    }
+
+    fn queue_link_class(&self) -> &'static str {
+        self.tab_link_class(AdminTab::Queue)
+    }
+
+    fn import_export_link_class(&self) -> &'static str {
+        self.tab_link_class(AdminTab::ImportExport)
+    }
+
+    fn storage_link_class(&self) -> &'static str {
+        self.tab_link_class(AdminTab::Storage)
+    }
+
     fn format_u64_bytes(&self, bytes: u64) -> String {
         format_bytes(bytes)
     }
@@ -3126,12 +3313,17 @@ impl AdminIndexTemplate<'_> {
         format_bytes_f64(average_bytes)
     }
 
+    fn format_usd_estimate(&self, value: f64) -> String {
+        format!("${value:.2}")
+    }
+
     fn tagging_vocabulary_lines(&self) -> String {
         self.tagging_settings.vocabulary.join("\n")
     }
 }
 
 fn render_index(
+    active_tab: AdminTab,
     summary: &MissingArtifactsSummary,
     stats: &AdminDatasetStats,
     artifact_settings: &ArtifactCollectionSettings,
@@ -3140,8 +3332,10 @@ fn render_index(
     chromium: &ChromiumDiagnostics,
     fonts: &FontDiagnostics,
     mathpix: &MathpixStatus,
+    mathpix_usage: &MathpixUsageSummary,
 ) -> Result<String, sailfish::RenderError> {
     AdminIndexTemplate {
+        active_tab,
         app_version: APP_VERSION,
         summary,
         stats,
@@ -3154,12 +3348,18 @@ fn render_index(
         chromium,
         fonts,
         mathpix,
+        mathpix_usage,
     }
     .render()
 }
 
 fn response_error(status: StatusCode, message: impl Into<String>) -> Response {
-    views::render_error_page(status, message, "/admin", "Back to admin")
+    views::render_error_page(
+        status,
+        message,
+        ADMIN_TAB_ARTIFACTS_PATH,
+        "Back to admin",
+    )
 }
 
 fn extract_tagging_model_ids(payload: &serde_json::Value) -> Vec<String> {
@@ -3267,6 +3467,10 @@ mod tests {
             enabled: false,
             reason: "disabled: MATHPIX_API_TOKEN not set".to_string(),
         }
+    }
+
+    fn default_mathpix_usage_summary() -> MathpixUsageSummary {
+        MathpixUsageSummary::default()
     }
 
     fn default_tagging_settings() -> TaggingSettings {
@@ -3390,8 +3594,10 @@ mod tests {
         };
         let fonts = FontDiagnostics::default();
         let mathpix = default_mathpix_status();
+        let mathpix_usage = default_mathpix_usage_summary();
 
         let html = render_index(
+            AdminTab::Overview,
             &summary,
             &stats,
             &ArtifactCollectionSettings::default(),
@@ -3400,6 +3606,7 @@ mod tests {
             &chromium,
             &fonts,
             &mathpix,
+            &mathpix_usage,
         )
         .expect("admin template should render");
         assert!(html.contains("Screenshot browser setup required"));
@@ -3417,8 +3624,10 @@ mod tests {
         };
         let fonts = FontDiagnostics::default();
         let mathpix = default_mathpix_status();
+        let mathpix_usage = default_mathpix_usage_summary();
 
         let html = render_index(
+            AdminTab::Overview,
             &summary,
             &stats,
             &ArtifactCollectionSettings::default(),
@@ -3427,6 +3636,7 @@ mod tests {
             &chromium,
             &fonts,
             &mathpix,
+            &mathpix_usage,
         )
         .expect("admin template should render");
         assert!(!html.contains("Screenshot browser setup required"));
@@ -3461,8 +3671,10 @@ mod tests {
             fontconfig_error: None,
         };
         let mathpix = default_mathpix_status();
+        let mathpix_usage = default_mathpix_usage_summary();
 
         let html = render_index(
+            AdminTab::Overview,
             &summary,
             &stats,
             &ArtifactCollectionSettings::default(),
@@ -3471,6 +3683,7 @@ mod tests {
             &chromium,
             &fonts,
             &mathpix,
+            &mathpix_usage,
         )
         .expect("admin template should render");
         assert!(html.contains("Screenshot font setup recommended"));
@@ -3492,8 +3705,10 @@ mod tests {
             enabled: true,
             reason: "enabled".to_string(),
         };
+        let mathpix_usage = default_mathpix_usage_summary();
 
         let html = render_index(
+            AdminTab::Overview,
             &summary,
             &stats,
             &ArtifactCollectionSettings::default(),
@@ -3502,6 +3717,7 @@ mod tests {
             &chromium,
             &fonts,
             &mathpix,
+            &mathpix_usage,
         )
         .expect("admin template should render");
         assert!(html.contains("PDF Mathpix parsing"));
@@ -3522,8 +3738,10 @@ mod tests {
             enabled: false,
             reason: "disabled: MATHPIX_APP_ID not set".to_string(),
         };
+        let mathpix_usage = default_mathpix_usage_summary();
 
         let html = render_index(
+            AdminTab::Overview,
             &summary,
             &stats,
             &ArtifactCollectionSettings::default(),
@@ -3532,11 +3750,98 @@ mod tests {
             &chromium,
             &fonts,
             &mathpix,
+            &mathpix_usage,
         )
         .expect("admin template should render");
         assert!(html.contains("PDF Mathpix parsing"));
         assert!(html.contains("Disabled"));
         assert!(html.contains("MATHPIX_APP_ID"));
+    }
+
+    #[test]
+    fn render_index_shows_mathpix_usage_summary() {
+        let summary = MissingArtifactsSummary::default();
+        let stats = AdminDatasetStats::default();
+        let chromium = ChromiumDiagnostics {
+            chromium_path: "/usr/bin/chromium".to_string(),
+            chromium_resolved_path: Some("/usr/bin/chromium".to_string()),
+            chromium_found: true,
+        };
+        let fonts = FontDiagnostics::default();
+        let mathpix = MathpixStatus {
+            enabled: true,
+            reason: "enabled".to_string(),
+        };
+        let mathpix_usage = MathpixUsageSummary {
+            month: crate::integrations::mathpix::MathpixUsageWindow {
+                total_requests: 12,
+                estimated_cost_usd: 0.09,
+            },
+            all_time: crate::integrations::mathpix::MathpixUsageWindow {
+                total_requests: 98,
+                estimated_cost_usd: 0.74,
+            },
+            warning: None,
+        };
+
+        let html = render_index(
+            AdminTab::Overview,
+            &summary,
+            &stats,
+            &ArtifactCollectionSettings::default(),
+            &default_tagging_settings(),
+            &[],
+            &chromium,
+            &fonts,
+            &mathpix,
+            &mathpix_usage,
+        )
+        .expect("admin template should render");
+        assert!(
+            html.contains(
+                "Current month: <code class=\"font-mono text-[0.9em]\">12 requests</code>"
+            )
+        );
+        assert!(html.contains("estimated <code class=\"font-mono text-[0.9em]\">$0.09</code>"));
+        assert!(
+            html.contains("All-time: <code class=\"font-mono text-[0.9em]\">98 requests</code>")
+        );
+        assert!(html.contains("estimated <code class=\"font-mono text-[0.9em]\">$0.74</code>"));
+    }
+
+    #[test]
+    fn render_index_shows_mathpix_usage_warning() {
+        let summary = MissingArtifactsSummary::default();
+        let stats = AdminDatasetStats::default();
+        let chromium = ChromiumDiagnostics {
+            chromium_path: "/usr/bin/chromium".to_string(),
+            chromium_resolved_path: Some("/usr/bin/chromium".to_string()),
+            chromium_found: true,
+        };
+        let fonts = FontDiagnostics::default();
+        let mathpix = MathpixStatus {
+            enabled: true,
+            reason: "enabled".to_string(),
+        };
+        let mathpix_usage = MathpixUsageSummary {
+            warning: Some("Mathpix usage unavailable: timeout".to_string()),
+            ..Default::default()
+        };
+
+        let html = render_index(
+            AdminTab::Overview,
+            &summary,
+            &stats,
+            &ArtifactCollectionSettings::default(),
+            &default_tagging_settings(),
+            &[],
+            &chromium,
+            &fonts,
+            &mathpix,
+            &mathpix_usage,
+        )
+        .expect("admin template should render");
+        assert!(html.contains("Mathpix usage unavailable: timeout"));
     }
 
     #[tokio::test]
@@ -3557,7 +3862,7 @@ mod tests {
             .content_type("application/x-www-form-urlencoded")
             .await;
         response.assert_status_see_other();
-        response.assert_header("location", "/admin");
+        response.assert_header("location", "/admin/artifacts");
 
         let og_artifact_count = hyperlink_artifact::Entity::find()
             .filter(hyperlink_artifact::Column::Kind.eq(HyperlinkArtifactKind::OgMeta))
@@ -3587,7 +3892,7 @@ mod tests {
             .content_type("application/x-www-form-urlencoded")
             .await;
         response.assert_status_see_other();
-        response.assert_header("location", "/admin");
+        response.assert_header("location", "/admin/artifacts");
 
         let og_artifact_count = hyperlink_artifact::Entity::find()
             .filter(hyperlink_artifact::Column::Kind.is_in([
@@ -3782,7 +4087,7 @@ mod tests {
 
         let action = server.post("/admin/process-missing-artifacts").await;
         action.assert_status_see_other();
-        action.assert_header("location", "/admin");
+        action.assert_header("location", "/admin/artifacts");
 
         let snapshot_jobs = hyperlink_processing_job::Entity::find()
             .filter(hyperlink_processing_job::Column::Kind.eq(HyperlinkProcessingJobKind::Snapshot))
@@ -3823,34 +4128,64 @@ mod tests {
         )
         .await;
 
-        let page = server.get("/admin").await;
-        page.assert_status_ok();
-        let body = page.text();
-        assert!(body.contains("Process all artifacts"));
-        assert!(body.contains("data-confirm=\"Process all artifacts?"));
-        assert!(body.contains("Missing source"));
-        assert!(body.contains("Missing Open Graph"));
-        assert!(body.contains("Missing readability"));
-        assert!(body.contains("Snapshot to queue"));
-        assert!(body.contains("Open Graph to queue"));
-        assert!(body.contains("Readability to queue"));
-        assert!(body.contains("Queue controls"));
-        assert!(body.contains("action=\"/admin/clear-queue\""));
-        assert!(body.contains("action=\"/admin/pause-queue\""));
-        assert!(body.contains("action=\"/admin/resume-queue\""));
-        assert!(body.contains("Clear queue"));
-        assert!(body.contains("Pause queue"));
-        assert!(body.contains("Resume queue"));
-        assert!(body.contains("data-admin-backup"));
-        assert!(body.contains("data-admin-backup-create"));
-        assert!(body.contains("data-admin-backup-cancel"));
-        assert!(body.contains("data-admin-backup-download"));
-        assert!(body.contains("data-admin-version"));
-        assert!(body.contains(APP_VERSION));
-        assert!(body.contains("data-admin-import"));
-        assert!(body.contains("data-admin-import-form"));
-        assert!(body.contains("data-admin-import-submit"));
-        assert!(body.contains("data-admin-import-status"));
+        let artifacts = server.get("/admin/artifacts").await;
+        artifacts.assert_status_ok();
+        let artifacts_body = artifacts.text();
+        assert!(artifacts_body.contains("Process all artifacts"));
+        assert!(artifacts_body.contains("data-confirm=\"Process all artifacts?"));
+        assert!(artifacts_body.contains("Missing source"));
+        assert!(artifacts_body.contains("Missing Open Graph"));
+        assert!(artifacts_body.contains("Missing readability"));
+        assert!(artifacts_body.contains("Snapshot to queue"));
+        assert!(artifacts_body.contains("Open Graph to queue"));
+        assert!(artifacts_body.contains("Readability to queue"));
+        assert!(artifacts_body.contains("href=\"/admin/overview\""));
+        assert!(artifacts_body.contains("href=\"/admin/artifacts\""));
+        assert!(artifacts_body.contains("href=\"/admin/tags\""));
+        assert!(artifacts_body.contains("href=\"/admin/queue\""));
+        assert!(artifacts_body.contains("href=\"/admin/import-export\""));
+        assert!(artifacts_body.contains("href=\"/admin/storage\""));
+        assert!(artifacts_body.contains("data-queue-pending-badge"));
+        assert!(!artifacts_body.contains("Queue controls"));
+        assert!(!artifacts_body.contains("data-admin-backup"));
+        assert!(!artifacts_body.contains("data-admin-version"));
+
+        let queue = server.get("/admin/queue").await;
+        queue.assert_status_ok();
+        let queue_body = queue.text();
+        assert!(queue_body.contains("Queue controls"));
+        assert!(queue_body.contains("action=\"/admin/clear-queue\""));
+        assert!(queue_body.contains("action=\"/admin/pause-queue\""));
+        assert!(queue_body.contains("action=\"/admin/resume-queue\""));
+        assert!(!queue_body.contains("Process all artifacts"));
+
+        let tags = server.get("/admin/tags").await;
+        tags.assert_status_ok();
+        let tags_body = tags.text();
+        assert!(tags_body.contains("Tag classification settings"));
+        assert!(tags_body.contains("data-tagging-settings-form"));
+        assert!(tags_body.contains("data-admin-tag-reclassify"));
+        assert!(tags_body.contains("data-admin-pending-tags"));
+        assert!(!tags_body.contains("Process all artifacts"));
+
+        let import_export = server.get("/admin/import-export").await;
+        import_export.assert_status_ok();
+        let import_export_body = import_export.text();
+        assert!(import_export_body.contains("data-admin-backup"));
+        assert!(import_export_body.contains("data-admin-backup-create"));
+        assert!(import_export_body.contains("data-admin-backup-cancel"));
+        assert!(import_export_body.contains("data-admin-backup-download"));
+        assert!(import_export_body.contains("data-admin-import"));
+        assert!(import_export_body.contains("data-admin-import-form"));
+        assert!(import_export_body.contains("data-admin-import-submit"));
+        assert!(import_export_body.contains("data-admin-import-status"));
+
+        let overview = server.get("/admin/overview").await;
+        overview.assert_status_ok();
+        let overview_body = overview.text();
+        assert!(overview_body.contains("data-admin-version"));
+        assert!(overview_body.contains(APP_VERSION));
+        assert!(!overview_body.contains("Process all artifacts"));
     }
 
     #[tokio::test]
@@ -3863,7 +4198,7 @@ mod tests {
 
         let action = server.post("/admin/clear-queue").await;
         action.assert_status_see_other();
-        action.assert_header("location", "/admin");
+        action.assert_header("location", "/admin/queue");
 
         assert_eq!(queue_status(&connection, 1).await, "cleared");
         assert_eq!(queue_status(&connection, 2).await, "processing");
@@ -3877,7 +4212,7 @@ mod tests {
 
         let action = server.post("/admin/pause-queue").await;
         action.assert_status_see_other();
-        action.assert_header("location", "/admin");
+        action.assert_header("location", "/admin/queue");
     }
 
     #[tokio::test]
@@ -3886,7 +4221,7 @@ mod tests {
 
         let action = server.post("/admin/resume-queue").await;
         action.assert_status_see_other();
-        action.assert_header("location", "/admin");
+        action.assert_header("location", "/admin/queue");
     }
 
     #[tokio::test]
@@ -3910,7 +4245,7 @@ mod tests {
 
         let action = server.post("/admin/process-missing-artifacts").await;
         action.assert_status_see_other();
-        action.assert_header("location", "/admin");
+        action.assert_header("location", "/admin/artifacts");
     }
 
     #[tokio::test]
@@ -3930,7 +4265,7 @@ mod tests {
         )
         .await;
 
-        let page = server.get("/admin").await;
+        let page = server.get("/admin/artifacts").await;
         page.assert_status_ok();
         let body = page.text();
         assert!(body.contains("Process all artifacts</button>"));
@@ -3956,25 +4291,30 @@ mod tests {
         )
         .await;
 
-        let page = server.get("/admin").await;
-        page.assert_status_ok();
-        let body = page.text();
-        assert!(body.contains("Diagnostics and examples"));
-        assert!(body.contains("Dataset stats"));
-        assert!(body.contains("Flash examples"));
-        assert!(body.contains("border-notice-border"));
-        assert!(body.contains("border-invalid"));
-        assert!(body.contains("border-dev-alert-border"));
-        assert!(body.contains("Root links"));
-        assert!(body.contains("Discovered links"));
-        assert!(body.contains("Active jobs"));
-        assert!(body.contains("Storage utilization"));
-        assert!(body.contains("DB size"));
-        assert!(body.contains("Saved artifacts size"));
-        assert!(body.contains("Discovered artifacts size"));
-        assert!(body.contains("avg"));
-        assert!(body.contains("Artifact storage by type"));
-        assert!(body.contains("snapshot_warc"));
+        let overview = server.get("/admin/overview").await;
+        overview.assert_status_ok();
+        let overview_body = overview.text();
+        assert!(overview_body.contains("Diagnostics and examples"));
+        assert!(overview_body.contains("Dataset stats"));
+        assert!(overview_body.contains("Flash examples"));
+        assert!(overview_body.contains("border-notice-border"));
+        assert!(overview_body.contains("border-invalid"));
+        assert!(overview_body.contains("border-dev-alert-border"));
+        assert!(overview_body.contains("Root links"));
+        assert!(overview_body.contains("Discovered links"));
+        assert!(overview_body.contains("Active jobs"));
+        assert!(!overview_body.contains("Storage utilization"));
+
+        let storage = server.get("/admin/storage").await;
+        storage.assert_status_ok();
+        let storage_body = storage.text();
+        assert!(storage_body.contains("Storage utilization"));
+        assert!(storage_body.contains("DB size"));
+        assert!(storage_body.contains("Saved artifacts size"));
+        assert!(storage_body.contains("Discovered artifacts size"));
+        assert!(storage_body.contains("avg"));
+        assert!(storage_body.contains("Artifact storage by type"));
+        assert!(storage_body.contains("snapshot_warc"));
     }
 
     #[tokio::test]
@@ -4232,7 +4572,7 @@ mod tests {
 
         let cancel = server.post("/admin/export/cancel").await;
         cancel.assert_status_see_other();
-        cancel.assert_header("location", "/admin");
+        cancel.assert_header("location", "/admin/import-export");
 
         let status = server.get("/admin/status").await;
         status.assert_status_ok();
@@ -4247,7 +4587,7 @@ mod tests {
         let multipart = MultipartForm::new().add_part("not_archive", Part::text("ignored"));
         let import = server.post("/admin/import").multipart(multipart).await;
         import.assert_status_see_other();
-        import.assert_header("location", "/admin");
+        import.assert_header("location", "/admin/import-export");
 
         let status = server.get("/admin/status").await;
         status.assert_status_ok();
@@ -4351,7 +4691,7 @@ mod tests {
         );
         let import = server.post("/admin/import").multipart(multipart).await;
         import.assert_status_see_other();
-        import.assert_header("location", "/admin");
+        import.assert_header("location", "/admin/import-export");
         let import_status = wait_for_import_ready(&server).await;
         assert_eq!(import_status.import.state, "ready");
 
@@ -4470,7 +4810,7 @@ mod tests {
         );
         let import = server.post("/admin/import").multipart(multipart).await;
         import.assert_status_see_other();
-        import.assert_header("location", "/admin");
+        import.assert_header("location", "/admin/import-export");
         let import_status = wait_for_import_ready(&server).await;
         assert_eq!(import_status.import.state, "ready");
 
@@ -4579,14 +4919,14 @@ mod tests {
         );
         let import = server.post("/admin/import").multipart(multipart).await;
         import.assert_status_see_other();
-        import.assert_header("location", "/admin");
+        import.assert_header("location", "/admin/import-export");
 
         let running = wait_for_import_running(&server).await;
         assert_eq!(running.import.state, "running");
 
         let cancel = server.post("/admin/import/cancel").await;
         cancel.assert_status_see_other();
-        cancel.assert_header("location", "/admin");
+        cancel.assert_header("location", "/admin/import-export");
 
         let terminal = wait_for_import_terminal(&server).await;
         assert_eq!(terminal.import.state, "cancelled");

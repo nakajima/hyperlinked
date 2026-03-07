@@ -211,7 +211,12 @@ pub async fn save(
         settings.auth_header_prefix.as_deref(),
     )
     .await?;
-    kv_store::set(connection, KEY_BACKEND_KIND, settings.backend_kind.as_storage()).await?;
+    kv_store::set(
+        connection,
+        KEY_BACKEND_KIND,
+        settings.backend_kind.as_storage(),
+    )
+    .await?;
 
     Ok(settings)
 }

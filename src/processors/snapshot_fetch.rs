@@ -1,6 +1,8 @@
 use chromiumoxide::{
     browser::{Browser, BrowserConfig},
-    cdp::browser_protocol::{emulation::SetDeviceMetricsOverrideParams, page::CaptureScreenshotFormat},
+    cdp::browser_protocol::{
+        emulation::SetDeviceMetricsOverrideParams, page::CaptureScreenshotFormat,
+    },
     page::ScreenshotParams,
 };
 use futures_util::StreamExt;
@@ -17,7 +19,7 @@ use std::net::IpAddr;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::{net::lookup_host, time::sleep};
 
@@ -74,6 +76,12 @@ const DEFAULT_SCREENSHOT_RETRY_BASE_BACKOFF_MS: u64 = 200;
 const DEFAULT_SCREENSHOT_RETRY_JITTER_MAX_MS: u64 = 125;
 const EXACT_HEIGHT_EMPTY_PAYLOAD_ERROR: &str =
     "chromium screenshot response contained an empty payload";
+const SCREENSHOT_PROFILE_CLEANUP_RETRY_ATTEMPTS: usize = 4;
+const SCREENSHOT_PROFILE_CLEANUP_RETRY_BASE_DELAY_MS: u64 = 50;
+const SCREENSHOT_PROFILE_STALE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const CHROMIUM_SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+static SCREENSHOT_PROFILE_SWEEP_ONCE: OnceLock<()> = OnceLock::new();
 
 pub struct SnapshotFetcher {
     job_id: i32,
@@ -132,8 +140,10 @@ impl Processor for SnapshotFetcher {
                     let pdf_payload = hyperlink_artifact::load_payload(&source_artifact)
                         .await
                         .map_err(ProcessingError::DB)?;
-                    match build_pdf_thumbnails_from_source(&pdf_payload, screenshot_thumbnail_size())
-                    {
+                    match build_pdf_thumbnails_from_source(
+                        &pdf_payload,
+                        screenshot_thumbnail_size(),
+                    ) {
                         Ok((thumbnail_webp, thumbnail_dark_webp)) => {
                             let thumbnail_artifact = hyperlink_artifact::insert(
                                 connection,
@@ -544,6 +554,44 @@ impl ExactHeightCaptureState {
     }
 }
 
+#[async_trait::async_trait]
+trait BrowserLifecycle {
+    async fn close_browser(&mut self) -> Result<(), String>;
+    async fn wait_for_exit(&mut self) -> Result<Option<()>, String>;
+    async fn kill_browser(&mut self) -> Result<bool, String>;
+}
+
+struct ChromiumBrowserLifecycle<'a> {
+    browser: &'a mut Browser,
+}
+
+#[async_trait::async_trait]
+impl BrowserLifecycle for ChromiumBrowserLifecycle<'_> {
+    async fn close_browser(&mut self) -> Result<(), String> {
+        self.browser
+            .close()
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    async fn wait_for_exit(&mut self) -> Result<Option<()>, String> {
+        self.browser
+            .wait()
+            .await
+            .map(|status| status.map(|_| ()))
+            .map_err(|error| error.to_string())
+    }
+
+    async fn kill_browser(&mut self) -> Result<bool, String> {
+        match self.browser.kill().await {
+            Some(Ok(())) => Ok(true),
+            Some(Err(error)) => Err(error.to_string()),
+            None => Ok(false),
+        }
+    }
+}
+
 struct ChromiumoxideSession {
     browser: Browser,
     handler_task: tokio::task::JoinHandle<()>,
@@ -557,6 +605,7 @@ impl ChromiumoxideSession {
         variant: Option<ScreenshotVariant>,
         render_wait_ms: u64,
     ) -> Result<Self, String> {
+        maybe_sweep_stale_screenshot_profiles().await;
         let profile_dir = screenshot_profile_dir();
         tokio::fs::create_dir_all(&profile_dir)
             .await
@@ -605,28 +654,118 @@ impl ChromiumoxideSession {
         })
     }
 
-    async fn shutdown(mut self) -> Result<(), String> {
-        let mut errors = Vec::new();
-        if let Err(error) = self.browser.close().await {
-            errors.push(format!("failed to close chromium browser: {error}"));
-        }
+    async fn shutdown(mut self) -> Vec<String> {
+        let mut lifecycle = ChromiumBrowserLifecycle {
+            browser: &mut self.browser,
+        };
+        let mut warnings = shutdown_browser_lifecycle(&mut lifecycle, &self.profile_dir).await;
         self.handler_task.abort();
 
-        match tokio::fs::remove_dir_all(&self.profile_dir).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => errors.push(format!(
+        sleep(Duration::from_millis(
+            SCREENSHOT_PROFILE_CLEANUP_RETRY_BASE_DELAY_MS,
+        ))
+        .await;
+        if let Err(error) = remove_directory_with_retries(
+            &self.profile_dir,
+            SCREENSHOT_PROFILE_CLEANUP_RETRY_ATTEMPTS,
+            SCREENSHOT_PROFILE_CLEANUP_RETRY_BASE_DELAY_MS,
+        )
+        .await
+        {
+            warnings.push(format!(
                 "failed to clean up temporary chromium profile {}: {error}",
                 self.profile_dir.display()
-            )),
+            ));
         }
 
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
+        warnings
+    }
+}
+
+async fn wait_for_browser_exit_with_timeout<L: BrowserLifecycle>(
+    lifecycle: &mut L,
+    stage: &str,
+    warnings: &mut Vec<String>,
+) -> bool {
+    match tokio::time::timeout(CHROMIUM_SHUTDOWN_WAIT_TIMEOUT, lifecycle.wait_for_exit()).await {
+        Ok(Ok(Some(()))) => true,
+        Ok(Ok(None)) => true,
+        Ok(Err(error)) => {
+            warnings.push(format!(
+                "failed while waiting for chromium browser process to exit after {stage}: {error}"
+            ));
+            false
+        }
+        Err(_) => {
+            warnings.push(format!(
+                "timed out waiting for chromium browser process to exit after {stage}"
+            ));
+            false
         }
     }
+}
+
+async fn shutdown_browser_lifecycle<L: BrowserLifecycle>(
+    lifecycle: &mut L,
+    profile_dir: &Path,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let close_ok = match lifecycle.close_browser().await {
+        Ok(()) => true,
+        Err(error) => {
+            warnings.push(format!("failed to close chromium browser: {error}"));
+            false
+        }
+    };
+
+    let mut shutdown_reaped =
+        wait_for_browser_exit_with_timeout(lifecycle, "close", &mut warnings).await;
+    let mut kill_invoked = false;
+    if !shutdown_reaped {
+        kill_invoked = true;
+        match lifecycle.kill_browser().await {
+            Ok(true) => {}
+            Ok(false) => warnings.push(
+                "chromium browser kill was skipped because no child process handle was available"
+                    .to_string(),
+            ),
+            Err(error) => warnings.push(format!("failed to kill chromium browser process: {error}")),
+        }
+
+        if wait_for_browser_exit_with_timeout(lifecycle, "kill", &mut warnings).await {
+            shutdown_reaped = true;
+        }
+    }
+
+    let shutdown_path = if shutdown_reaped {
+        if kill_invoked { "kill_wait" } else { "close_wait" }
+    } else {
+        "drop_fallback"
+    };
+    tracing::info!(
+        close_ok,
+        kill_invoked,
+        shutdown_reaped,
+        shutdown_path,
+        profile_dir = %profile_dir.display(),
+        "chromium browser shutdown result"
+    );
+    if !shutdown_reaped {
+        tracing::error!(
+            profile_dir = %profile_dir.display(),
+            close_ok,
+            kill_invoked,
+            shutdown_reaped,
+            shutdown_path,
+            "chromium browser process was not confirmed as reaped"
+        );
+        warnings.push(
+            "chromium browser process was not confirmed as reaped; relying on runtime kill_on_drop fallback"
+                .to_string(),
+        );
+    }
+
+    warnings
 }
 
 #[derive(Clone)]
@@ -1115,11 +1254,9 @@ async fn capture_html_with_chromium_response(
         )
     })?;
 
-    let shutdown_error = session.shutdown().await.err();
+    let shutdown_warnings = session.shutdown().await;
+    log_chromium_shutdown_warnings(&shutdown_warnings);
     let mut body = capture_result?;
-    if let Some(error) = shutdown_error {
-        return Err(error);
-    }
 
     let mut truncated = false;
     if body.len() > MAX_HTML_BYTES {
@@ -1153,7 +1290,7 @@ async fn capture_screenshots(
         .map_err(|message| ScreenshotCaptureFailure {
             message,
             attempts: Vec::new(),
-    })?;
+        })?;
     let desktop_viewport = screenshot_desktop_viewport();
     let desktop_capture = capture_single_screenshot(
         parsed.as_str(),
@@ -1300,7 +1437,7 @@ async fn capture_single_screenshot_exact_height_with_retries(
                 });
             }
             Err(error) => {
-                let retryable = screenshot_capture_error_retryable(&error);
+                let retryable = exact_height_capture_error_retryable(&error);
                 attempts.push(ScreenshotCaptureAttempt {
                     attempt,
                     stage: ScreenshotCaptureStage::ExactHeight,
@@ -1418,9 +1555,7 @@ async fn capture_single_screenshot_exact_height_inner(
         let measured_height: f64 = page
             .evaluate_expression(page_height_expression())
             .await
-            .map_err(|err| {
-                format!("failed to evaluate chromium page-height expression: {err}")
-            })?
+            .map_err(|err| format!("failed to evaluate chromium page-height expression: {err}"))?
             .into_value()
             .map_err(|err| {
                 format!("chromium page-height evaluation returned a non-numeric result: {err}")
@@ -1458,11 +1593,9 @@ async fn capture_single_screenshot_exact_height_inner(
         )
     })?;
 
-    let shutdown_error = session.shutdown().await.err();
+    let shutdown_warnings = session.shutdown().await;
+    log_chromium_shutdown_warnings(&shutdown_warnings);
     let screenshot_bytes = capture_result?;
-    if let Some(error) = shutdown_error {
-        return Err(error);
-    }
     if screenshot_bytes.is_empty() {
         return Err(EXACT_HEIGHT_EMPTY_PAYLOAD_ERROR.to_string());
     }
@@ -1560,11 +1693,9 @@ async fn capture_single_screenshot_fixed_viewport(
     .await
     .map_err(|_| format!("screenshot capture timed out after {}s", timeout.as_secs()))?;
 
-    let shutdown_error = session.shutdown().await.err();
+    let shutdown_warnings = session.shutdown().await;
+    log_chromium_shutdown_warnings(&shutdown_warnings);
     let screenshot_bytes = capture_result?;
-    if let Some(error) = shutdown_error {
-        return Err(error);
-    }
     if screenshot_bytes.is_empty() {
         return Err("chromium created an empty screenshot payload".to_string());
     }
@@ -1580,6 +1711,103 @@ fn screenshot_profile_dir() -> PathBuf {
     std::env::temp_dir().join(format!(
         "hyperlinked-screenshot-profile-{nanos:x}-{jitter:x}"
     ))
+}
+
+async fn maybe_sweep_stale_screenshot_profiles() {
+    if SCREENSHOT_PROFILE_SWEEP_ONCE.set(()).is_err() {
+        return;
+    }
+
+    let Ok(mut entries) = tokio::fs::read_dir(std::env::temp_dir()).await else {
+        return;
+    };
+    let now = SystemTime::now();
+
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed while scanning temporary directory for stale screenshot profiles"
+                );
+                break;
+            }
+        };
+
+        let path = entry.path();
+        if !looks_like_screenshot_profile_dir(path.as_path()) {
+            continue;
+        }
+
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+
+        let Ok(modified_at) = metadata.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified_at) else {
+            continue;
+        };
+        if age < SCREENSHOT_PROFILE_STALE_MAX_AGE {
+            continue;
+        }
+
+        if let Err(error) = remove_directory_with_retries(
+            path.as_path(),
+            SCREENSHOT_PROFILE_CLEANUP_RETRY_ATTEMPTS,
+            SCREENSHOT_PROFILE_CLEANUP_RETRY_BASE_DELAY_MS,
+        )
+        .await
+        {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to remove stale screenshot profile"
+            );
+        }
+    }
+}
+
+fn looks_like_screenshot_profile_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("hyperlinked-screenshot-profile-"))
+}
+
+async fn remove_directory_with_retries(
+    path: &Path,
+    attempts: usize,
+    retry_base_delay_ms: u64,
+) -> Result<(), String> {
+    let max_attempts = attempts.max(1);
+    let mut last_error = None;
+
+    for attempt in 1..=max_attempts {
+        match tokio::fs::remove_dir_all(path).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < max_attempts {
+                    sleep(Duration::from_millis(
+                        retry_base_delay_ms.saturating_mul(attempt as u64),
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+
+    if let Some(error) = last_error {
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 fn screenshot_chromium_path() -> String {
@@ -1812,6 +2040,16 @@ fn screenshot_retry_backoff_delay(attempt: usize) -> Duration {
     Duration::from_millis(base.saturating_add(jitter))
 }
 
+fn log_chromium_shutdown_warnings(warnings: &[String]) {
+    for warning in warnings {
+        tracing::warn!(warning = %warning, "chromium session shutdown warning");
+    }
+}
+
+fn exact_height_capture_error_retryable(error: &str) -> bool {
+    screenshot_capture_error_retryable(error) && !is_websocket_connection_reset_error(error)
+}
+
 fn screenshot_capture_error_retryable(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("invalid screenshot url")
@@ -1833,6 +2071,11 @@ fn is_exact_height_empty_payload_error(error: &str) -> bool {
     error
         .trim()
         .eq_ignore_ascii_case(EXACT_HEIGHT_EMPTY_PAYLOAD_ERROR)
+}
+
+fn is_websocket_connection_reset_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("websocket protocol error: connection reset without closing handshake")
 }
 
 fn screenshot_dark_mode_enabled() -> bool {
@@ -1975,7 +2218,12 @@ fn build_dark_thumbnail_from_light_thumbnail(source_image_bytes: &[u8]) -> Resul
     let mut rgba = image.to_rgba8();
     for pixel in rgba.pixels_mut() {
         let [r, g, b, a] = pixel.0;
-        pixel.0 = [255u8.saturating_sub(r), 255u8.saturating_sub(g), 255u8.saturating_sub(b), a];
+        pixel.0 = [
+            255u8.saturating_sub(r),
+            255u8.saturating_sub(g),
+            255u8.saturating_sub(b),
+            a,
+        ];
     }
     encode_webp_from_dynamic_image(&image::DynamicImage::ImageRgba8(rgba))
 }
@@ -2458,6 +2706,7 @@ fn now_utc() -> sea_orm::entity::prelude::DateTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
 
     #[test]
     fn extracts_stylesheet_links() {
@@ -2621,6 +2870,9 @@ mod tests {
         assert!(screenshot_capture_error_retryable(
             "failed to read chromium devtools response for `Runtime.evaluate`: connection reset"
         ));
+        assert!(screenshot_capture_error_retryable(
+            "failed to read chromium devtools response for `Runtime.evaluate`: WebSocket protocol error: Connection reset without closing handshake"
+        ));
     }
 
     #[test]
@@ -2636,6 +2888,13 @@ mod tests {
         ));
         assert!(!screenshot_capture_error_retryable(
             "failed to launch chromium browser: No such file or directory (os error 2)"
+        ));
+    }
+
+    #[test]
+    fn exact_height_retryable_error_classifier_rejects_connection_reset() {
+        assert!(!exact_height_capture_error_retryable(
+            "failed to read chromium devtools response for `Emulation.setDeviceMetricsOverride`: WebSocket protocol error: Connection reset without closing handshake"
         ));
     }
 
@@ -2700,5 +2959,128 @@ mod tests {
 
         let value = serde_json::to_value(&artifact).expect("artifact should serialize");
         assert!(value.get("attempts").is_some());
+    }
+
+    struct FakeBrowserLifecycle {
+        close_result: Result<(), String>,
+        wait_results: VecDeque<Result<Option<()>, String>>,
+        kill_result: Result<bool, String>,
+        close_calls: usize,
+        wait_calls: usize,
+        kill_calls: usize,
+    }
+
+    impl FakeBrowserLifecycle {
+        fn with_results(
+            close_result: Result<(), String>,
+            wait_results: Vec<Result<Option<()>, String>>,
+            kill_result: Result<bool, String>,
+        ) -> Self {
+            Self {
+                close_result,
+                wait_results: wait_results.into_iter().collect(),
+                kill_result,
+                close_calls: 0,
+                wait_calls: 0,
+                kill_calls: 0,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserLifecycle for FakeBrowserLifecycle {
+        async fn close_browser(&mut self) -> Result<(), String> {
+            self.close_calls += 1;
+            self.close_result.clone()
+        }
+
+        async fn wait_for_exit(&mut self) -> Result<Option<()>, String> {
+            self.wait_calls += 1;
+            self.wait_results.pop_front().unwrap_or(Ok(Some(())))
+        }
+
+        async fn kill_browser(&mut self) -> Result<bool, String> {
+            self.kill_calls += 1;
+            self.kill_result.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_browser_lifecycle_reaps_after_close_without_kill() {
+        let mut lifecycle =
+            FakeBrowserLifecycle::with_results(Ok(()), vec![Ok(Some(()))], Ok(true));
+        let warnings = shutdown_browser_lifecycle(&mut lifecycle, Path::new("/tmp/profile")).await;
+
+        assert!(warnings.is_empty());
+        assert_eq!(lifecycle.close_calls, 1);
+        assert_eq!(lifecycle.wait_calls, 1);
+        assert_eq!(lifecycle.kill_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_browser_lifecycle_kills_when_close_wait_fails() {
+        let mut lifecycle = FakeBrowserLifecycle::with_results(
+            Err("close failed".to_string()),
+            vec![
+                Err("wait after close failed".to_string()),
+                Ok(Some(())),
+            ],
+            Ok(true),
+        );
+        let warnings = shutdown_browser_lifecycle(&mut lifecycle, Path::new("/tmp/profile")).await;
+
+        assert_eq!(lifecycle.close_calls, 1);
+        assert_eq!(lifecycle.wait_calls, 2);
+        assert_eq!(lifecycle.kill_calls, 1);
+        assert!(warnings.iter().any(|warning| warning.contains("failed to close chromium browser")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("wait after close failed")));
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.contains("not confirmed as reaped")));
+    }
+
+    #[tokio::test]
+    async fn shutdown_browser_lifecycle_warns_when_reap_not_confirmed() {
+        let mut lifecycle = FakeBrowserLifecycle::with_results(
+            Ok(()),
+            vec![
+                Err("wait close failed".to_string()),
+                Err("wait kill failed".to_string()),
+            ],
+            Ok(false),
+        );
+        let warnings = shutdown_browser_lifecycle(&mut lifecycle, Path::new("/tmp/profile")).await;
+
+        assert_eq!(lifecycle.close_calls, 1);
+        assert_eq!(lifecycle.wait_calls, 2);
+        assert_eq!(lifecycle.kill_calls, 1);
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("kill was skipped because no child process handle was available")
+        }));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("not confirmed as reaped")));
+    }
+
+    #[tokio::test]
+    async fn remove_directory_with_retries_removes_nested_directories() {
+        use std::{fs, time::SystemTime};
+
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("hyperlinked-remove-dir-test-{unique}"));
+        let nested = root.join("nested");
+
+        fs::create_dir_all(&nested).expect("nested test directory should be created");
+        fs::write(nested.join("child.txt"), b"ok").expect("test file should be written");
+
+        remove_directory_with_retries(root.as_path(), 2, 1)
+            .await
+            .expect("directory removal should succeed");
+        assert!(!root.exists());
     }
 }

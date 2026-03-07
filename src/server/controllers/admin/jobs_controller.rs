@@ -1464,14 +1464,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jobs_dashboard_uses_updated_queue_nav_and_badge_placeholder() {
+    async fn jobs_dashboard_layout_uses_admin_link_without_queue_badge_placeholder() {
         let (server, _) = new_server("").await;
 
         let page = server.get("/admin/jobs").await;
         page.assert_status_ok();
         let body = page.text();
 
-        assert!(body.contains("href=\"/admin/jobs\""));
-        assert!(body.contains("data-queue-pending-badge"));
+        assert!(body.contains("href=\"/admin/artifacts\""));
+        assert!(!body.contains("data-queue-pending-badge"));
     }
 }
