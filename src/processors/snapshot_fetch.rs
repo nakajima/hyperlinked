@@ -72,6 +72,8 @@ const DEFAULT_SCREENSHOT_EXACT_HEIGHT_ATTEMPTS: u64 = 3;
 const DEFAULT_SCREENSHOT_FIXED_VIEWPORT_ATTEMPTS: u64 = 2;
 const DEFAULT_SCREENSHOT_RETRY_BASE_BACKOFF_MS: u64 = 200;
 const DEFAULT_SCREENSHOT_RETRY_JITTER_MAX_MS: u64 = 125;
+const EXACT_HEIGHT_EMPTY_PAYLOAD_ERROR: &str =
+    "chromium screenshot response contained an empty payload";
 
 pub struct SnapshotFetcher {
     job_id: i32,
@@ -515,6 +517,31 @@ struct Viewport {
 struct PageHeightBounds {
     min: u32,
     max: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExactHeightCaptureState {
+    enabled_for_job: bool,
+}
+
+impl ExactHeightCaptureState {
+    fn from_enabled(enabled: bool) -> Self {
+        Self {
+            enabled_for_job: enabled,
+        }
+    }
+
+    fn should_try_exact_height(self) -> bool {
+        self.enabled_for_job
+    }
+
+    fn disable_for_job_on_error(&mut self, error: &str) -> bool {
+        if self.enabled_for_job && is_exact_height_empty_payload_error(error) {
+            self.enabled_for_job = false;
+            return true;
+        }
+        false
+    }
 }
 
 struct ChromiumoxideSession {
@@ -1115,6 +1142,8 @@ async fn capture_screenshots(
 ) -> Result<ScreenshotCapture, ScreenshotCaptureFailure> {
     let mut warnings = Vec::new();
     let mut attempts = Vec::new();
+    let mut exact_height_state =
+        ExactHeightCaptureState::from_enabled(screenshot_exact_height_enabled());
     let parsed = Url::parse(url).map_err(|err| ScreenshotCaptureFailure {
         message: format!("invalid screenshot url: {err}"),
         attempts: Vec::new(),
@@ -1124,11 +1153,15 @@ async fn capture_screenshots(
         .map_err(|message| ScreenshotCaptureFailure {
             message,
             attempts: Vec::new(),
-        })?;
+    })?;
     let desktop_viewport = screenshot_desktop_viewport();
-    let desktop_capture =
-        capture_single_screenshot(parsed.as_str(), desktop_viewport, ScreenshotVariant::Light)
-            .await?;
+    let desktop_capture = capture_single_screenshot(
+        parsed.as_str(),
+        desktop_viewport,
+        ScreenshotVariant::Light,
+        &mut exact_height_state,
+    )
+    .await?;
     let SingleScreenshotCapture {
         bytes: desktop_webp,
         warning: desktop_warning,
@@ -1151,8 +1184,13 @@ async fn capture_screenshots(
     let (desktop_dark_webp, thumbnail_dark_webp) = if collect_dark_variant
         && screenshot_dark_mode_enabled()
     {
-        match capture_single_screenshot(parsed.as_str(), desktop_viewport, ScreenshotVariant::Dark)
-            .await
+        match capture_single_screenshot(
+            parsed.as_str(),
+            desktop_viewport,
+            ScreenshotVariant::Dark,
+            &mut exact_height_state,
+        )
+        .await
         {
             Ok(capture) => {
                 let SingleScreenshotCapture {
@@ -1197,8 +1235,9 @@ async fn capture_single_screenshot(
     url: &str,
     viewport: Viewport,
     variant: ScreenshotVariant,
+    exact_height_state: &mut ExactHeightCaptureState,
 ) -> Result<SingleScreenshotCapture, ScreenshotCaptureFailure> {
-    if !screenshot_exact_height_enabled() {
+    if !exact_height_state.should_try_exact_height() {
         return capture_single_screenshot_fixed_viewport_with_retries(url, viewport, variant).await;
     }
 
@@ -1206,17 +1245,25 @@ async fn capture_single_screenshot(
         Ok(capture) => Ok(capture),
         Err(exact_error) => {
             let exact_message = exact_error.message;
+            let disabled_for_job = exact_height_state.disable_for_job_on_error(&exact_message);
             let mut attempts = exact_error.attempts;
             match capture_single_screenshot_fixed_viewport_with_retries(url, viewport, variant)
                 .await
             {
                 Ok(fallback_capture) => {
                     attempts.extend(fallback_capture.attempts);
+                    let warning = if disabled_for_job {
+                        format!(
+                            "exact-height capture returned an empty payload and was disabled for this capture job; fixed-viewport fallback was used: {exact_message}"
+                        )
+                    } else {
+                        format!(
+                            "exact-height capture failed and fixed-viewport fallback was used: {exact_message}"
+                        )
+                    };
                     Ok(SingleScreenshotCapture {
                         bytes: fallback_capture.bytes,
-                        warning: Some(format!(
-                            "exact-height capture failed and fixed-viewport fallback was used: {exact_message}"
-                        )),
+                        warning: Some(warning),
                         attempts,
                     })
                 }
@@ -1417,7 +1464,7 @@ async fn capture_single_screenshot_exact_height_inner(
         return Err(error);
     }
     if screenshot_bytes.is_empty() {
-        return Err("chromium screenshot response contained an empty payload".to_string());
+        return Err(EXACT_HEIGHT_EMPTY_PAYLOAD_ERROR.to_string());
     }
     Ok(screenshot_bytes)
 }
@@ -1772,6 +1819,7 @@ fn screenshot_capture_error_retryable(error: &str) -> bool {
         || normalized.contains("page-height evaluation raised an exception")
         || normalized.contains("page-height evaluation returned a non-numeric result")
         || normalized.contains("page-height evaluation returned an invalid value")
+        || is_exact_height_empty_payload_error(error)
         || normalized.contains("failed to decode chromium devtools response")
         || normalized.contains("failed to decode chromium screenshot payload")
     {
@@ -1779,6 +1827,12 @@ fn screenshot_capture_error_retryable(error: &str) -> bool {
     }
 
     true
+}
+
+fn is_exact_height_empty_payload_error(error: &str) -> bool {
+    error
+        .trim()
+        .eq_ignore_ascii_case(EXACT_HEIGHT_EMPTY_PAYLOAD_ERROR)
 }
 
 fn screenshot_dark_mode_enabled() -> bool {
@@ -2575,11 +2629,35 @@ mod tests {
             "chromium page-height evaluation returned a non-numeric result"
         ));
         assert!(!screenshot_capture_error_retryable(
+            EXACT_HEIGHT_EMPTY_PAYLOAD_ERROR
+        ));
+        assert!(!screenshot_capture_error_retryable(
             "failed to decode chromium screenshot payload: Invalid byte"
         ));
         assert!(!screenshot_capture_error_retryable(
             "failed to launch chromium browser: No such file or directory (os error 2)"
         ));
+    }
+
+    #[test]
+    fn exact_height_state_disables_after_empty_payload_error() {
+        let mut state = ExactHeightCaptureState::from_enabled(true);
+        assert!(state.should_try_exact_height());
+
+        let disabled = state.disable_for_job_on_error(EXACT_HEIGHT_EMPTY_PAYLOAD_ERROR);
+        assert!(disabled);
+        assert!(!state.should_try_exact_height());
+    }
+
+    #[test]
+    fn exact_height_state_keeps_exact_height_for_other_errors() {
+        let mut state = ExactHeightCaptureState::from_enabled(true);
+        assert!(state.should_try_exact_height());
+
+        let disabled =
+            state.disable_for_job_on_error("exact-height screenshot capture timed out after 20s");
+        assert!(!disabled);
+        assert!(state.should_try_exact_height());
     }
 
     #[test]
