@@ -61,7 +61,11 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(HyperlinkTag::HyperlinkId).integer().not_null())
+                    .col(
+                        ColumnDef::new(HyperlinkTag::HyperlinkId)
+                            .integer()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(HyperlinkTag::TagId).integer().not_null())
                     .col(
                         ColumnDef::new(HyperlinkTag::Source)
@@ -69,8 +73,16 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default("AI"),
                     )
-                    .col(ColumnDef::new(HyperlinkTag::CreatedAt).date_time().not_null())
-                    .col(ColumnDef::new(HyperlinkTag::UpdatedAt).date_time().not_null())
+                    .col(
+                        ColumnDef::new(HyperlinkTag::CreatedAt)
+                            .date_time()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(HyperlinkTag::UpdatedAt)
+                            .date_time()
+                            .not_null(),
+                    )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk-hyperlink-tag-hyperlink-id")

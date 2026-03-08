@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    error::Error as _,
     io::{ErrorKind, Read, Seek, Write},
     path::{Component, Path, PathBuf},
     time::Duration,
@@ -501,8 +502,9 @@ async fn render_admin_tab(active_tab: AdminTab, state: &Context, headers: &Heade
     let mathpix = crate::integrations::mathpix::current_status();
     let mathpix_usage = crate::integrations::mathpix::current_usage_summary().await;
 
-    views::render_html_page_with_flash(
+    views::render_html_page_with_admin_tabs_and_flash(
         "Admin",
+        active_tab.path(),
         render_index(
             active_tab,
             &plan.summary,
@@ -1336,7 +1338,10 @@ async fn fetch_tagging_models(
         let response = match builder.send().await {
             Ok(response) => response,
             Err(error) => {
-                attempt_failures.push(format!("{endpoint_display} -> request failed: {error}"));
+                attempt_failures.push(format!(
+                    "{endpoint_display} -> request failed: {}",
+                    format_reqwest_transport_error(&error)
+                ));
                 continue;
             }
         };
@@ -1531,9 +1536,10 @@ async fn check_tagging_endpoint(
             Ok(response) => response,
             Err(error) => {
                 attempt_failures.push(format!(
-                    "{} [{}] -> request failed: {error}",
+                    "{} [{}] -> request failed: {}",
                     endpoint_display,
-                    endpoint.api_kind.as_str()
+                    endpoint.api_kind.as_str(),
+                    format_reqwest_transport_error(&error)
                 ));
                 continue;
             }
@@ -1606,6 +1612,20 @@ fn truncate_model_discovery_body(body: &str) -> String {
     truncated
 }
 
+fn format_reqwest_transport_error(error: &reqwest::Error) -> String {
+    let mut formatted = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !cause_text.is_empty() && !formatted.contains(&cause_text) {
+            formatted.push_str(" | caused by: ");
+            formatted.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    formatted
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TaggingModelsApiHint {
     OpenAiCompatible,
@@ -1634,7 +1654,24 @@ fn tagging_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
         &mut seen_candidates,
         replace_tagging_path_suffix(base_path, "/chat/completions", "/models"),
     );
+    push_model_endpoint_candidate(
+        &mut candidates,
+        &mut seen_candidates,
+        replace_tagging_path_suffix(base_path, "/chat/completions", "/model/info"),
+    );
     if base_path.ends_with("/models") {
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            Some(base_path.to_string()),
+        );
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            replace_tagging_path_suffix(base_path, "/models", "/model/info"),
+        );
+    }
+    if base_path.ends_with("/model/info") {
         push_model_endpoint_candidate(
             &mut candidates,
             &mut seen_candidates,
@@ -1650,6 +1687,11 @@ fn tagging_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
         push_model_endpoint_candidate(
             &mut candidates,
             &mut seen_candidates,
+            replace_tagging_path_suffix(base_path, "/api/tags", "/v1/model/info"),
+        );
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
             Some(base_path.to_string()),
         );
     }
@@ -1658,6 +1700,11 @@ fn tagging_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
             &mut candidates,
             &mut seen_candidates,
             Some(format!("{base_path}/models")),
+        );
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            Some(format!("{base_path}/model/info")),
         );
     }
     if base_path.ends_with("/api") {
@@ -1669,6 +1716,11 @@ fn tagging_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
         push_model_endpoint_candidate(
             &mut candidates,
             &mut seen_candidates,
+            replace_tagging_path_suffix(base_path, "/api", "/v1/model/info"),
+        );
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
             Some(format!("{base_path}/tags")),
         );
     }
@@ -1676,6 +1728,7 @@ fn tagging_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
         && base_path != "/"
         && !base_path.ends_with("/chat/completions")
         && !base_path.ends_with("/models")
+        && !base_path.ends_with("/model/info")
         && !base_path.ends_with("/api/tags")
     {
         push_model_endpoint_candidate(
@@ -1683,11 +1736,28 @@ fn tagging_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
             &mut seen_candidates,
             Some(format!("{base_path}/models")),
         );
+        push_model_endpoint_candidate(
+            &mut candidates,
+            &mut seen_candidates,
+            Some(format!("{base_path}/model/info")),
+        );
     }
 
     let prioritized_fallbacks = match api_hint {
-        TaggingModelsApiHint::Ollama => ["/v1/models", "/api/tags", "/models"],
-        _ => ["/v1/models", "/models", "/api/tags"],
+        TaggingModelsApiHint::Ollama => [
+            "/v1/models",
+            "/v1/model/info",
+            "/api/tags",
+            "/models",
+            "/model/info",
+        ],
+        _ => [
+            "/v1/models",
+            "/v1/model/info",
+            "/models",
+            "/model/info",
+            "/api/tags",
+        ],
     };
     for fallback in prioritized_fallbacks {
         push_model_endpoint_candidate(
@@ -1711,6 +1781,7 @@ fn tagging_models_api_hint(base_path: &str) -> TaggingModelsApiHint {
     }
     if base_path.ends_with("/chat/completions")
         || base_path.ends_with("/models")
+        || base_path.ends_with("/model/info")
         || base_path.ends_with("/v1")
         || base_path.contains("/v1/")
     {
@@ -1724,7 +1795,11 @@ fn tagging_backend_kind_for_models_path(path: &str) -> TaggingBackendKind {
     if normalized.ends_with("/api/tags") || normalized.ends_with("/api/models") {
         return TaggingBackendKind::Ollama;
     }
-    if normalized.ends_with("/v1/models") || normalized.ends_with("/models") {
+    if normalized.ends_with("/v1/models")
+        || normalized.ends_with("/models")
+        || normalized.ends_with("/v1/model/info")
+        || normalized.ends_with("/model/info")
+    {
         return TaggingBackendKind::OpenAiCompatible;
     }
     TaggingBackendKind::Unknown
@@ -3241,62 +3316,6 @@ impl AdminIndexTemplate<'_> {
         self.active_tab == AdminTab::Storage
     }
 
-    fn overview_path(&self) -> &'static str {
-        AdminTab::Overview.path()
-    }
-
-    fn artifacts_path(&self) -> &'static str {
-        AdminTab::Artifacts.path()
-    }
-
-    fn tags_path(&self) -> &'static str {
-        AdminTab::Tags.path()
-    }
-
-    fn queue_path(&self) -> &'static str {
-        AdminTab::Queue.path()
-    }
-
-    fn import_export_path(&self) -> &'static str {
-        AdminTab::ImportExport.path()
-    }
-
-    fn storage_path(&self) -> &'static str {
-        AdminTab::Storage.path()
-    }
-
-    fn tab_link_class(&self, tab: AdminTab) -> &'static str {
-        if self.active_tab == tab {
-            "inline-flex min-h-10 w-full items-center justify-between rounded-[0.4rem] border border-accent/60 bg-tertiary/40 px-3 py-2 text-sm font-semibold text-accent no-underline"
-        } else {
-            "inline-flex min-h-10 w-full items-center justify-between rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-2 text-sm text-accent no-underline transition-colors hover:border-accent/60 hover:bg-tertiary/30"
-        }
-    }
-
-    fn overview_link_class(&self) -> &'static str {
-        self.tab_link_class(AdminTab::Overview)
-    }
-
-    fn artifacts_link_class(&self) -> &'static str {
-        self.tab_link_class(AdminTab::Artifacts)
-    }
-
-    fn tags_link_class(&self) -> &'static str {
-        self.tab_link_class(AdminTab::Tags)
-    }
-
-    fn queue_link_class(&self) -> &'static str {
-        self.tab_link_class(AdminTab::Queue)
-    }
-
-    fn import_export_link_class(&self) -> &'static str {
-        self.tab_link_class(AdminTab::ImportExport)
-    }
-
-    fn storage_link_class(&self) -> &'static str {
-        self.tab_link_class(AdminTab::Storage)
-    }
-
     fn format_u64_bytes(&self, bytes: u64) -> String {
         format_bytes(bytes)
     }
@@ -3354,12 +3373,7 @@ fn render_index(
 }
 
 fn response_error(status: StatusCode, message: impl Into<String>) -> Response {
-    views::render_error_page(
-        status,
-        message,
-        ADMIN_TAB_ARTIFACTS_PATH,
-        "Back to admin",
-    )
+    views::render_error_page(status, message, ADMIN_TAB_ARTIFACTS_PATH, "Back to admin")
 }
 
 fn extract_tagging_model_ids(payload: &serde_json::Value) -> Vec<String> {
@@ -3370,6 +3384,12 @@ fn extract_tagging_model_ids(payload: &serde_json::Value) -> Vec<String> {
     }
     if let Some(data) = payload.get("models") {
         collect_tagging_model_ids(&mut models, data);
+    }
+    if let Some(model_info) = payload.get("model_info") {
+        collect_litellm_model_info_ids(&mut models, model_info);
+    }
+    if let Some(model_info) = payload.get("model_info_map") {
+        collect_litellm_model_info_ids(&mut models, model_info);
     }
 
     if models.is_empty() {
@@ -3399,6 +3419,32 @@ fn collect_tagging_model_ids(models: &mut Vec<String>, value: &serde_json::Value
             }
             if let Some(name) = map.get("name").and_then(serde_json::Value::as_str) {
                 push_tagging_model_id(models, name);
+            }
+            if let Some(model_name) = map.get("model_name").and_then(serde_json::Value::as_str) {
+                push_tagging_model_id(models, model_name);
+            }
+            if let Some(model_info) = map.get("model_info") {
+                collect_litellm_model_info_ids(models, model_info);
+            }
+            if let Some(model_info) = map.get("model_info_map") {
+                collect_litellm_model_info_ids(models, model_info);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_litellm_model_info_ids(models: &mut Vec<String>, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (candidate_id, details) in map {
+                push_tagging_model_id(models, candidate_id);
+                collect_tagging_model_ids(models, details);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_litellm_model_info_ids(models, item);
             }
         }
         _ => {}
@@ -3490,7 +3536,9 @@ mod tests {
             urls,
             vec![
                 "https://api.openai.com/v1/models".to_string(),
+                "https://api.openai.com/v1/model/info".to_string(),
                 "https://api.openai.com/models".to_string(),
+                "https://api.openai.com/model/info".to_string(),
                 "https://api.openai.com/api/tags".to_string()
             ]
         );
@@ -3509,7 +3557,9 @@ mod tests {
             urls,
             vec![
                 "https://api.openai.com/v1/models".to_string(),
+                "https://api.openai.com/v1/model/info".to_string(),
                 "https://api.openai.com/models".to_string(),
+                "https://api.openai.com/model/info".to_string(),
                 "https://api.openai.com/api/tags".to_string()
             ]
         );
@@ -3528,9 +3578,12 @@ mod tests {
             urls,
             vec![
                 "http://ollama:3000/v1/models".to_string(),
+                "http://ollama:3000/v1/model/info".to_string(),
                 "http://ollama:3000/api/tags".to_string(),
                 "http://ollama:3000/api/models".to_string(),
-                "http://ollama:3000/models".to_string()
+                "http://ollama:3000/api/model/info".to_string(),
+                "http://ollama:3000/models".to_string(),
+                "http://ollama:3000/model/info".to_string()
             ]
         );
     }
@@ -3543,6 +3596,10 @@ mod tests {
         );
         assert_eq!(
             tagging_backend_kind_for_models_path("/v1/models"),
+            TaggingBackendKind::OpenAiCompatible
+        );
+        assert_eq!(
+            tagging_backend_kind_for_models_path("/v1/model/info"),
             TaggingBackendKind::OpenAiCompatible
         );
     }
@@ -3579,6 +3636,30 @@ mod tests {
                 "llama3.2:3b".to_string(),
                 "mistral-small".to_string(),
                 "qwen3:14b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_tagging_model_ids_reads_litellm_model_info_map() {
+        let payload = json!({
+            "model_info": {
+                "openai/gpt-4o-mini": {
+                    "model_name": "openai/gpt-4o-mini"
+                },
+                "ollama/qwen3.5": {
+                    "litellm_params": {
+                        "model": "ollama/qwen3.5"
+                    }
+                }
+            }
+        });
+        let models = extract_tagging_model_ids(&payload);
+        assert_eq!(
+            models,
+            vec![
+                "ollama/qwen3.5".to_string(),
+                "openai/gpt-4o-mini".to_string()
             ]
         );
     }

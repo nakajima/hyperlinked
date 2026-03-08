@@ -294,6 +294,9 @@
   .h-4 {
     height: calc(var(--spacing) * 4);
   }
+  .h-8 {
+    height: calc(var(--spacing) * 8);
+  }
   .h-12 {
     height: calc(var(--spacing) * 12);
   }
@@ -396,6 +399,9 @@
   .items-center {
     align-items: center;
   }
+  .items-end {
+    align-items: flex-end;
+  }
   .items-start {
     align-items: flex-start;
   }
@@ -447,6 +453,10 @@
   .rounded-\[2px\] {
     border-radius: 2px;
   }
+  .rounded-t-\[0\.3rem\] {
+    border-top-left-radius: 0.3rem;
+    border-top-right-radius: 0.3rem;
+  }
   .border {
     border-style: var(--tw-border-style);
     border-width: 1px;
@@ -455,9 +465,22 @@
     border-style: var(--tw-border-style);
     border-width: 0px;
   }
+  .border-b-2 {
+    border-bottom-style: var(--tw-border-style);
+    border-bottom-width: 2px;
+  }
   .border-l {
     border-left-style: var(--tw-border-style);
     border-left-width: 1px;
+  }
+  .border-accent {
+    border-color: var(--color-accent);
+  }
+  .border-accent\/60 {
+    border-color: color-mix(in srgb, oklch(99.9% 0.277 308) 60%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      border-color: color-mix(in oklab, var(--color-accent) 60%, transparent);
+    }
   }
   .border-dev-alert-border {
     border-color: var(--color-dev-alert-border);
@@ -474,6 +497,9 @@
   .border-subdued {
     border-color: var(--color-subdued);
   }
+  .border-transparent {
+    border-color: transparent;
+  }
   .bg-\[rgb\(244_251_200_\/_0\.2\)\] {
     background-color: rgb(244 251 200 / 0.2);
   }
@@ -486,6 +512,18 @@
   .bg-form-control {
     background-color: var(--color-form-control);
   }
+  .bg-form-control\/45 {
+    background-color: color-mix(in srgb, oklch(20% 0.01 264) 45%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-form-control) 45%, transparent);
+    }
+  }
+  .bg-form-control\/65 {
+    background-color: color-mix(in srgb, oklch(20% 0.01 264) 65%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-form-control) 65%, transparent);
+    }
+  }
   .bg-notice-bg {
     background-color: var(--color-notice-bg);
   }
@@ -497,6 +535,12 @@
   }
   .bg-tertiary {
     background-color: var(--color-tertiary);
+  }
+  .bg-tertiary\/40 {
+    background-color: color-mix(in srgb, oklch(47.6% 0.051 242) 40%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-tertiary) 40%, transparent);
+    }
   }
   .bg-transparent {
     background-color: transparent;
@@ -546,8 +590,17 @@
   .py-\[0\.65rem\] {
     padding-block: 0.65rem;
   }
+  .pt-1 {
+    padding-top: calc(var(--spacing) * 1);
+  }
+  .pt-4 {
+    padding-top: calc(var(--spacing) * 4);
+  }
   .pr-\[1\.4rem\] {
     padding-right: 1.4rem;
+  }
+  .pb-0 {
+    padding-bottom: calc(var(--spacing) * 0);
   }
   .pb-4 {
     padding-bottom: calc(var(--spacing) * 4);
@@ -655,6 +708,12 @@
   }
   .text-accent {
     color: var(--color-accent);
+  }
+  .text-accent\/80 {
+    color: color-mix(in srgb, oklch(99.9% 0.277 308) 80%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      color: color-mix(in oklab, var(--color-accent) 80%, transparent);
+    }
   }
   .text-alert {
     color: var(--color-alert);
@@ -787,6 +846,13 @@
       }
     }
   }
+  .hover\:bg-form-control {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--color-form-control);
+      }
+    }
+  }
   .hover\:bg-tertiary\/30 {
     &:hover {
       @media (hover: hover) {
@@ -794,6 +860,13 @@
         @supports (color: color-mix(in lab, red, red)) {
           background-color: color-mix(in oklab, var(--color-tertiary) 30%, transparent);
         }
+      }
+    }
+  }
+  .hover\:text-accent {
+    &:hover {
+      @media (hover: hover) {
+        color: var(--color-accent);
       }
     }
   }
@@ -1065,6 +1138,31 @@
   .md\:gap-6 {
     @media (width >= 48rem) {
       gap: calc(var(--spacing) * 6);
+    }
+  }
+  .lg\:w-auto {
+    @media (width >= 64rem) {
+      width: auto;
+    }
+  }
+  .lg\:flex-row {
+    @media (width >= 64rem) {
+      flex-direction: row;
+    }
+  }
+  .lg\:flex-wrap {
+    @media (width >= 64rem) {
+      flex-wrap: wrap;
+    }
+  }
+  .lg\:items-center {
+    @media (width >= 64rem) {
+      align-items: center;
+    }
+  }
+  .lg\:justify-center {
+    @media (width >= 64rem) {
+      justify-content: center;
     }
   }
   .\[\&_input\[type\=\'checkbox\'\]\]\:mt-0\.5 {

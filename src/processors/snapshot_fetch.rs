@@ -729,7 +729,9 @@ async fn shutdown_browser_lifecycle<L: BrowserLifecycle>(
                 "chromium browser kill was skipped because no child process handle was available"
                     .to_string(),
             ),
-            Err(error) => warnings.push(format!("failed to kill chromium browser process: {error}")),
+            Err(error) => {
+                warnings.push(format!("failed to kill chromium browser process: {error}"))
+            }
         }
 
         if wait_for_browser_exit_with_timeout(lifecycle, "kill", &mut warnings).await {
@@ -738,7 +740,11 @@ async fn shutdown_browser_lifecycle<L: BrowserLifecycle>(
     }
 
     let shutdown_path = if shutdown_reaped {
-        if kill_invoked { "kill_wait" } else { "close_wait" }
+        if kill_invoked {
+            "kill_wait"
+        } else {
+            "close_wait"
+        }
     } else {
         "drop_fallback"
     };
@@ -3021,10 +3027,7 @@ mod tests {
     async fn shutdown_browser_lifecycle_kills_when_close_wait_fails() {
         let mut lifecycle = FakeBrowserLifecycle::with_results(
             Err("close failed".to_string()),
-            vec![
-                Err("wait after close failed".to_string()),
-                Ok(Some(())),
-            ],
+            vec![Err("wait after close failed".to_string()), Ok(Some(()))],
             Ok(true),
         );
         let warnings = shutdown_browser_lifecycle(&mut lifecycle, Path::new("/tmp/profile")).await;
@@ -3032,13 +3035,21 @@ mod tests {
         assert_eq!(lifecycle.close_calls, 1);
         assert_eq!(lifecycle.wait_calls, 2);
         assert_eq!(lifecycle.kill_calls, 1);
-        assert!(warnings.iter().any(|warning| warning.contains("failed to close chromium browser")));
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("wait after close failed")));
-        assert!(!warnings
-            .iter()
-            .any(|warning| warning.contains("not confirmed as reaped")));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("failed to close chromium browser"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("wait after close failed"))
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.contains("not confirmed as reaped"))
+        );
     }
 
     #[tokio::test]
@@ -3059,9 +3070,11 @@ mod tests {
         assert!(warnings.iter().any(|warning| {
             warning.contains("kill was skipped because no child process handle was available")
         }));
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.contains("not confirmed as reaped")));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("not confirmed as reaped"))
+        );
     }
 
     #[tokio::test]

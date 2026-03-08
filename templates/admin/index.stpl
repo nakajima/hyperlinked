@@ -1,37 +1,8 @@
-<section class="flex flex-col gap-4 lg:flex-row lg:items-start" aria-labelledby="admin-heading">
-  <aside class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3 lg:sticky lg:top-4 lg:w-64 lg:shrink-0">
-    <p class="text-sm font-semibold">Site admin</p>
-    <nav class="flex flex-col gap-2" aria-label="Admin sections">
-      <a href="<%= self.overview_path() %>" class="<%= self.overview_link_class() %>">
-        <span>Overview</span>
-      </a>
-      <a href="<%= self.artifacts_path() %>" class="<%= self.artifacts_link_class() %>">
-        <span>Artifacts</span>
-      </a>
-      <a href="<%= self.tags_path() %>" class="<%= self.tags_link_class() %>">
-        <span>Tags</span>
-      </a>
-      <a href="<%= self.queue_path() %>" class="<%= self.queue_link_class() %>">
-        <span>Queue</span>
-        <span
-          data-queue-pending-badge
-          class="hidden rounded-[0.25rem] bg-badge px-[0.2rem] py-1 text-[0.5rem] leading-[0.5rem] text-black"
-        >0</span>
-      </a>
-      <a href="<%= self.import_export_path() %>" class="<%= self.import_export_link_class() %>">
-        <span>Import / Export</span>
-      </a>
-      <a href="<%= self.storage_path() %>" class="<%= self.storage_link_class() %>">
-        <span>Storage</span>
-      </a>
-    </nav>
-  </aside>
-
-  <div class="flex min-w-0 flex-1 flex-col gap-4">
-    <article class="flex flex-col gap-[0.4rem]">
-      <h2 id="admin-heading" class="text-2xl font-semibold leading-8 tracking-tight"><%= self.active_tab_title() %></h2>
-      <p class="text-sm text-tertiary"><%= self.active_tab_summary() %></p>
-    </article>
+<section class="flex flex-col gap-4" aria-labelledby="admin-heading">
+  <article class="flex flex-col gap-[0.4rem]">
+    <h2 id="admin-heading" class="text-2xl font-semibold leading-8 tracking-tight"><%= self.active_tab_title() %></h2>
+    <p class="text-sm text-tertiary"><%= self.active_tab_summary() %></p>
+  </article>
 
     <% if self.is_overview_tab() { %>
       <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
@@ -523,5 +494,4 @@
         </div>
       </section>
     <% } %>
-  </div>
 </section>

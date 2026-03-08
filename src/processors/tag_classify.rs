@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, error::Error as _, time::Duration};
 
 use chrono::Utc;
 use reqwest::{
@@ -250,9 +250,10 @@ async fn classify_tags_openai_compatible(
             Ok(response) => response,
             Err(error) => {
                 attempt_failures.push(format!(
-                    "{} [{}] -> request failed: {error}",
+                    "{} [{}] -> request failed: {}",
                     endpoint_display,
-                    endpoint.api_kind.as_str()
+                    endpoint.api_kind.as_str(),
+                    format_reqwest_transport_error(&error)
                 ));
                 continue;
             }
@@ -463,13 +464,15 @@ pub(crate) fn chat_endpoint_candidates(
         );
     }
 
-    let prioritized_fallbacks: [(ChatApiKind, &str); 2] = match preferred_backend {
+    let prioritized_fallbacks: [(ChatApiKind, &str); 3] = match preferred_backend {
         TaggingBackendKind::Ollama => [
             (ChatApiKind::OllamaApi, "/api/chat"),
             (ChatApiKind::OpenAiCompatible, "/v1/chat/completions"),
+            (ChatApiKind::OpenAiCompatible, "/chat/completions"),
         ],
         _ => [
             (ChatApiKind::OpenAiCompatible, "/v1/chat/completions"),
+            (ChatApiKind::OpenAiCompatible, "/chat/completions"),
             (ChatApiKind::OllamaApi, "/api/chat"),
         ],
     };
@@ -595,6 +598,20 @@ fn summarize_error_body(body: &str) -> String {
     }
 }
 
+fn format_reqwest_transport_error(error: &reqwest::Error) -> String {
+    let mut formatted = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !cause_text.is_empty() && !formatted.contains(&cause_text) {
+            formatted.push_str(" | caused by: ");
+            formatted.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    formatted
+}
+
 fn extract_chat_message_content(
     response_json: &serde_json::Value,
     api_kind: ChatApiKind,
@@ -680,7 +697,29 @@ mod tests {
             .map(|candidate| candidate.url.to_string())
             .collect();
         assert_eq!(urls[0], "http://ollama.local:11434/v1/chat/completions");
+        assert!(urls.contains(&"http://ollama.local:11434/chat/completions".to_string()));
         assert!(urls.contains(&"http://ollama.local:11434/api/chat".to_string()));
+    }
+
+    #[test]
+    fn chat_endpoint_candidates_for_root_include_non_v1_openai_fallback() {
+        let endpoints = chat_endpoint_candidates(
+            "https://ai.fishmt.net",
+            TaggingBackendKind::OpenAiCompatible,
+        )
+        .expect("candidates should parse");
+        let urls: Vec<String> = endpoints
+            .iter()
+            .map(|candidate| candidate.url.to_string())
+            .collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://ai.fishmt.net/v1/chat/completions".to_string(),
+                "https://ai.fishmt.net/chat/completions".to_string(),
+                "https://ai.fishmt.net/api/chat".to_string(),
+            ]
+        );
     }
 
     #[test]

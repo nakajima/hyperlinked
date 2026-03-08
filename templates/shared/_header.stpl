@@ -1,4 +1,4 @@
-<header class="mx-auto mb-4 flex w-full max-w-[75rem] flex-wrap items-center gap-[0.4rem] bg-surface px-3 py-4 sm:px-6">
+<header class="mx-auto mb-4 flex w-full max-w-[75rem] flex-wrap items-center gap-[0.4rem] bg-surface px-3 pt-4 sm:px-6 <% if self.has_admin_tabs() { %>pb-0<% } else { %>pb-4<% } %>">
   <h1 class="flex flex-row items-center gap-[0.4rem] font-brand text-5xl leading-none font-bold italic">
     <a href="/hyperlinks" class="text-accent no-underline hover:text-accent/80">
       <span>Hyperlinked</span>
@@ -22,4 +22,21 @@
       <% } %>
     </a>
   </nav>
+
+  <% if self.has_admin_tabs() { %>
+    <nav class="basis-full flex flex-row flex-wrap items-end gap-2 bg-form-control/45 pt-1 text-sm" aria-label="Admin sections">
+      <a href="/admin/overview" class="<%= self.admin_tab_link_class("/admin/overview") %>"<% if self.admin_tab_is_active("/admin/overview") { %> aria-current="page"<% } %>>Overview</a>
+      <a href="/admin/artifacts" class="<%= self.admin_tab_link_class("/admin/artifacts") %>"<% if self.admin_tab_is_active("/admin/artifacts") { %> aria-current="page"<% } %>>Artifacts</a>
+      <a href="/admin/tags" class="<%= self.admin_tab_link_class("/admin/tags") %>"<% if self.admin_tab_is_active("/admin/tags") { %> aria-current="page"<% } %>>Tags</a>
+      <a href="/admin/queue" class="<%= self.admin_tab_link_class("/admin/queue") %>"<% if self.admin_tab_is_active("/admin/queue") { %> aria-current="page"<% } %>>
+        <span>Queue</span>
+        <span
+          data-queue-pending-badge
+          class="hidden rounded-[0.25rem] bg-badge px-[0.2rem] py-1 text-[0.5rem] leading-[0.5rem] text-black"
+        >0</span>
+      </a>
+      <a href="/admin/import-export" class="<%= self.admin_tab_link_class("/admin/import-export") %>"<% if self.admin_tab_is_active("/admin/import-export") { %> aria-current="page"<% } %>>Import / Export</a>
+      <a href="/admin/storage" class="<%= self.admin_tab_link_class("/admin/storage") %>"<% if self.admin_tab_is_active("/admin/storage") { %> aria-current="page"<% } %>>Storage</a>
+    </nav>
+  <% } %>
 </header>

@@ -24,6 +24,27 @@ pub(crate) fn render_html_page_with_flash(
     render_html_page_with_status_and_flash(StatusCode::OK, title, body, flash)
 }
 
+pub(crate) fn render_html_page_with_admin_tabs_and_flash(
+    title: &str,
+    active_admin_tab_href: &str,
+    body: Result<String, RenderError>,
+    mut flash: Flash,
+) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(err) => return template_render_failure_response(err),
+    };
+
+    match html_layout::page_with_admin_tabs(title, &body, &mut flash, active_admin_tab_href) {
+        Ok(html) => {
+            let mut response = (StatusCode::OK, html).into_response();
+            flash.apply_to_response_headers(response.headers_mut());
+            response
+        }
+        Err(err) => template_render_failure_response(err),
+    }
+}
+
 pub(crate) fn render_html_page_with_status(
     status: StatusCode,
     title: &str,
