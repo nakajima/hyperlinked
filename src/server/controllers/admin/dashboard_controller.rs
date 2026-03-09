@@ -252,7 +252,9 @@ struct TaggingSettingsForm {
     auth_header_name: Option<String>,
     auth_header_prefix: Option<String>,
     backend_kind: Option<String>,
-    vocabulary: Option<String>,
+    topic_vocabulary: Option<String>,
+    action_vocabulary: Option<String>,
+    auto_approve_ai: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,7 +278,7 @@ struct TaggingCheckRequest {
 #[derive(Debug, Deserialize)]
 struct ApprovePendingTagsForm {
     #[serde(default)]
-    tag_ids: Vec<i32>,
+    tag_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -588,9 +590,9 @@ async fn approve_pending_tags(
     headers: HeaderMap,
     Form(form): Form<ApprovePendingTagsForm>,
 ) -> Response {
-    let approved_names =
+    let approved =
         match hyperlink_tagging::approve_pending_tags(&state.connection, &form.tag_ids).await {
-            Ok(names) => names,
+            Ok(tags) => tags,
             Err(err) => {
                 return response_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -599,7 +601,7 @@ async fn approve_pending_tags(
             }
         };
 
-    if approved_names.is_empty() {
+    if approved.topic_names.is_empty() && approved.action_names.is_empty() {
         return redirect_with_flash(
             &headers,
             ADMIN_TAB_TAGS_PATH,
@@ -618,15 +620,27 @@ async fn approve_pending_tags(
         }
     };
 
-    let mut seen = settings
+    let mut seen_topic = settings
         .vocabulary
         .iter()
         .map(|value| value.to_ascii_lowercase())
         .collect::<HashSet<_>>();
-    for tag in &approved_names {
+    for tag in &approved.topic_names {
         let key = tag.to_ascii_lowercase();
-        if seen.insert(key) {
+        if seen_topic.insert(key) {
             settings.vocabulary.push(tag.clone());
+        }
+    }
+
+    let mut seen_action = settings
+        .action_vocabulary
+        .iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for tag in &approved.action_names {
+        let key = tag.to_ascii_lowercase();
+        if seen_action.insert(key) {
+            settings.action_vocabulary.push(tag.clone());
         }
     }
 
@@ -641,7 +655,11 @@ async fn approve_pending_tags(
         &headers,
         ADMIN_TAB_TAGS_PATH,
         FlashName::Notice,
-        format!("Approved {} tag(s).", approved_names.len()),
+        format!(
+            "Approved {} topic tag(s) and {} action tag(s).",
+            approved.topic_names.len(),
+            approved.action_names.len()
+        ),
     )
 }
 
@@ -1191,7 +1209,8 @@ async fn update_tagging_settings(
         }
     };
 
-    let vocabulary_input = form.vocabulary.unwrap_or_default();
+    let topic_vocabulary_input = form.topic_vocabulary.unwrap_or_default();
+    let action_vocabulary_input = form.action_vocabulary.unwrap_or_default();
     let settings = TaggingSettings {
         enabled: checkbox_checked(&form.tagging_enabled),
         provider: TaggingProvider::OpenAiCompatible,
@@ -1207,7 +1226,11 @@ async fn update_tagging_settings(
             Some(value) => TaggingBackendKind::from_storage(Some(value.as_str())),
             None => current.backend_kind,
         },
-        vocabulary: tagging_settings::parse_vocabulary_lines(&vocabulary_input),
+        vocabulary: tagging_settings::parse_vocabulary_lines(&topic_vocabulary_input),
+        action_vocabulary: tagging_settings::parse_action_vocabulary_lines(
+            &action_vocabulary_input,
+        ),
+        auto_approve_ai: checkbox_checked(&form.auto_approve_ai),
     };
 
     let saved = match tagging_settings::save(&state.connection, settings).await {
@@ -3350,6 +3373,10 @@ impl AdminIndexTemplate<'_> {
     fn tagging_vocabulary_lines(&self) -> String {
         self.tagging_settings.vocabulary.join("\n")
     }
+
+    fn tagging_action_vocabulary_lines(&self) -> String {
+        self.tagging_settings.action_vocabulary.join("\n")
+    }
 }
 
 fn render_index(
@@ -3895,10 +3922,40 @@ mod tests {
             month: crate::integrations::mathpix::MathpixUsageWindow {
                 total_requests: 12,
                 estimated_cost_usd: 0.09,
+                breakdown: vec![
+                    crate::integrations::mathpix::MathpixUsageBreakdown {
+                        usage_type: "image-async".to_string(),
+                        count: 9,
+                        cost_class:
+                            crate::integrations::mathpix::MathpixUsageCostClass::ImageRequest,
+                        estimated_cost_usd: 0.02,
+                    },
+                    crate::integrations::mathpix::MathpixUsageBreakdown {
+                        usage_type: "pdf-async".to_string(),
+                        count: 3,
+                        cost_class: crate::integrations::mathpix::MathpixUsageCostClass::PdfRequest,
+                        estimated_cost_usd: 0.07,
+                    },
+                ],
             },
             all_time: crate::integrations::mathpix::MathpixUsageWindow {
                 total_requests: 98,
                 estimated_cost_usd: 0.74,
+                breakdown: vec![
+                    crate::integrations::mathpix::MathpixUsageBreakdown {
+                        usage_type: "image".to_string(),
+                        count: 65,
+                        cost_class:
+                            crate::integrations::mathpix::MathpixUsageCostClass::ImageRequest,
+                        estimated_cost_usd: 0.13,
+                    },
+                    crate::integrations::mathpix::MathpixUsageBreakdown {
+                        usage_type: "pdf-async".to_string(),
+                        count: 33,
+                        cost_class: crate::integrations::mathpix::MathpixUsageCostClass::PdfRequest,
+                        estimated_cost_usd: 0.61,
+                    },
+                ],
             },
             warning: None,
         };
@@ -3931,6 +3988,12 @@ mod tests {
             html.contains("All-time: <code class=\"font-mono text-[0.9em]\">98 requests</code>")
         );
         assert!(html.contains("estimated <code class=\"font-mono text-[0.9em]\">$0.74</code>"));
+        assert!(html.contains("Current month usage breakdown"));
+        assert!(html.contains("All-time usage breakdown"));
+        assert!(html.contains("<code class=\"font-mono text-[0.9em]\">image-async</code>"));
+        assert!(html.contains("<code class=\"font-mono text-[0.9em]\">pdf-async</code>"));
+        assert!(html.contains("<code class=\"font-mono text-[0.9em]\">image</code>"));
+        assert!(html.contains("<code class=\"font-mono text-[0.9em]\">pdf</code>"));
     }
 
     #[test]

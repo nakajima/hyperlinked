@@ -12,6 +12,7 @@ use serde_json::json;
 use crate::{
     entity::hyperlink,
     model::{
+        hyperlink_search_doc,
         hyperlink_tagging::{self, LlmPersistInput, PersistedRankedTag, RankedTag, TagState},
         tagging_settings::{TaggingBackendKind, TaggingProvider, TaggingSettings},
     },
@@ -81,23 +82,50 @@ pub async fn classify_hyperlink(
     }
 
     let hyperlink_id = *hyperlink.id.as_ref();
+    let readable_text_excerpt =
+        match hyperlink_search_doc::load_readable_text_excerpt_for_hyperlink(
+            connection,
+            hyperlink_id,
+            3000,
+        )
+        .await
+        {
+            Ok(excerpt) => excerpt,
+            Err(error) if hyperlink_search_doc::is_search_doc_missing_error(&error) => None,
+            Err(error) => return Err(ProcessingError::DB(error)),
+        };
+
     let request = LlmTaggingRequest {
         title: hyperlink.title.as_ref().to_string(),
         url: hyperlink.url.as_ref().to_string(),
         og_title: hyperlink.og_title.as_ref().clone(),
         og_description: hyperlink.og_description.as_ref().clone(),
-        vocabulary: settings.vocabulary.clone(),
+        readable_text_excerpt,
+        topic_vocabulary: settings.vocabulary.clone(),
+        action_vocabulary: settings.action_vocabulary.clone(),
     };
 
     let llm_response = classify_tags_with_provider(&settings, &request, mode).await?;
-    let normalized_tags = normalize_for_mode(llm_response.ranked_tags, &settings.vocabulary, mode);
+    let normalized_topic_tags = normalize_for_mode(
+        llm_response.topic_ranked_tags,
+        &settings.vocabulary,
+        mode,
+        settings.auto_approve_ai,
+    );
+    let normalized_action_tags = normalize_for_mode(
+        llm_response.action_ranked_tags,
+        &settings.action_vocabulary,
+        mode,
+        settings.auto_approve_ai,
+    );
 
     hyperlink_tagging::persist_llm_tags(
         connection,
         hyperlink_id,
         job_id,
         LlmPersistInput {
-            ranked_tags: normalized_tags.clone(),
+            topic_ranked_tags: normalized_topic_tags.clone(),
+            action_ranked_tags: normalized_action_tags.clone(),
             overall_confidence: llm_response.overall_confidence,
             rationale: llm_response.rationale,
             provider: settings.provider.as_storage().to_string(),
@@ -112,7 +140,7 @@ pub async fn classify_hyperlink(
     Ok(TagClassificationOutput {
         classified: true,
         skipped_reason: None,
-        tag_count: normalized_tags.len(),
+        tag_count: normalized_topic_tags.len(),
     })
 }
 
@@ -120,6 +148,7 @@ fn normalize_for_mode(
     ranked_tags: Vec<RankedTag>,
     vocabulary: &[String],
     mode: TagClassificationMode,
+    auto_approve_ai: bool,
 ) -> Vec<PersistedRankedTag> {
     match mode {
         TagClassificationMode::VocabularyOnly => {
@@ -132,7 +161,11 @@ fn normalize_for_mode(
             .map(|ranked| PersistedRankedTag {
                 tag: ranked.tag,
                 confidence: ranked.confidence,
-                state_if_new: TagState::AiApproved,
+                state_if_new: if auto_approve_ai {
+                    TagState::AiApproved
+                } else {
+                    TagState::AiPending
+                },
             })
             .collect()
         }
@@ -141,6 +174,7 @@ fn normalize_for_mode(
                 ranked_tags,
                 vocabulary,
                 MINIMUM_TAG_CONFIDENCE,
+                auto_approve_ai,
             )
         }
     }
@@ -152,12 +186,15 @@ struct LlmTaggingRequest {
     url: String,
     og_title: Option<String>,
     og_description: Option<String>,
-    vocabulary: Vec<String>,
+    readable_text_excerpt: Option<String>,
+    topic_vocabulary: Vec<String>,
+    action_vocabulary: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
 struct LlmTaggingResponse {
-    ranked_tags: Vec<RankedTag>,
+    topic_ranked_tags: Vec<RankedTag>,
+    action_ranked_tags: Vec<RankedTag>,
     overall_confidence: Option<f32>,
     rationale: Option<String>,
 }
@@ -166,6 +203,10 @@ struct LlmTaggingResponse {
 struct ParsedLlmTaggingResponse {
     #[serde(default)]
     ranked_tags: Vec<ParsedRankedTag>,
+    #[serde(default)]
+    topic_ranked_tags: Vec<ParsedRankedTag>,
+    #[serde(default)]
+    action_ranked_tags: Vec<ParsedRankedTag>,
     overall_confidence: Option<f32>,
     rationale: Option<String>,
 }
@@ -313,9 +354,22 @@ async fn classify_tags_openai_compatible(
             }
         };
 
+        let topic_ranked_tags = if parsed.topic_ranked_tags.is_empty() {
+            parsed.ranked_tags.clone()
+        } else {
+            parsed.topic_ranked_tags.clone()
+        };
+
         return Ok(LlmTaggingResponse {
-            ranked_tags: parsed
-                .ranked_tags
+            topic_ranked_tags: topic_ranked_tags
+                .into_iter()
+                .map(|ranked| RankedTag {
+                    tag: ranked.tag,
+                    confidence: ranked.confidence,
+                })
+                .collect(),
+            action_ranked_tags: parsed
+                .action_ranked_tags
                 .into_iter()
                 .map(|ranked| RankedTag {
                     tag: ranked.tag,
@@ -343,33 +397,37 @@ async fn classify_tags_openai_compatible(
 fn build_system_prompt(mode: TagClassificationMode) -> &'static str {
     match mode {
         TagClassificationMode::VocabularyOnly => {
-            "You classify a hyperlink into ranked tags.
+            "You classify a hyperlink into ranked topic and action tags.
 Return strict JSON only.
 Output schema:
 {
-  \"ranked_tags\": [{\"tag\": \"string\", \"confidence\": 0.0}],
+  \"topic_ranked_tags\": [{\"tag\": \"string\", \"confidence\": 0.0}],
+  \"action_ranked_tags\": [{\"tag\": \"string\", \"confidence\": 0.0}],
   \"overall_confidence\": 0.0,
   \"rationale\": \"optional short reason\"
 }
 Rules:
-- Use only tags from the provided vocabulary.
-- Rank tags from best to worst.
+- Use only tags from the provided topic and action vocabularies.
+- Rank tags from best to worst per list.
+- Action tags should represent intent; topic tags should represent subject/domain.
 - Include only tags that are actually justified; zero tags is valid.
 - Confidence must be between 0.0 and 1.0."
         }
         TagClassificationMode::DiscoverWithPending => {
-            "You classify a hyperlink into ranked tags.
+            "You classify a hyperlink into ranked topic and action tags.
 Return strict JSON only.
 Output schema:
 {
-  \"ranked_tags\": [{\"tag\": \"string\", \"confidence\": 0.0}],
+  \"topic_ranked_tags\": [{\"tag\": \"string\", \"confidence\": 0.0}],
+  \"action_ranked_tags\": [{\"tag\": \"string\", \"confidence\": 0.0}],
   \"overall_confidence\": 0.0,
   \"rationale\": \"optional short reason\"
 }
 Rules:
-- Prefer tags from the provided vocabulary when they fit.
-- You may propose concise new tags when none of the provided vocabulary fits well.
-- Rank tags from best to worst.
+- Prefer tags from the provided topic/action vocabularies when they fit.
+- You may propose concise new topic/action tags when none of the provided vocabulary fits well.
+- Rank tags from best to worst per list.
+- Action tags should represent intent; topic tags should represent subject/domain.
 - Include only tags that are actually justified; zero tags is valid.
 - Confidence must be between 0.0 and 1.0."
         }
@@ -382,7 +440,9 @@ fn build_user_prompt(request: &LlmTaggingRequest, mode: TagClassificationMode) -
         "url": request.url,
         "og_title": request.og_title,
         "og_description": request.og_description,
-        "vocabulary": request.vocabulary,
+        "readable_text_excerpt": request.readable_text_excerpt,
+        "topic_vocabulary": request.topic_vocabulary,
+        "action_vocabulary": request.action_vocabulary,
         "mode": match mode {
             TagClassificationMode::VocabularyOnly => "vocabulary_only",
             TagClassificationMode::DiscoverWithPending => "discover_with_pending",

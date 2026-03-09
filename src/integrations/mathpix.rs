@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
 };
@@ -41,6 +42,33 @@ pub struct MathpixStatus {
 pub struct MathpixUsageWindow {
     pub total_requests: u64,
     pub estimated_cost_usd: f64,
+    pub breakdown: Vec<MathpixUsageBreakdown>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MathpixUsageBreakdown {
+    pub usage_type: String,
+    pub count: u64,
+    pub cost_class: MathpixUsageCostClass,
+    pub estimated_cost_usd: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MathpixUsageCostClass {
+    ImageRequest,
+    PdfRequest,
+    #[default]
+    Unknown,
+}
+
+impl MathpixUsageCostClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ImageRequest => "image",
+            Self::PdfRequest => "pdf",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -207,13 +235,6 @@ struct UsageRecord {
     count: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UsageCostClass {
-    ImageRequest,
-    PdfPage,
-    Unknown,
-}
-
 fn usage_cache_get(app_id: &str) -> Option<MathpixUsageSummary> {
     let Ok(guard) = USAGE_CACHE.lock() else {
         return None;
@@ -257,12 +278,12 @@ async fn fetch_usage_summary(config: &MathpixConfig) -> Result<MathpixUsageSumma
     append_unknown_types_warning(
         &mut warning_parts,
         "current month",
-        unknown_usage_types(&month_records),
+        unknown_usage_types(&month),
     );
     append_unknown_types_warning(
         &mut warning_parts,
         "all-time",
-        unknown_usage_types(&all_time_records),
+        unknown_usage_types(&all_time),
     );
 
     Ok(MathpixUsageSummary {
@@ -335,29 +356,45 @@ fn summarize_usage_window(records: &[UsageRecord]) -> MathpixUsageWindow {
         .iter()
         .fold(0u64, |acc, record| acc.saturating_add(record.count));
 
-    let mut image_requests = 0u64;
-    let mut pdf_pages = 0u64;
+    let mut by_usage_type = BTreeMap::<String, u64>::new();
     for record in records {
-        match classify_usage_type(record.usage_type.as_str()) {
-            UsageCostClass::ImageRequest => {
-                image_requests = image_requests.saturating_add(record.count);
-            }
-            UsageCostClass::PdfPage => {
-                pdf_pages = pdf_pages.saturating_add(record.count);
-            }
-            UsageCostClass::Unknown => {}
+        let normalized = normalize_usage_type(record.usage_type.as_str());
+        if normalized.is_empty() {
+            continue;
         }
+        let entry = by_usage_type.entry(normalized).or_insert(0);
+        *entry = entry.saturating_add(record.count);
     }
 
-    let estimated_cost_usd = tiered_cost(
+    let mut breakdown = by_usage_type
+        .into_iter()
+        .map(|(usage_type, count)| MathpixUsageBreakdown {
+            cost_class: classify_usage_type(usage_type.as_str()),
+            usage_type,
+            count,
+            estimated_cost_usd: 0.0,
+        })
+        .collect::<Vec<_>>();
+
+    let image_requests = breakdown
+        .iter()
+        .filter(|item| item.cost_class == MathpixUsageCostClass::ImageRequest)
+        .fold(0u64, |acc, item| acc.saturating_add(item.count));
+    let pdf_requests = breakdown
+        .iter()
+        .filter(|item| item.cost_class == MathpixUsageCostClass::PdfRequest)
+        .fold(0u64, |acc, item| acc.saturating_add(item.count));
+
+    let image_cost = tiered_cost(
         image_requests,
         IMAGE_TIER1_LIMIT,
         IMAGE_TIER2_LIMIT,
         IMAGE_TIER1_RATE,
         IMAGE_TIER2_RATE,
         IMAGE_TIER3_RATE,
-    ) + tiered_cost(
-        pdf_pages,
+    );
+    let pdf_cost = tiered_cost(
+        pdf_requests,
         PDF_TIER1_LIMIT,
         PDF_TIER2_LIMIT,
         PDF_TIER1_RATE,
@@ -365,9 +402,24 @@ fn summarize_usage_window(records: &[UsageRecord]) -> MathpixUsageWindow {
         PDF_TIER3_RATE,
     );
 
+    for item in &mut breakdown {
+        let (class_count, class_cost) = match item.cost_class {
+            MathpixUsageCostClass::ImageRequest => (image_requests, image_cost),
+            MathpixUsageCostClass::PdfRequest => (pdf_requests, pdf_cost),
+            MathpixUsageCostClass::Unknown => (0, 0.0),
+        };
+        if class_count == 0 || class_cost <= 0.0 {
+            continue;
+        }
+        item.estimated_cost_usd = class_cost * (item.count as f64 / class_count as f64);
+    }
+
+    let estimated_cost_usd = image_cost + pdf_cost;
+
     MathpixUsageWindow {
         total_requests,
         estimated_cost_usd,
+        breakdown,
     }
 }
 
@@ -394,42 +446,50 @@ fn tiered_cost(
         + tier3_count as f64 * tier3_rate
 }
 
-fn unknown_usage_types(records: &[UsageRecord]) -> Vec<String> {
-    let mut unknown = records
+fn unknown_usage_types(window: &MathpixUsageWindow) -> Vec<String> {
+    let mut unknown = window
+        .breakdown
         .iter()
-        .filter(|record| classify_usage_type(record.usage_type.as_str()) == UsageCostClass::Unknown)
-        .map(|record| record.usage_type.clone())
+        .filter(|item| item.cost_class == MathpixUsageCostClass::Unknown)
+        .map(|item| item.usage_type.clone())
         .collect::<Vec<_>>();
     unknown.sort_unstable();
     unknown.dedup();
     unknown
 }
 
-fn classify_usage_type(usage_type: &str) -> UsageCostClass {
-    let normalized = usage_type.trim().to_ascii_lowercase();
+fn normalize_usage_type(usage_type: &str) -> String {
+    let mut normalized = String::with_capacity(usage_type.len());
+    let mut prev_sep = false;
+    for ch in usage_type.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+            prev_sep = false;
+        } else if !prev_sep {
+            normalized.push('-');
+            prev_sep = true;
+        }
+    }
+    normalized.trim_matches('-').to_string()
+}
+
+fn classify_usage_type(usage_type: &str) -> MathpixUsageCostClass {
+    let normalized = normalize_usage_type(usage_type);
     if normalized.is_empty() {
-        return UsageCostClass::Unknown;
+        return MathpixUsageCostClass::Unknown;
     }
 
-    if normalized.contains("pdf_page")
-        || normalized.contains("pdf-pages")
-        || normalized == "pdfpages"
-        || normalized == "pdf_pages"
-    {
-        return UsageCostClass::PdfPage;
+    match normalized.as_str() {
+        "image" | "image-async" | "text" | "batch" | "ocr-results" | "latex" | "strokes" => {
+            MathpixUsageCostClass::ImageRequest
+        }
+        "pdf" | "pdf-async" | "pdf-page" | "pdf-pages" | "pdfpages" => {
+            MathpixUsageCostClass::PdfRequest
+        }
+        _ if normalized.starts_with("image-") => MathpixUsageCostClass::ImageRequest,
+        _ if normalized.starts_with("pdf-") => MathpixUsageCostClass::PdfRequest,
+        _ => MathpixUsageCostClass::Unknown,
     }
-
-    if normalized.contains("image")
-        || normalized == "text"
-        || normalized == "batch"
-        || normalized == "ocr-results"
-        || normalized == "latex"
-        || normalized == "strokes"
-    {
-        return UsageCostClass::ImageRequest;
-    }
-
-    UsageCostClass::Unknown
 }
 
 fn parse_usage_records(body: &str) -> Result<Vec<UsageRecord>, String> {
@@ -475,7 +535,16 @@ fn parse_usage_count(row: &Value) -> Option<u64> {
         return Some(count.round() as u64);
     }
     if let Some(count) = value.as_str() {
-        return count.trim().parse::<u64>().ok();
+        let trimmed = count.trim();
+        if let Ok(parsed) = trimmed.parse::<u64>() {
+            return Some(parsed);
+        }
+        if let Ok(parsed) = trimmed.parse::<f64>() {
+            if !parsed.is_finite() || parsed.is_sign_negative() {
+                return None;
+            }
+            return Some(parsed.round() as u64);
+        }
     }
     None
 }
@@ -601,7 +670,7 @@ mod tests {
                 count: 1_200,
             },
             UsageRecord {
-                usage_type: "pdf_pages".to_string(),
+                usage_type: "pdf-async".to_string(),
                 count: 5_100,
             },
         ]);
@@ -610,11 +679,22 @@ mod tests {
         let expected = (1_000.0 * 0.002 + 200.0 * 0.0015)
             + (1_000.0 * 0.005 + 4_000.0 * 0.004 + 100.0 * 0.003);
         assert!((summary.estimated_cost_usd - expected).abs() < f64::EPSILON);
+        assert_eq!(summary.breakdown.len(), 2);
+        assert_eq!(summary.breakdown[0].usage_type, "image");
+        assert_eq!(
+            summary.breakdown[0].cost_class,
+            MathpixUsageCostClass::ImageRequest
+        );
+        assert_eq!(summary.breakdown[1].usage_type, "pdf-async");
+        assert_eq!(
+            summary.breakdown[1].cost_class,
+            MathpixUsageCostClass::PdfRequest
+        );
     }
 
     #[test]
     fn unknown_usage_types_are_reported_sorted() {
-        let unknown = unknown_usage_types(&[
+        let window = summarize_usage_window(&[
             UsageRecord {
                 usage_type: "zeta".to_string(),
                 count: 1,
@@ -632,6 +712,21 @@ mod tests {
                 count: 1,
             },
         ]);
+        let unknown = unknown_usage_types(&window);
         assert_eq!(unknown, vec!["alpha".to_string(), "zeta".to_string()]);
+    }
+
+    #[test]
+    fn normalize_usage_type_handles_separators() {
+        assert_eq!(normalize_usage_type(" PDF_Pages "), "pdf-pages");
+        assert_eq!(normalize_usage_type("image/async"), "image-async");
+    }
+
+    #[test]
+    fn parse_usage_count_accepts_decimal_strings() {
+        let row = json!({
+            "count": "7.49"
+        });
+        assert_eq!(parse_usage_count(&row), Some(7));
     }
 }

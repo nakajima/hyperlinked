@@ -83,6 +83,62 @@ const HYPERLINK_TAG_TABLE_SQL: &str = r#"
 "#;
 
 #[cfg(test)]
+const TOPIC_TAG_TABLE_SQL: &str = r#"
+    CREATE TABLE topic_tag (
+        id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+        name varchar NOT NULL,
+        name_key varchar NOT NULL,
+        state varchar NOT NULL DEFAULT 'AI_PENDING',
+        created_at datetime_text NOT NULL,
+        updated_at datetime_text NOT NULL,
+        UNIQUE(name_key)
+    );
+"#;
+
+#[cfg(test)]
+const HYPERLINK_TOPIC_TAG_TABLE_SQL: &str = r#"
+    CREATE TABLE hyperlink_topic_tag (
+        id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+        hyperlink_id integer NOT NULL,
+        topic_tag_id integer NOT NULL,
+        source varchar NOT NULL DEFAULT 'AI',
+        confidence real NOT NULL DEFAULT 0.0,
+        rank_index integer NOT NULL DEFAULT 0,
+        created_at datetime_text NOT NULL,
+        updated_at datetime_text NOT NULL,
+        UNIQUE(hyperlink_id, topic_tag_id)
+    );
+"#;
+
+#[cfg(test)]
+const ACTION_TAG_TABLE_SQL: &str = r#"
+    CREATE TABLE action_tag (
+        id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+        name varchar NOT NULL,
+        name_key varchar NOT NULL,
+        state varchar NOT NULL DEFAULT 'AI_PENDING',
+        created_at datetime_text NOT NULL,
+        updated_at datetime_text NOT NULL,
+        UNIQUE(name_key)
+    );
+"#;
+
+#[cfg(test)]
+const HYPERLINK_ACTION_TAG_TABLE_SQL: &str = r#"
+    CREATE TABLE hyperlink_action_tag (
+        id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+        hyperlink_id integer NOT NULL,
+        action_tag_id integer NOT NULL,
+        source varchar NOT NULL DEFAULT 'AI',
+        confidence real NOT NULL DEFAULT 0.0,
+        rank_index integer NOT NULL DEFAULT 0,
+        created_at datetime_text NOT NULL,
+        updated_at datetime_text NOT NULL,
+        UNIQUE(hyperlink_id, action_tag_id)
+    );
+"#;
+
+#[cfg(test)]
 const HYPERLINK_RELATION_TABLE_SQL: &str = r#"
     CREATE TABLE hyperlink_relation (
         id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -250,6 +306,10 @@ pub(crate) async fn initialize_hyperlinks_schema(connection: &DatabaseConnection
     execute_sql(connection, HYPERLINK_ARTIFACT_TABLE_SQL).await;
     execute_sql(connection, TAG_TABLE_SQL).await;
     execute_sql(connection, HYPERLINK_TAG_TABLE_SQL).await;
+    execute_sql(connection, TOPIC_TAG_TABLE_SQL).await;
+    execute_sql(connection, HYPERLINK_TOPIC_TAG_TABLE_SQL).await;
+    execute_sql(connection, ACTION_TAG_TABLE_SQL).await;
+    execute_sql(connection, HYPERLINK_ACTION_TAG_TABLE_SQL).await;
     execute_sql(connection, HYPERLINK_RELATION_TABLE_SQL).await;
     execute_sql(connection, HYPERLINK_TOMBSTONE_TABLE_SQL).await;
 }

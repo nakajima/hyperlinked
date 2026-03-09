@@ -11,12 +11,25 @@ const KEY_AUTH_HEADER_NAME: &str = "settings.tags.auth_header_name";
 const KEY_AUTH_HEADER_PREFIX: &str = "settings.tags.auth_header_prefix";
 const KEY_BACKEND_KIND: &str = "settings.tags.backend_kind";
 const KEY_VOCABULARY_JSON: &str = "settings.tags.vocabulary_json";
+const KEY_TOPIC_VOCABULARY_JSON: &str = "settings.tags.topic_vocabulary_json";
+const KEY_ACTION_VOCABULARY_JSON: &str = "settings.tags.action_vocabulary_json";
+const KEY_AUTO_APPROVE_AI: &str = "settings.tags.auto_approve_ai";
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL: &str = "gpt-4.1-mini";
 const DEFAULT_AUTH_HEADER_NAME: &str = "Authorization";
 const DEFAULT_AUTH_HEADER_PREFIX: &str = "Bearer";
-const DEFAULT_VOCABULARY: [&str; 5] = ["build", "learn", "reference", "buy", "share"];
+const DEFAULT_TOPIC_VOCABULARY: [&str; 8] = [
+    "typography",
+    "type foundry",
+    "font specimen",
+    "branding",
+    "ui design",
+    "web dev",
+    "tooling",
+    "reference",
+];
+const DEFAULT_ACTION_VOCABULARY: [&str; 5] = ["build", "learn", "reference", "buy", "share"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaggingProvider {
@@ -73,7 +86,10 @@ pub struct TaggingSettings {
     pub auth_header_name: Option<String>,
     pub auth_header_prefix: Option<String>,
     pub backend_kind: TaggingBackendKind,
+    // topic vocabulary (legacy field name kept for compatibility in callers)
     pub vocabulary: Vec<String>,
+    pub action_vocabulary: Vec<String>,
+    pub auto_approve_ai: bool,
 }
 
 impl Default for TaggingSettings {
@@ -87,10 +103,15 @@ impl Default for TaggingSettings {
             auth_header_name: Some(DEFAULT_AUTH_HEADER_NAME.to_string()),
             auth_header_prefix: Some(DEFAULT_AUTH_HEADER_PREFIX.to_string()),
             backend_kind: TaggingBackendKind::Unknown,
-            vocabulary: DEFAULT_VOCABULARY
+            vocabulary: DEFAULT_TOPIC_VOCABULARY
                 .iter()
                 .map(|value| value.to_string())
                 .collect(),
+            action_vocabulary: DEFAULT_ACTION_VOCABULARY
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            auto_approve_ai: false,
         }
     }
 }
@@ -106,7 +127,9 @@ impl TaggingSettings {
         let auth_header_name = parse_non_empty(self.auth_header_name);
         let auth_header_prefix = parse_non_empty(self.auth_header_prefix);
         let backend_kind = self.backend_kind;
-        let vocabulary = normalize_vocabulary(self.vocabulary);
+        let vocabulary = normalize_vocabulary(self.vocabulary, &DEFAULT_TOPIC_VOCABULARY);
+        let action_vocabulary =
+            normalize_vocabulary(self.action_vocabulary, &DEFAULT_ACTION_VOCABULARY);
 
         Self {
             enabled: self.enabled,
@@ -118,11 +141,15 @@ impl TaggingSettings {
             auth_header_prefix,
             backend_kind,
             vocabulary,
+            action_vocabulary,
+            auto_approve_ai: self.auto_approve_ai,
         }
     }
 
     pub fn classification_enabled(&self) -> bool {
-        self.enabled && !self.model.trim().is_empty() && !self.vocabulary.is_empty()
+        self.enabled
+            && !self.model.trim().is_empty()
+            && (!self.vocabulary.is_empty() || !self.action_vocabulary.is_empty())
     }
 }
 
@@ -140,12 +167,26 @@ pub async fn load(connection: &DatabaseConnection) -> Result<TaggingSettings, Db
             KEY_AUTH_HEADER_PREFIX,
             KEY_BACKEND_KIND,
             KEY_VOCABULARY_JSON,
+            KEY_TOPIC_VOCABULARY_JSON,
+            KEY_ACTION_VOCABULARY_JSON,
+            KEY_AUTO_APPROVE_AI,
         ],
     )
     .await?;
 
-    let vocabulary = parse_vocabulary_json(values.get(KEY_VOCABULARY_JSON).map(String::as_str))
-        .unwrap_or_else(|| defaults.vocabulary.clone());
+    let legacy_vocabulary =
+        parse_vocabulary_json(values.get(KEY_VOCABULARY_JSON).map(String::as_str), &[]);
+    let topic_vocabulary = parse_vocabulary_json(
+        values.get(KEY_TOPIC_VOCABULARY_JSON).map(String::as_str),
+        &DEFAULT_TOPIC_VOCABULARY,
+    )
+    .or(legacy_vocabulary)
+    .unwrap_or_else(|| defaults.vocabulary.clone());
+    let action_vocabulary = parse_vocabulary_json(
+        values.get(KEY_ACTION_VOCABULARY_JSON).map(String::as_str),
+        &DEFAULT_ACTION_VOCABULARY,
+    )
+    .unwrap_or_else(|| defaults.action_vocabulary.clone());
 
     Ok(TaggingSettings {
         enabled: parse_bool(
@@ -176,7 +217,12 @@ pub async fn load(connection: &DatabaseConnection) -> Result<TaggingSettings, Db
         backend_kind: TaggingBackendKind::from_storage(
             values.get(KEY_BACKEND_KIND).map(String::as_str),
         ),
-        vocabulary,
+        vocabulary: topic_vocabulary,
+        action_vocabulary,
+        auto_approve_ai: parse_bool(
+            values.get(KEY_AUTO_APPROVE_AI).map(String::as_str),
+            defaults.auto_approve_ai,
+        ),
     }
     .normalized())
 }
@@ -191,10 +237,23 @@ pub async fn save(
     kv_store::set(connection, KEY_PROVIDER, settings.provider.as_storage()).await?;
     kv_store::set(connection, KEY_BASE_URL, &settings.base_url).await?;
     kv_store::set(connection, KEY_MODEL, &settings.model).await?;
+
+    let topic_json =
+        serde_json::to_string(&settings.vocabulary).unwrap_or_else(|_| "[]".to_string());
+    kv_store::set(connection, KEY_TOPIC_VOCABULARY_JSON, &topic_json).await?;
+    // Keep legacy key updated for compatibility with older builds.
+    kv_store::set(connection, KEY_VOCABULARY_JSON, &topic_json).await?;
+
     kv_store::set(
         connection,
-        KEY_VOCABULARY_JSON,
-        &serde_json::to_string(&settings.vocabulary).unwrap_or_else(|_| "[]".to_string()),
+        KEY_ACTION_VOCABULARY_JSON,
+        &serde_json::to_string(&settings.action_vocabulary).unwrap_or_else(|_| "[]".to_string()),
+    )
+    .await?;
+    kv_store::set(
+        connection,
+        KEY_AUTO_APPROVE_AI,
+        bool_to_storage(settings.auto_approve_ai),
     )
     .await?;
 
@@ -227,16 +286,27 @@ pub fn parse_vocabulary_lines(raw: &str) -> Vec<String> {
             .flat_map(|line| line.split(','))
             .map(|token| token.to_string())
             .collect(),
+        &DEFAULT_TOPIC_VOCABULARY,
     )
 }
 
-fn parse_vocabulary_json(raw: Option<&str>) -> Option<Vec<String>> {
-    let raw = raw?;
-    let parsed = serde_json::from_str::<Vec<String>>(raw).ok()?;
-    Some(normalize_vocabulary(parsed))
+pub fn parse_action_vocabulary_lines(raw: &str) -> Vec<String> {
+    normalize_vocabulary(
+        raw.lines()
+            .flat_map(|line| line.split(','))
+            .map(|token| token.to_string())
+            .collect(),
+        &DEFAULT_ACTION_VOCABULARY,
+    )
 }
 
-fn normalize_vocabulary(values: Vec<String>) -> Vec<String> {
+fn parse_vocabulary_json(raw: Option<&str>, fallback: &[&str]) -> Option<Vec<String>> {
+    let raw = raw?;
+    let parsed = serde_json::from_str::<Vec<String>>(raw).ok()?;
+    Some(normalize_vocabulary(parsed, fallback))
+}
+
+fn normalize_vocabulary(values: Vec<String>, fallback: &[&str]) -> Vec<String> {
     let mut normalized = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for value in values {
@@ -244,16 +314,13 @@ fn normalize_vocabulary(values: Vec<String>) -> Vec<String> {
             continue;
         };
         let key = value.to_ascii_lowercase();
-        if seen.insert(key) {
-            normalized.push(value);
+        if seen.insert(key.clone()) {
+            normalized.push(key);
         }
     }
 
     if normalized.is_empty() {
-        return DEFAULT_VOCABULARY
-            .iter()
-            .map(|value| value.to_string())
-            .collect();
+        return fallback.iter().map(|value| value.to_string()).collect();
     }
 
     normalized
@@ -327,11 +394,9 @@ mod tests {
                 auth_header_name: Some("   X-API-Key ".to_string()),
                 auth_header_prefix: Some(" ".to_string()),
                 backend_kind: TaggingBackendKind::Ollama,
-                vocabulary: vec![
-                    "learn".to_string(),
-                    "LEARN".to_string(),
-                    "reference".to_string(),
-                ],
+                vocabulary: vec!["Typography".to_string(), "typography".to_string()],
+                action_vocabulary: vec!["BUY".to_string(), "buy".to_string()],
+                auto_approve_ai: false,
             },
         )
         .await
@@ -343,10 +408,8 @@ mod tests {
         assert_eq!(saved.auth_header_name.as_deref(), Some("X-API-Key"));
         assert_eq!(saved.auth_header_prefix, None);
         assert_eq!(saved.backend_kind, TaggingBackendKind::Ollama);
-        assert_eq!(
-            saved.vocabulary,
-            vec!["learn".to_string(), "reference".to_string()]
-        );
+        assert_eq!(saved.vocabulary, vec!["typography".to_string()]);
+        assert_eq!(saved.action_vocabulary, vec!["buy".to_string()]);
         assert!(saved.classification_enabled());
 
         let loaded = load(&connection).await.expect("settings should load");
@@ -355,12 +418,12 @@ mod tests {
 
     #[test]
     fn parse_vocabulary_lines_accepts_comma_or_newline_separated_values() {
-        let parsed = parse_vocabulary_lines("learn, build\nreference\nlearn");
+        let parsed = parse_vocabulary_lines("Typography, tooling\nreference\ntypography");
         assert_eq!(
             parsed,
             vec![
-                "learn".to_string(),
-                "build".to_string(),
+                "typography".to_string(),
+                "tooling".to_string(),
                 "reference".to_string()
             ]
         );

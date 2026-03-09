@@ -8,15 +8,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     entity::{
+        action_tag,
+        hyperlink_action_tag::{self, HyperlinkActionTagSource},
         hyperlink_artifact::HyperlinkArtifactKind,
-        hyperlink_tag::{self, HyperlinkTagSource},
-        tag,
+        hyperlink_topic_tag::{self, HyperlinkTopicTagSource},
+        topic_tag,
     },
     model::hyperlink_artifact,
 };
 
 pub const TAG_META_CONTENT_TYPE: &str = "application/json";
-pub const TAGGING_PROMPT_VERSION: &str = "v1";
+pub const TAGGING_PROMPT_VERSION: &str = "v2";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RankedTag {
@@ -38,14 +40,31 @@ pub enum TaggingSource {
     Ai,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TagKind {
+    Topic,
+    Action,
+}
+
+impl TagKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Topic => "topic",
+            Self::Action => "action",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct LinkTag {
     pub tag: String,
     pub source: TaggingSource,
     pub state: TagState,
+    pub confidence: f32,
+    pub rank_index: i32,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TagSet {
     pub all_tags: Vec<LinkTag>,
     pub visible_tags: Vec<String>,
@@ -55,9 +74,17 @@ pub struct TagSet {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingTag {
+    pub kind: TagKind,
     pub id: i32,
     pub name: String,
     pub hyperlink_count: usize,
+    pub encoded_id: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ApprovedPendingTags {
+    pub topic_names: Vec<String>,
+    pub action_names: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,7 +104,12 @@ enum LegacyTaggingSource {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct LegacyTagMeta {
     source: LegacyTaggingSource,
+    #[serde(default)]
     ranked_tags: Vec<RankedTag>,
+    #[serde(default)]
+    topic_ranked_tags: Vec<RankedTag>,
+    #[serde(default)]
+    action_ranked_tags: Vec<RankedTag>,
     primary_tag: Option<String>,
     overall_confidence: Option<f32>,
     rationale: Option<String>,
@@ -90,7 +122,8 @@ struct LegacyTagMeta {
 
 #[derive(Clone, Debug)]
 pub struct LlmPersistInput {
-    pub ranked_tags: Vec<PersistedRankedTag>,
+    pub topic_ranked_tags: Vec<PersistedRankedTag>,
+    pub action_ranked_tags: Vec<PersistedRankedTag>,
     pub overall_confidence: Option<f32>,
     pub rationale: Option<String>,
     pub provider: String,
@@ -115,9 +148,9 @@ pub async fn latest_for_hyperlinks(
         return Ok(HashMap::new());
     }
 
-    let rows = hyperlink_tag::Entity::find()
-        .filter(hyperlink_tag::Column::HyperlinkId.is_in(hyperlink_ids.to_vec()))
-        .find_also_related(tag::Entity)
+    let rows = hyperlink_topic_tag::Entity::find()
+        .filter(hyperlink_topic_tag::Column::HyperlinkId.is_in(hyperlink_ids.to_vec()))
+        .find_also_related(topic_tag::Entity)
         .all(connection)
         .await?;
 
@@ -131,8 +164,10 @@ pub async fn latest_for_hyperlinks(
             .or_default()
             .push(LinkTag {
                 tag: model.name,
-                source: map_source_from_model(link_tag.source),
-                state: map_state_from_model(model.state),
+                source: map_topic_source_from_model(link_tag.source),
+                state: map_topic_state_from_model(model.state),
+                confidence: link_tag.confidence,
+                rank_index: link_tag.rank_index,
             });
     }
 
@@ -142,24 +177,13 @@ pub async fn latest_for_hyperlinks(
         sets.insert(hyperlink_id, build_tag_set(tags));
     }
 
-    let missing = hyperlink_ids
-        .iter()
-        .copied()
-        .filter(|id| !sets.contains_key(id))
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        let legacy = legacy_for_hyperlinks(connection, &missing).await?;
-        for (hyperlink_id, set) in legacy {
-            sets.insert(hyperlink_id, set);
-        }
-    }
-
     Ok(sets)
 }
 
 pub async fn list_pending_tags(connection: &DatabaseConnection) -> Result<Vec<PendingTag>, DbErr> {
     let backend = connection.get_database_backend();
-    let rows = connection
+
+    let topic_rows = connection
         .query_all(Statement::from_string(
             backend,
             r#"
@@ -167,9 +191,9 @@ pub async fn list_pending_tags(connection: &DatabaseConnection) -> Result<Vec<Pe
                     t.id AS id,
                     t.name AS name,
                     COUNT(ht.id) AS hyperlink_count
-                FROM tag t
-                LEFT JOIN hyperlink_tag ht
-                    ON ht.tag_id = t.id
+                FROM topic_tag t
+                LEFT JOIN hyperlink_topic_tag ht
+                    ON ht.topic_tag_id = t.id
                 WHERE t.state = 'AI_PENDING'
                 GROUP BY t.id, t.name
                 ORDER BY t.name ASC
@@ -178,63 +202,145 @@ pub async fn list_pending_tags(connection: &DatabaseConnection) -> Result<Vec<Pe
         ))
         .await?;
 
-    let mut pending = Vec::with_capacity(rows.len());
-    for row in rows {
+    let action_rows = connection
+        .query_all(Statement::from_string(
+            backend,
+            r#"
+                SELECT
+                    t.id AS id,
+                    t.name AS name,
+                    COUNT(ht.id) AS hyperlink_count
+                FROM action_tag t
+                LEFT JOIN hyperlink_action_tag ht
+                    ON ht.action_tag_id = t.id
+                WHERE t.state = 'AI_PENDING'
+                GROUP BY t.id, t.name
+                ORDER BY t.name ASC
+            "#
+            .to_string(),
+        ))
+        .await?;
+
+    let mut pending = Vec::with_capacity(topic_rows.len() + action_rows.len());
+    for row in topic_rows {
         let id: i32 = row.try_get("", "id")?;
         let name: String = row.try_get("", "name")?;
         let hyperlink_count: i64 = row.try_get("", "hyperlink_count")?;
         pending.push(PendingTag {
+            kind: TagKind::Topic,
             id,
             name,
             hyperlink_count: hyperlink_count.max(0) as usize,
+            encoded_id: format!("topic:{id}"),
         });
     }
+
+    for row in action_rows {
+        let id: i32 = row.try_get("", "id")?;
+        let name: String = row.try_get("", "name")?;
+        let hyperlink_count: i64 = row.try_get("", "hyperlink_count")?;
+        pending.push(PendingTag {
+            kind: TagKind::Action,
+            id,
+            name,
+            hyperlink_count: hyperlink_count.max(0) as usize,
+            encoded_id: format!("action:{id}"),
+        });
+    }
+
+    pending.sort_by(|left, right| {
+        tag_kind_rank(left.kind)
+            .cmp(&tag_kind_rank(right.kind))
+            .then_with(|| left.name.cmp(&right.name))
+    });
 
     Ok(pending)
 }
 
 pub async fn approve_pending_tags(
     connection: &DatabaseConnection,
-    tag_ids: &[i32],
-) -> Result<Vec<String>, DbErr> {
-    if tag_ids.is_empty() {
-        return Ok(Vec::new());
+    encoded_ids: &[String],
+) -> Result<ApprovedPendingTags, DbErr> {
+    if encoded_ids.is_empty() {
+        return Ok(ApprovedPendingTags::default());
     }
 
-    let ids = dedupe_i32(tag_ids);
-    if ids.is_empty() {
-        return Ok(Vec::new());
+    let mut topic_ids = Vec::new();
+    let mut action_ids = Vec::new();
+    let mut seen = HashSet::new();
+    for encoded in encoded_ids {
+        let Some((kind, raw_id)) = encoded.split_once(':') else {
+            continue;
+        };
+        let Ok(id) = raw_id.parse::<i32>() else {
+            continue;
+        };
+        let dedupe_key = format!("{kind}:{id}");
+        if !seen.insert(dedupe_key) {
+            continue;
+        }
+
+        match kind {
+            "topic" => topic_ids.push(id),
+            "action" => action_ids.push(id),
+            _ => {}
+        }
     }
 
+    let mut approved = ApprovedPendingTags::default();
     let now = now_utc();
-    let pending_rows = tag::Entity::find()
-        .filter(tag::Column::Id.is_in(ids.clone()))
-        .filter(tag::Column::State.eq(tag::TagState::AiPending))
-        .order_by_asc(tag::Column::Name)
-        .all(connection)
-        .await?;
 
-    if pending_rows.is_empty() {
-        return Ok(Vec::new());
+    if !topic_ids.is_empty() {
+        let rows = topic_tag::Entity::find()
+            .filter(topic_tag::Column::Id.is_in(topic_ids.clone()))
+            .filter(topic_tag::Column::State.eq(topic_tag::TopicTagState::AiPending))
+            .order_by_asc(topic_tag::Column::Name)
+            .all(connection)
+            .await?;
+
+        approved.topic_names = rows.into_iter().map(|row| row.name).collect();
+
+        topic_tag::Entity::update_many()
+            .col_expr(
+                topic_tag::Column::State,
+                sea_orm::sea_query::Expr::value(topic_tag::TopicTagState::AiApproved),
+            )
+            .col_expr(
+                topic_tag::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(topic_tag::Column::Id.is_in(topic_ids))
+            .filter(topic_tag::Column::State.eq(topic_tag::TopicTagState::AiPending))
+            .exec(connection)
+            .await?;
     }
 
-    let approved_names = pending_rows
-        .iter()
-        .map(|row| row.name.clone())
-        .collect::<Vec<_>>();
+    if !action_ids.is_empty() {
+        let rows = action_tag::Entity::find()
+            .filter(action_tag::Column::Id.is_in(action_ids.clone()))
+            .filter(action_tag::Column::State.eq(action_tag::ActionTagState::AiPending))
+            .order_by_asc(action_tag::Column::Name)
+            .all(connection)
+            .await?;
 
-    tag::Entity::update_many()
-        .col_expr(
-            tag::Column::State,
-            sea_orm::sea_query::Expr::value(tag::TagState::AiApproved),
-        )
-        .col_expr(tag::Column::UpdatedAt, sea_orm::sea_query::Expr::value(now))
-        .filter(tag::Column::Id.is_in(ids))
-        .filter(tag::Column::State.eq(tag::TagState::AiPending))
-        .exec(connection)
-        .await?;
+        approved.action_names = rows.into_iter().map(|row| row.name).collect();
 
-    Ok(approved_names)
+        action_tag::Entity::update_many()
+            .col_expr(
+                action_tag::Column::State,
+                sea_orm::sea_query::Expr::value(action_tag::ActionTagState::AiApproved),
+            )
+            .col_expr(
+                action_tag::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .filter(action_tag::Column::Id.is_in(action_ids))
+            .filter(action_tag::Column::State.eq(action_tag::ActionTagState::AiPending))
+            .exec(connection)
+            .await?;
+    }
+
+    Ok(approved)
 }
 
 pub async fn persist_manual_tags(
@@ -254,18 +360,20 @@ pub async fn persist_manual_tags(
         .collect::<Vec<_>>();
 
     let txn = connection.begin().await?;
-    hyperlink_tag::Entity::delete_many()
-        .filter(hyperlink_tag::Column::HyperlinkId.eq(hyperlink_id))
+    hyperlink_topic_tag::Entity::delete_many()
+        .filter(hyperlink_topic_tag::Column::HyperlinkId.eq(hyperlink_id))
         .exec(&txn)
         .await?;
 
-    for tag_name in &tags {
-        let tag_id = ensure_tag_with_state(&txn, tag_name, TagState::User).await?;
-        insert_hyperlink_tag(
+    for (index, tag_name) in tags.iter().enumerate() {
+        let tag_id = ensure_topic_tag_with_state(&txn, tag_name, TagState::User).await?;
+        insert_hyperlink_topic_tag(
             &txn,
             hyperlink_id,
             tag_id,
-            HyperlinkTagSource::User,
+            HyperlinkTopicTagSource::User,
+            (1.0 - (index as f32 * 0.1)).max(0.0),
+            index as i32,
             now_utc(),
         )
         .await?;
@@ -276,7 +384,9 @@ pub async fn persist_manual_tags(
     let primary_tag = ranked_tags.first().map(|value| value.tag.clone());
     let meta = LegacyTagMeta {
         source: LegacyTaggingSource::Manual,
-        ranked_tags,
+        ranked_tags: ranked_tags.clone(),
+        topic_ranked_tags: ranked_tags,
+        action_ranked_tags: Vec::new(),
         primary_tag,
         overall_confidence: None,
         rationale: None,
@@ -296,21 +406,28 @@ pub async fn persist_llm_tags(
     job_id: Option<i32>,
     input: LlmPersistInput,
 ) -> Result<(), DbErr> {
-    let ranked_tags = dedupe_ranked_persisted_tags(input.ranked_tags);
+    let topic_ranked_tags = dedupe_ranked_persisted_tags(input.topic_ranked_tags);
+    let action_ranked_tags = dedupe_ranked_persisted_tags(input.action_ranked_tags);
     let now = now_utc();
 
     let txn = connection.begin().await?;
-    hyperlink_tag::Entity::delete_many()
-        .filter(hyperlink_tag::Column::HyperlinkId.eq(hyperlink_id))
-        .filter(hyperlink_tag::Column::Source.eq(HyperlinkTagSource::Ai))
+    hyperlink_topic_tag::Entity::delete_many()
+        .filter(hyperlink_topic_tag::Column::HyperlinkId.eq(hyperlink_id))
+        .filter(hyperlink_topic_tag::Column::Source.eq(HyperlinkTopicTagSource::Ai))
+        .exec(&txn)
+        .await?;
+    hyperlink_action_tag::Entity::delete_many()
+        .filter(hyperlink_action_tag::Column::HyperlinkId.eq(hyperlink_id))
+        .filter(hyperlink_action_tag::Column::Source.eq(HyperlinkActionTagSource::Ai))
         .exec(&txn)
         .await?;
 
-    for ranked in &ranked_tags {
-        let tag_id = ensure_tag_with_state(&txn, ranked.tag.as_str(), ranked.state_if_new).await?;
-        let existing = hyperlink_tag::Entity::find()
-            .filter(hyperlink_tag::Column::HyperlinkId.eq(hyperlink_id))
-            .filter(hyperlink_tag::Column::TagId.eq(tag_id))
+    for (index, ranked) in topic_ranked_tags.iter().enumerate() {
+        let tag_id =
+            ensure_topic_tag_with_state(&txn, ranked.tag.as_str(), ranked.state_if_new).await?;
+        let existing = hyperlink_topic_tag::Entity::find()
+            .filter(hyperlink_topic_tag::Column::HyperlinkId.eq(hyperlink_id))
+            .filter(hyperlink_topic_tag::Column::TopicTagId.eq(tag_id))
             .one(&txn)
             .await?;
 
@@ -318,22 +435,65 @@ pub async fn persist_llm_tags(
             continue;
         }
 
-        insert_hyperlink_tag(&txn, hyperlink_id, tag_id, HyperlinkTagSource::Ai, now).await?;
+        insert_hyperlink_topic_tag(
+            &txn,
+            hyperlink_id,
+            tag_id,
+            HyperlinkTopicTagSource::Ai,
+            ranked.confidence,
+            index as i32,
+            now,
+        )
+        .await?;
+    }
+
+    for (index, ranked) in action_ranked_tags.iter().enumerate() {
+        let tag_id =
+            ensure_action_tag_with_state(&txn, ranked.tag.as_str(), ranked.state_if_new).await?;
+        let existing = hyperlink_action_tag::Entity::find()
+            .filter(hyperlink_action_tag::Column::HyperlinkId.eq(hyperlink_id))
+            .filter(hyperlink_action_tag::Column::ActionTagId.eq(tag_id))
+            .one(&txn)
+            .await?;
+
+        if existing.is_some() {
+            continue;
+        }
+
+        insert_hyperlink_action_tag(
+            &txn,
+            hyperlink_id,
+            tag_id,
+            HyperlinkActionTagSource::Ai,
+            ranked.confidence,
+            index as i32,
+            now,
+        )
+        .await?;
     }
 
     txn.commit().await?;
 
-    let artifact_ranked_tags = ranked_tags
+    let artifact_topic_tags = topic_ranked_tags
         .iter()
         .map(|ranked| RankedTag {
             tag: ranked.tag.clone(),
             confidence: ranked.confidence,
         })
         .collect::<Vec<_>>();
-    let primary_tag = artifact_ranked_tags.first().map(|value| value.tag.clone());
+    let artifact_action_tags = action_ranked_tags
+        .iter()
+        .map(|ranked| RankedTag {
+            tag: ranked.tag.clone(),
+            confidence: ranked.confidence,
+        })
+        .collect::<Vec<_>>();
+    let primary_tag = artifact_topic_tags.first().map(|value| value.tag.clone());
     let meta = LegacyTagMeta {
         source: LegacyTaggingSource::Llm,
-        ranked_tags: artifact_ranked_tags,
+        ranked_tags: artifact_topic_tags.clone(),
+        topic_ranked_tags: artifact_topic_tags,
+        action_ranked_tags: artifact_action_tags,
         primary_tag,
         overall_confidence: input.overall_confidence,
         rationale: input.rationale,
@@ -354,12 +514,15 @@ pub fn normalize_ranked_tags_for_vocabulary(
 ) -> Vec<RankedTag> {
     let mut canonical_by_lower = HashMap::new();
     for value in vocabulary {
-        canonical_by_lower.insert(value.to_ascii_lowercase(), value.to_string());
+        let canonical = value.trim().to_ascii_lowercase();
+        if !canonical.is_empty() {
+            canonical_by_lower.insert(canonical.clone(), canonical);
+        }
     }
 
     let mut scores = HashMap::<String, f32>::new();
     for ranked in ranked_tags {
-        let key = ranked.tag.to_ascii_lowercase();
+        let key = ranked.tag.trim().to_ascii_lowercase();
         let Some(canonical) = canonical_by_lower.get(&key) else {
             continue;
         };
@@ -393,10 +556,14 @@ pub fn normalize_ranked_tags_with_discovery(
     ranked_tags: Vec<RankedTag>,
     vocabulary: &[String],
     minimum_confidence: f32,
+    auto_approve_ai: bool,
 ) -> Vec<PersistedRankedTag> {
     let mut canonical_by_lower = HashMap::new();
     for value in vocabulary {
-        canonical_by_lower.insert(value.to_ascii_lowercase(), value.to_string());
+        let canonical = value.trim().to_ascii_lowercase();
+        if !canonical.is_empty() {
+            canonical_by_lower.insert(canonical.clone(), canonical);
+        }
     }
 
     let mut ranked_by_key = HashMap::<String, PersistedRankedTag>::new();
@@ -406,17 +573,17 @@ pub fn normalize_ranked_tags_with_discovery(
             continue;
         }
 
-        let trimmed = ranked.tag.trim();
-        if trimmed.is_empty() {
+        let trimmed = ranked.tag.trim().to_ascii_lowercase();
+        if !is_tag_candidate(trimmed.as_str()) {
             continue;
         }
 
-        let raw_key = trimmed.to_ascii_lowercase();
-        let (canonical, state_if_new) = if let Some(existing) = canonical_by_lower.get(&raw_key) {
-            (existing.clone(), TagState::AiApproved)
+        let state_if_new = if auto_approve_ai {
+            TagState::AiApproved
         } else {
-            (trimmed.to_string(), TagState::AiPending)
+            TagState::AiPending
         };
+        let canonical = canonical_by_lower.get(&trimmed).cloned().unwrap_or(trimmed);
         let key = canonical.to_ascii_lowercase();
 
         match ranked_by_key.get_mut(&key) {
@@ -461,7 +628,10 @@ pub fn normalize_manual_tags_for_vocabulary(
 
     let mut canonical_by_lower = HashMap::new();
     for value in vocabulary {
-        canonical_by_lower.insert(value.to_ascii_lowercase(), value.to_string());
+        let canonical = value.trim().to_ascii_lowercase();
+        if !canonical.is_empty() {
+            canonical_by_lower.insert(canonical.clone(), canonical);
+        }
     }
 
     let mut normalized = Vec::new();
@@ -493,13 +663,12 @@ fn dedupe_tags(values: Vec<String>) -> Vec<String> {
     let mut deduped = Vec::new();
     let mut seen = HashSet::new();
     for value in values {
-        let trimmed = value.trim();
+        let trimmed = value.trim().to_ascii_lowercase();
         if trimmed.is_empty() {
             continue;
         }
-        let key = trimmed.to_ascii_lowercase();
-        if seen.insert(key) {
-            deduped.push(trimmed.to_string());
+        if seen.insert(trimmed.clone()) {
+            deduped.push(trimmed);
         }
     }
     deduped
@@ -516,11 +685,22 @@ fn dedupe_ranked_persisted_tags(values: Vec<PersistedRankedTag>) -> Vec<Persiste
         match by_key.get_mut(&key) {
             Some(existing) => {
                 if value.confidence > existing.confidence {
-                    *existing = value;
+                    *existing = PersistedRankedTag {
+                        tag: key.clone(),
+                        confidence: value.confidence,
+                        state_if_new: value.state_if_new,
+                    };
                 }
             }
             None => {
-                by_key.insert(key, value);
+                by_key.insert(
+                    key.clone(),
+                    PersistedRankedTag {
+                        tag: key,
+                        confidence: value.confidence,
+                        state_if_new: value.state_if_new,
+                    },
+                );
             }
         }
     }
@@ -536,67 +716,25 @@ fn dedupe_ranked_persisted_tags(values: Vec<PersistedRankedTag>) -> Vec<Persiste
     deduped
 }
 
-async fn legacy_for_hyperlinks(
-    connection: &DatabaseConnection,
-    hyperlink_ids: &[i32],
-) -> Result<HashMap<i32, TagSet>, DbErr> {
-    let artifacts = hyperlink_artifact::latest_for_hyperlinks_kind(
-        connection,
-        hyperlink_ids,
-        HyperlinkArtifactKind::TagMeta,
-    )
-    .await?;
-
-    let mut tags_by_hyperlink = HashMap::with_capacity(artifacts.len());
-    for (hyperlink_id, artifact) in artifacts {
-        if let Ok(meta) = parse_artifact_payload(&artifact).await {
-            tags_by_hyperlink.insert(hyperlink_id, legacy_tag_meta_to_set(meta));
-        } else {
-            tracing::warn!(
-                artifact_id = artifact.id,
-                hyperlink_id,
-                "failed to parse legacy tag_meta artifact payload"
-            );
-        }
-    }
-
-    Ok(tags_by_hyperlink)
-}
-
-fn legacy_tag_meta_to_set(meta: LegacyTagMeta) -> TagSet {
-    let source = match meta.source {
-        LegacyTaggingSource::Manual => TaggingSource::User,
-        LegacyTaggingSource::Llm => TaggingSource::Ai,
-    };
-    let state = match meta.source {
-        LegacyTaggingSource::Manual => TagState::User,
-        LegacyTaggingSource::Llm => TagState::AiApproved,
-    };
-
-    let mut all_tags = meta
-        .ranked_tags
-        .iter()
-        .map(|ranked| LinkTag {
-            tag: ranked.tag.clone(),
-            source,
-            state,
-        })
-        .collect::<Vec<_>>();
-    normalize_link_tags(&mut all_tags);
-
-    let mut set = build_tag_set(all_tags);
-    if set.primary_visible_tag.is_none() {
-        set.primary_visible_tag = meta.primary_tag;
-    }
-    set
-}
-
 fn normalize_link_tags(tags: &mut Vec<LinkTag>) {
     let mut seen = HashSet::new();
-    tags.retain(|tag| seen.insert(tag.tag.to_ascii_lowercase()));
+    tags.retain(|tag| {
+        let key = tag.tag.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return false;
+        }
+        seen.insert(key)
+    });
     tags.sort_by(|left, right| {
         source_rank(left.source)
             .cmp(&source_rank(right.source))
+            .then_with(|| left.rank_index.cmp(&right.rank_index))
+            .then_with(|| {
+                right
+                    .confidence
+                    .partial_cmp(&left.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| left.tag.cmp(&right.tag))
     });
 }
@@ -606,6 +744,7 @@ fn build_tag_set(all_tags: Vec<LinkTag>) -> TagSet {
         .iter()
         .filter(|entry| is_visible_state(entry.state))
         .map(|entry| entry.tag.clone())
+        .take(5)
         .collect::<Vec<_>>();
     let user_tags = all_tags
         .iter()
@@ -629,28 +768,35 @@ fn source_rank(source: TaggingSource) -> u8 {
     }
 }
 
+fn tag_kind_rank(kind: TagKind) -> u8 {
+    match kind {
+        TagKind::Topic => 0,
+        TagKind::Action => 1,
+    }
+}
+
 fn is_visible_state(state: TagState) -> bool {
     matches!(state, TagState::User | TagState::AiApproved)
 }
 
-async fn ensure_tag_with_state(
+async fn ensure_topic_tag_with_state(
     connection: &impl ConnectionTrait,
     raw_name: &str,
     state_if_missing: TagState,
 ) -> Result<i32, DbErr> {
     let (name, name_key) = normalize_tag_name(raw_name);
     if name_key.is_empty() {
-        return Err(DbErr::Custom("tag name is empty".to_string()));
+        return Err(DbErr::Custom("topic tag name is empty".to_string()));
     }
 
-    if let Some(existing) = tag::Entity::find()
-        .filter(tag::Column::NameKey.eq(name_key.clone()))
+    if let Some(existing) = topic_tag::Entity::find()
+        .filter(topic_tag::Column::NameKey.eq(name_key.clone()))
         .one(connection)
         .await?
     {
-        if state_if_missing == TagState::User && existing.state != tag::TagState::User {
-            let mut active: tag::ActiveModel = existing.clone().into();
-            active.state = Set(tag::TagState::User);
+        if state_if_missing == TagState::User && existing.state != topic_tag::TopicTagState::User {
+            let mut active: topic_tag::ActiveModel = existing.clone().into();
+            active.state = Set(topic_tag::TopicTagState::User);
             active.updated_at = Set(now_utc());
             active.update(connection).await?;
         }
@@ -658,10 +804,10 @@ async fn ensure_tag_with_state(
     }
 
     let now = now_utc();
-    let inserted = tag::ActiveModel {
+    let inserted = topic_tag::ActiveModel {
         name: Set(name),
         name_key: Set(name_key),
-        state: Set(map_state_to_model(state_if_missing)),
+        state: Set(map_topic_state_to_model(state_if_missing)),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
@@ -672,17 +818,85 @@ async fn ensure_tag_with_state(
     Ok(inserted.id)
 }
 
-async fn insert_hyperlink_tag(
+async fn ensure_action_tag_with_state(
+    connection: &impl ConnectionTrait,
+    raw_name: &str,
+    state_if_missing: TagState,
+) -> Result<i32, DbErr> {
+    let (name, name_key) = normalize_tag_name(raw_name);
+    if name_key.is_empty() {
+        return Err(DbErr::Custom("action tag name is empty".to_string()));
+    }
+
+    if let Some(existing) = action_tag::Entity::find()
+        .filter(action_tag::Column::NameKey.eq(name_key.clone()))
+        .one(connection)
+        .await?
+    {
+        if state_if_missing == TagState::User && existing.state != action_tag::ActionTagState::User
+        {
+            let mut active: action_tag::ActiveModel = existing.clone().into();
+            active.state = Set(action_tag::ActionTagState::User);
+            active.updated_at = Set(now_utc());
+            active.update(connection).await?;
+        }
+        return Ok(existing.id);
+    }
+
+    let now = now_utc();
+    let inserted = action_tag::ActiveModel {
+        name: Set(name),
+        name_key: Set(name_key),
+        state: Set(map_action_state_to_model(state_if_missing)),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(connection)
+    .await?;
+
+    Ok(inserted.id)
+}
+
+async fn insert_hyperlink_topic_tag(
     connection: &impl ConnectionTrait,
     hyperlink_id: i32,
-    tag_id: i32,
-    source: HyperlinkTagSource,
+    topic_tag_id: i32,
+    source: HyperlinkTopicTagSource,
+    confidence: f32,
+    rank_index: i32,
     now: sea_orm::entity::prelude::DateTime,
 ) -> Result<(), DbErr> {
-    hyperlink_tag::ActiveModel {
+    hyperlink_topic_tag::ActiveModel {
         hyperlink_id: Set(hyperlink_id),
-        tag_id: Set(tag_id),
+        topic_tag_id: Set(topic_tag_id),
         source: Set(source),
+        confidence: Set(confidence.clamp(0.0, 1.0)),
+        rank_index: Set(rank_index.max(0)),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    }
+    .insert(connection)
+    .await
+    .map(|_| ())
+}
+
+async fn insert_hyperlink_action_tag(
+    connection: &impl ConnectionTrait,
+    hyperlink_id: i32,
+    action_tag_id: i32,
+    source: HyperlinkActionTagSource,
+    confidence: f32,
+    rank_index: i32,
+    now: sea_orm::entity::prelude::DateTime,
+) -> Result<(), DbErr> {
+    hyperlink_action_tag::ActiveModel {
+        hyperlink_id: Set(hyperlink_id),
+        action_tag_id: Set(action_tag_id),
+        source: Set(source),
+        confidence: Set(confidence.clamp(0.0, 1.0)),
+        rank_index: Set(rank_index.max(0)),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
@@ -693,48 +907,70 @@ async fn insert_hyperlink_tag(
 }
 
 fn normalize_tag_name(raw: &str) -> (String, String) {
-    let normalized = raw.trim().to_string();
-    (normalized.clone(), normalized.to_ascii_lowercase())
+    let normalized = raw.trim().to_ascii_lowercase();
+    (normalized.clone(), normalized)
 }
 
-fn map_state_from_model(state: tag::TagState) -> TagState {
+fn map_topic_state_from_model(state: topic_tag::TopicTagState) -> TagState {
     match state {
-        tag::TagState::User => TagState::User,
-        tag::TagState::AiApproved => TagState::AiApproved,
-        tag::TagState::AiPending => TagState::AiPending,
-        tag::TagState::AiRejected => TagState::AiRejected,
+        topic_tag::TopicTagState::User => TagState::User,
+        topic_tag::TopicTagState::AiApproved => TagState::AiApproved,
+        topic_tag::TopicTagState::AiPending => TagState::AiPending,
+        topic_tag::TopicTagState::AiRejected => TagState::AiRejected,
     }
 }
 
-fn map_state_to_model(state: TagState) -> tag::TagState {
+fn map_action_state_to_model(state: TagState) -> action_tag::ActionTagState {
     match state {
-        TagState::User => tag::TagState::User,
-        TagState::AiApproved => tag::TagState::AiApproved,
-        TagState::AiPending => tag::TagState::AiPending,
-        TagState::AiRejected => tag::TagState::AiRejected,
+        TagState::User => action_tag::ActionTagState::User,
+        TagState::AiApproved => action_tag::ActionTagState::AiApproved,
+        TagState::AiPending => action_tag::ActionTagState::AiPending,
+        TagState::AiRejected => action_tag::ActionTagState::AiRejected,
     }
 }
 
-fn map_source_from_model(source: HyperlinkTagSource) -> TaggingSource {
+fn map_topic_state_to_model(state: TagState) -> topic_tag::TopicTagState {
+    match state {
+        TagState::User => topic_tag::TopicTagState::User,
+        TagState::AiApproved => topic_tag::TopicTagState::AiApproved,
+        TagState::AiPending => topic_tag::TopicTagState::AiPending,
+        TagState::AiRejected => topic_tag::TopicTagState::AiRejected,
+    }
+}
+
+fn map_topic_source_from_model(source: HyperlinkTopicTagSource) -> TaggingSource {
     match source {
-        HyperlinkTagSource::User => TaggingSource::User,
-        HyperlinkTagSource::Ai => TaggingSource::Ai,
+        HyperlinkTopicTagSource::User => TaggingSource::User,
+        HyperlinkTopicTagSource::Ai => TaggingSource::Ai,
     }
-}
-
-fn dedupe_i32(values: &[i32]) -> Vec<i32> {
-    let mut seen = HashSet::new();
-    let mut deduped = Vec::new();
-    for value in values {
-        if seen.insert(*value) {
-            deduped.push(*value);
-        }
-    }
-    deduped
 }
 
 fn now_utc() -> sea_orm::entity::prelude::DateTime {
     sea_orm::entity::prelude::DateTimeUtc::from(std::time::SystemTime::now()).naive_utc()
+}
+
+fn is_tag_candidate(value: &str) -> bool {
+    if value.is_empty() || value.len() > 48 {
+        return false;
+    }
+
+    if value.split_whitespace().count() > 4 {
+        return false;
+    }
+
+    let mut has_alpha = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphabetic() {
+            has_alpha = true;
+            continue;
+        }
+        if ch.is_ascii_digit() || ch == ' ' || ch == '-' || ch == '&' || ch == '/' {
+            continue;
+        }
+        return false;
+    }
+
+    has_alpha
 }
 
 async fn persist_tag_meta(
@@ -758,18 +994,6 @@ async fn persist_tag_meta(
     .map(|_| ())
 }
 
-async fn parse_artifact_payload(
-    artifact: &crate::entity::hyperlink_artifact::Model,
-) -> Result<LegacyTagMeta, DbErr> {
-    let payload = hyperlink_artifact::load_processing_payload(artifact).await?;
-    serde_json::from_slice::<LegacyTagMeta>(&payload).map_err(|error| {
-        DbErr::Custom(format!(
-            "failed to parse tag_meta artifact {}: {error}",
-            artifact.id
-        ))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,39 +1003,25 @@ mod tests {
         let normalized = normalize_ranked_tags_for_vocabulary(
             vec![
                 RankedTag {
-                    tag: "learn".to_string(),
-                    confidence: 0.2,
+                    tag: "Typography".to_string(),
+                    confidence: 0.9,
                 },
                 RankedTag {
-                    tag: "LEARN".to_string(),
+                    tag: "TYPOGRAPHY".to_string(),
                     confidence: 0.8,
                 },
                 RankedTag {
-                    tag: "reference".to_string(),
-                    confidence: 0.7,
-                },
-                RankedTag {
-                    tag: "unknown".to_string(),
-                    confidence: 0.9,
+                    tag: "bad".to_string(),
+                    confidence: 0.95,
                 },
             ],
-            &["learn".to_string(), "reference".to_string()],
-            0.3,
+            &["typography".to_string()],
+            0.35,
         );
 
-        assert_eq!(
-            normalized,
-            vec![
-                RankedTag {
-                    tag: "learn".to_string(),
-                    confidence: 0.8
-                },
-                RankedTag {
-                    tag: "reference".to_string(),
-                    confidence: 0.7
-                }
-            ]
-        );
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].tag, "typography");
+        assert_eq!(normalized[0].confidence, 0.9);
     }
 
     #[test]
@@ -819,35 +1029,42 @@ mod tests {
         let normalized = normalize_ranked_tags_with_discovery(
             vec![
                 RankedTag {
-                    tag: "learn".to_string(),
-                    confidence: 0.9,
-                },
-                RankedTag {
-                    tag: "Novel".to_string(),
+                    tag: "Type Foundry".to_string(),
                     confidence: 0.8,
                 },
+                RankedTag {
+                    tag: "Typ0?".to_string(),
+                    confidence: 0.7,
+                },
             ],
-            &["learn".to_string()],
-            0.3,
+            &["typography".to_string()],
+            0.35,
+            false,
         );
 
-        assert_eq!(normalized.len(), 2);
-        assert_eq!(normalized[0].tag, "learn");
-        assert_eq!(normalized[0].state_if_new, TagState::AiApproved);
-        assert_eq!(normalized[1].tag, "Novel");
-        assert_eq!(normalized[1].state_if_new, TagState::AiPending);
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].tag, "type foundry");
+        assert_eq!(normalized[0].state_if_new, TagState::AiPending);
     }
 
     #[test]
     fn parse_manual_tags_input_supports_commas_and_lines() {
-        let parsed = parse_manual_tags_input("learn, build\nreference\nlearn");
+        let parsed = parse_manual_tags_input("Typography, Tooling\nreference\nTypography");
         assert_eq!(
             parsed,
             vec![
-                "learn".to_string(),
-                "build".to_string(),
+                "typography".to_string(),
+                "tooling".to_string(),
                 "reference".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn is_tag_candidate_rejects_bad_tokens() {
+        assert!(is_tag_candidate("type foundry"));
+        assert!(!is_tag_candidate(""));
+        assert!(!is_tag_candidate("!!!!!"));
+        assert!(!is_tag_candidate("this has too many words in tag name now"));
     }
 }

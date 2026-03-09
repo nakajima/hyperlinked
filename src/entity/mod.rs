@@ -2,10 +2,14 @@
 
 pub mod prelude;
 
+pub mod action_tag;
 pub mod hyperlink;
+pub mod hyperlink_action_tag;
 pub mod hyperlink_artifact;
 pub mod hyperlink_processing_job;
 pub mod hyperlink_relation;
 pub mod hyperlink_tag;
 pub mod hyperlink_tombstone;
+pub mod hyperlink_topic_tag;
 pub mod tag;
+pub mod topic_tag;

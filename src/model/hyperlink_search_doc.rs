@@ -66,6 +66,43 @@ pub async fn clear_readable_text_for_hyperlink(
     Ok(result.rows_affected())
 }
 
+pub async fn load_readable_text_excerpt_for_hyperlink(
+    connection: &DatabaseConnection,
+    hyperlink_id: i32,
+    max_chars: usize,
+) -> Result<Option<String>, DbErr> {
+    let backend = connection.get_database_backend();
+    let row = connection
+        .query_one(Statement::from_sql_and_values(
+            backend,
+            r#"
+                SELECT readable_text
+                FROM hyperlink_search_doc
+                WHERE hyperlink_id = ?
+            "#
+            .to_string(),
+            vec![Value::from(hyperlink_id)],
+        ))
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let readable_text: String = row.try_get("", "readable_text")?;
+    let trimmed = readable_text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let excerpt = if trimmed.chars().count() <= max_chars {
+        trimmed.to_string()
+    } else {
+        trimmed.chars().take(max_chars).collect::<String>()
+    };
+    Ok(Some(excerpt))
+}
+
 pub fn is_search_doc_missing_error(error: &DbErr) -> bool {
     match error {
         DbErr::Exec(exec_error) => exec_error

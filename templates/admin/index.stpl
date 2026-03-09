@@ -26,6 +26,60 @@
           estimated <code class="font-mono text-[0.9em]"><%= self.format_usd_estimate(self.mathpix_usage.all_time.estimated_cost_usd) %></code>
           <span>(estimate based on public Mathpix pricing)</span>
         </p>
+        <% if !self.mathpix_usage.month.breakdown.is_empty() { %>
+          <section class="flex flex-col gap-2" data-admin-mathpix-breakdown-month>
+            <h4 class="text-sm font-semibold leading-6">Current month usage breakdown</h4>
+            <div class="overflow-x-auto">
+              <table class="min-w-max border-collapse bg-form-control text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top" aria-label="Current month Mathpix usage breakdown">
+                <thead>
+                  <tr>
+                    <th>Usage type</th>
+                    <th>Pricing class</th>
+                    <th>Count</th>
+                    <th>Estimated</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <% for item in self.mathpix_usage.month.breakdown.iter() { %>
+                    <tr>
+                      <td><code class="font-mono text-[0.9em]"><%= item.usage_type.as_str() %></code></td>
+                      <td><code class="font-mono text-[0.9em]"><%= item.cost_class.as_str() %></code></td>
+                      <td><%= item.count %></td>
+                      <td><code class="font-mono text-[0.9em]"><%= self.format_usd_estimate(item.estimated_cost_usd) %></code></td>
+                    </tr>
+                  <% } %>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        <% } %>
+        <% if !self.mathpix_usage.all_time.breakdown.is_empty() { %>
+          <section class="flex flex-col gap-2" data-admin-mathpix-breakdown-all-time>
+            <h4 class="text-sm font-semibold leading-6">All-time usage breakdown</h4>
+            <div class="overflow-x-auto">
+              <table class="min-w-max border-collapse bg-form-control text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top" aria-label="All-time Mathpix usage breakdown">
+                <thead>
+                  <tr>
+                    <th>Usage type</th>
+                    <th>Pricing class</th>
+                    <th>Count</th>
+                    <th>Estimated</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <% for item in self.mathpix_usage.all_time.breakdown.iter() { %>
+                    <tr>
+                      <td><code class="font-mono text-[0.9em]"><%= item.usage_type.as_str() %></code></td>
+                      <td><code class="font-mono text-[0.9em]"><%= item.cost_class.as_str() %></code></td>
+                      <td><%= item.count %></td>
+                      <td><code class="font-mono text-[0.9em]"><%= self.format_usd_estimate(item.estimated_cost_usd) %></code></td>
+                    </tr>
+                  <% } %>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        <% } %>
         <% if let Some(warning) = self.mathpix_usage.warning.as_deref() { %>
           <p class="text-sm text-tertiary" data-admin-mathpix-usage-warning>
             <%= warning %>
@@ -311,8 +365,18 @@
           </label>
 
           <label class="flex flex-col gap-1">
-            <span>Vocabulary (comma or newline separated)</span>
-            <textarea name="vocabulary" rows="6" class="w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"><%= self.tagging_vocabulary_lines() %></textarea>
+            <span>Topic vocabulary (comma or newline separated)</span>
+            <textarea name="topic_vocabulary" rows="6" class="w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"><%= self.tagging_vocabulary_lines() %></textarea>
+          </label>
+
+          <label class="flex flex-col gap-1">
+            <span>Action vocabulary (comma or newline separated)</span>
+            <textarea name="action_vocabulary" rows="4" class="w-full rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"><%= self.tagging_action_vocabulary_lines() %></textarea>
+          </label>
+
+          <label class="inline-flex items-start gap-2 text-sm">
+            <input type="checkbox" name="auto_approve_ai" value="1"<% if self.tagging_settings.auto_approve_ai { %> checked<% } %> class="mt-0.5 h-4 w-4 shrink-0 rounded border border-form-control-border bg-form-control accent-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+            <span>Auto-approve AI tags (off = pending review)</span>
           </label>
 
           <div>
@@ -334,7 +398,7 @@
 
       <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3" data-admin-pending-tags>
         <h3 class="text-lg font-semibold leading-7 tracking-tight">Pending discovered tags</h3>
-        <p class="text-sm text-tertiary">Select tags to approve. Approved tags are added to vocabulary.</p>
+        <p class="text-sm text-tertiary">Select tags to approve. Approved topic/action tags are added to their vocabulary list.</p>
         <% if self.pending_tags.is_empty() { %>
           <p class="text-sm text-tertiary">No pending tags.</p>
         <% } else { %>
@@ -342,8 +406,8 @@
             <div class="flex flex-col gap-1">
               <% for pending in self.pending_tags { %>
                 <label class="flex items-start gap-2 text-sm">
-                  <input type="checkbox" name="tag_ids" value="<%= pending.id %>" class="mt-0.5 h-4 w-4 shrink-0 rounded border border-form-control-border bg-form-control accent-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
-                  <span><%= pending.name %> (<%= pending.hyperlink_count %> links)</span>
+                  <input type="checkbox" name="tag_ids" value="<%= pending.encoded_id %>" class="mt-0.5 h-4 w-4 shrink-0 rounded border border-form-control-border bg-form-control accent-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+                  <span><%= pending.kind.as_str() %>: <%= pending.name %> (<%= pending.hyperlink_count %> links)</span>
                 </label>
               <% } %>
             </div>

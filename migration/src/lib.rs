@@ -20,6 +20,7 @@ mod m20260226_000017_add_hyperlink_artifact_size_index;
 mod m20260227_000018_create_app_kv_store;
 mod m20260306_000019_add_hyperlink_source_type;
 mod m20260306_000020_create_tags_and_hyperlink_tags;
+mod m20260309_000021_create_topic_and_action_tags;
 
 pub struct Migrator;
 
@@ -47,6 +48,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260227_000018_create_app_kv_store::Migration),
             Box::new(m20260306_000019_add_hyperlink_source_type::Migration),
             Box::new(m20260306_000020_create_tags_and_hyperlink_tags::Migration),
+            Box::new(m20260309_000021_create_topic_and_action_tags::Migration),
         ]
     }
 }

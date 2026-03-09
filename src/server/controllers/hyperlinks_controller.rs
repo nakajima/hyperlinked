@@ -3776,16 +3776,16 @@ mod tests {
                 INSERT INTO hyperlink (id, title, url, raw_url, source_type, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
                 VALUES
                     (1, 'ArXiv', 'https://arxiv.org/pdf/2602.11988', 'https://arxiv.org/pdf/2602.11988', 'pdf', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
-                INSERT INTO tag (id, name, name_key, state, created_at, updated_at)
+                INSERT INTO topic_tag (id, name, name_key, state, created_at, updated_at)
                 VALUES
                     (1, 'buy', 'buy', 'USER', '2026-02-19 00:00:01', '2026-02-19 00:00:01'),
                     (2, 'design', 'design', 'AI_APPROVED', '2026-02-19 00:00:02', '2026-02-19 00:00:02'),
                     (3, 'pending', 'pending', 'AI_PENDING', '2026-02-19 00:00:03', '2026-02-19 00:00:03');
-                INSERT INTO hyperlink_tag (id, hyperlink_id, tag_id, source, created_at, updated_at)
+                INSERT INTO hyperlink_topic_tag (id, hyperlink_id, topic_tag_id, source, confidence, rank_index, created_at, updated_at)
                 VALUES
-                    (1, 1, 1, 'USER', '2026-02-19 00:00:04', '2026-02-19 00:00:04'),
-                    (2, 1, 2, 'AI', '2026-02-19 00:00:05', '2026-02-19 00:00:05'),
-                    (3, 1, 3, 'AI', '2026-02-19 00:00:06', '2026-02-19 00:00:06');
+                    (1, 1, 1, 'USER', 1.0, 0, '2026-02-19 00:00:04', '2026-02-19 00:00:04'),
+                    (2, 1, 2, 'AI', 0.9, 1, '2026-02-19 00:00:05', '2026-02-19 00:00:05'),
+                    (3, 1, 3, 'AI', 0.8, 2, '2026-02-19 00:00:06', '2026-02-19 00:00:06');
             "#,
         ))
         .await;
