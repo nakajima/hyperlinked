@@ -497,6 +497,15 @@ async fn render_admin_tab(active_tab: AdminTab, state: &Context, headers: &Heade
             );
         }
     };
+    let queue_pending = match fetch_pending_queue_counts(&state.connection).await {
+        Ok(counts) => counts,
+        Err(err) => {
+            return response_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load queue pending counts: {err}"),
+            );
+        }
+    };
     let chromium = crate::server::chromium_diagnostics::current();
     let fonts = crate::server::font_diagnostics::current();
     let mathpix = crate::integrations::mathpix::current_status();
@@ -512,6 +521,7 @@ async fn render_admin_tab(active_tab: AdminTab, state: &Context, headers: &Heade
             &artifact_settings,
             &tagging_settings,
             &pending_tags,
+            &queue_pending,
             &chromium,
             &fonts,
             &mathpix,
@@ -3276,6 +3286,7 @@ struct AdminIndexTemplate<'a> {
     artifact_settings: &'a ArtifactCollectionSettings,
     tagging_settings: &'a TaggingSettings,
     pending_tags: &'a [hyperlink_tagging::PendingTag],
+    queue_pending: &'a crate::server::admin_jobs::QueuePendingCounts,
     has_missing_artifacts_to_process: bool,
     chromium: &'a ChromiumDiagnostics,
     fonts: &'a FontDiagnostics,
@@ -3348,6 +3359,7 @@ fn render_index(
     artifact_settings: &ArtifactCollectionSettings,
     tagging_settings: &TaggingSettings,
     pending_tags: &[hyperlink_tagging::PendingTag],
+    queue_pending: &crate::server::admin_jobs::QueuePendingCounts,
     chromium: &ChromiumDiagnostics,
     fonts: &FontDiagnostics,
     mathpix: &MathpixStatus,
@@ -3361,6 +3373,7 @@ fn render_index(
         artifact_settings,
         tagging_settings,
         pending_tags,
+        queue_pending,
         has_missing_artifacts_to_process: summary.snapshot_will_queue > 0
             || summary.og_will_queue > 0
             || summary.readability_will_queue > 0,
@@ -3684,6 +3697,11 @@ mod tests {
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
             &[],
+            &crate::server::admin_jobs::QueuePendingCounts {
+                pending: 0,
+                queued: 0,
+                processing: 0,
+            },
             &chromium,
             &fonts,
             &mathpix,
@@ -3714,6 +3732,11 @@ mod tests {
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
             &[],
+            &crate::server::admin_jobs::QueuePendingCounts {
+                pending: 0,
+                queued: 0,
+                processing: 0,
+            },
             &chromium,
             &fonts,
             &mathpix,
@@ -3761,6 +3784,11 @@ mod tests {
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
             &[],
+            &crate::server::admin_jobs::QueuePendingCounts {
+                pending: 0,
+                queued: 0,
+                processing: 0,
+            },
             &chromium,
             &fonts,
             &mathpix,
@@ -3795,6 +3823,11 @@ mod tests {
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
             &[],
+            &crate::server::admin_jobs::QueuePendingCounts {
+                pending: 0,
+                queued: 0,
+                processing: 0,
+            },
             &chromium,
             &fonts,
             &mathpix,
@@ -3828,6 +3861,11 @@ mod tests {
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
             &[],
+            &crate::server::admin_jobs::QueuePendingCounts {
+                pending: 0,
+                queued: 0,
+                processing: 0,
+            },
             &chromium,
             &fonts,
             &mathpix,
@@ -3872,6 +3910,11 @@ mod tests {
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
             &[],
+            &crate::server::admin_jobs::QueuePendingCounts {
+                pending: 0,
+                queued: 0,
+                processing: 0,
+            },
             &chromium,
             &fonts,
             &mathpix,
@@ -3916,6 +3959,11 @@ mod tests {
             &ArtifactCollectionSettings::default(),
             &default_tagging_settings(),
             &[],
+            &crate::server::admin_jobs::QueuePendingCounts {
+                pending: 0,
+                queued: 0,
+                processing: 0,
+            },
             &chromium,
             &fonts,
             &mathpix,
@@ -4234,6 +4282,13 @@ mod tests {
         let queue = server.get("/admin/queue").await;
         queue.assert_status_ok();
         let queue_body = queue.text();
+        assert!(queue_body.contains("Pending queue rows"));
+        assert!(queue_body.contains("data-admin-queue-pending>0<"));
+        assert!(queue_body.contains("data-admin-queue-queued>0<"));
+        assert!(queue_body.contains("data-admin-queue-processing>0<"));
+        assert!(queue_body.contains("href=\"/admin/jobs?status=queued\""));
+        assert!(queue_body.contains("href=\"/admin/jobs?status=processing\""));
+        assert!(queue_body.contains("href=\"/admin/jobs\""));
         assert!(queue_body.contains("Queue controls"));
         assert!(queue_body.contains("action=\"/admin/clear-queue\""));
         assert!(queue_body.contains("action=\"/admin/pause-queue\""));
@@ -4267,6 +4322,26 @@ mod tests {
         assert!(overview_body.contains("data-admin-version"));
         assert!(overview_body.contains(APP_VERSION));
         assert!(!overview_body.contains("Process all artifacts"));
+    }
+
+    #[tokio::test]
+    async fn queue_tab_shows_pending_counts_from_processing_task_rows() {
+        let (server, connection) = new_server("").await;
+        insert_queue_job(&connection, 1, "queued", r#"{"processing_job_id":1}"#).await;
+        insert_queue_job(&connection, 2, "processing", r#"{"processing_job_id":2}"#).await;
+        insert_queue_job(&connection, 3, "failed", r#"{"processing_job_id":3}"#).await;
+        insert_queue_job(&connection, 4, "completed", r#"{"processing_job_id":4}"#).await;
+
+        let queue = server.get("/admin/queue").await;
+        queue.assert_status_ok();
+        let body = queue.text();
+
+        assert!(body.contains("data-admin-queue-pending>2<"));
+        assert!(body.contains("data-admin-queue-queued>1<"));
+        assert!(body.contains("data-admin-queue-processing>1<"));
+        assert!(body.contains("href=\"/admin/jobs?status=queued\""));
+        assert!(body.contains("href=\"/admin/jobs?status=processing\""));
+        assert!(body.contains("href=\"/admin/jobs\""));
     }
 
     #[tokio::test]

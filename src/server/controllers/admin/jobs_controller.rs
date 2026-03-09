@@ -153,7 +153,7 @@ struct AdminJobsTemplate<'a> {
     next_page_href: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct QueuePendingCounts {
     pub(crate) pending: i64,
     pub(crate) queued: i64,

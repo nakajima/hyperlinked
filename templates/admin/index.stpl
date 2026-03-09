@@ -357,6 +357,32 @@
 
     <% if self.is_queue_tab() { %>
       <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+        <h3 class="text-lg font-semibold leading-7 tracking-tight">Pending queue rows</h3>
+        <p class="text-sm text-tertiary">
+          These counts match the Queue tab badge and include only ProcessingTask rows in queued or processing states.
+        </p>
+        <div class="flex flex-row flex-wrap gap-[0.4rem] text-sm">
+          <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
+            <span class="text-tertiary">Pending:</span>
+            <span data-admin-queue-pending><%= self.queue_pending.pending %></span>
+          </div>
+          <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
+            <span class="text-tertiary">Queued:</span>
+            <span data-admin-queue-queued><%= self.queue_pending.queued %></span>
+          </div>
+          <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
+            <span class="text-tertiary">Processing:</span>
+            <span data-admin-queue-processing><%= self.queue_pending.processing %></span>
+          </div>
+        </div>
+        <div class="flex flex-row flex-wrap items-center gap-[0.4rem] text-sm">
+          <a class="text-accent no-underline hover:text-accent/80" href="/admin/jobs?status=queued">View queued rows</a>
+          <a class="text-accent no-underline hover:text-accent/80" href="/admin/jobs?status=processing">View processing rows</a>
+          <a class="text-accent no-underline hover:text-accent/80" href="/admin/jobs">View all queue rows</a>
+        </div>
+      </section>
+
+      <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
         <h3 class="text-lg font-semibold leading-7 tracking-tight">Queue controls</h3>
         <p class="text-sm text-tertiary">
           Clear queued processing rows. Running, completed, and failed rows are not changed.
