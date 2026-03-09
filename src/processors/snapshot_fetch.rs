@@ -1,7 +1,9 @@
 use chromiumoxide::{
+    Page,
     browser::{Browser, BrowserConfig},
     cdp::browser_protocol::{
-        emulation::SetDeviceMetricsOverrideParams, page::CaptureScreenshotFormat,
+        emulation::{MediaFeature, SetDeviceMetricsOverrideParams},
+        page::CaptureScreenshotFormat,
     },
     page::ScreenshotParams,
 };
@@ -932,50 +934,107 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
         })?;
 
     let deadline = Instant::now() + SNAPSHOT_DEADLINE;
-    let source_response = match fetch_response_with_retry(
-        &client,
-        parsed.clone(),
-        MAX_HTML_BYTES,
-        deadline,
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(failure) => {
-            if snapshot_content_use_chromium() {
-                return match capture_html_with_chromium_response(parsed.clone(), deadline).await {
-                    Ok(chromium_response) => {
-                        capture_snapshot_from_html_response(
-                            &client,
-                            chromium_response,
-                            deadline,
-                            HtmlCaptureMethod::Chromium,
-                            false,
-                            None,
-                        )
-                        .await
-                    }
-                    Err(chromium_error) => Err(snapshot_capture_error(
+    if is_likely_pdf_url(&parsed) {
+        let source_response =
+            fetch_response_with_retry(&client, parsed.clone(), MAX_HTML_BYTES, deadline)
+                .await
+                .map_err(|failure| {
+                    snapshot_capture_error(
                         parsed.as_str(),
-                        "chromium_fallback",
-                        format!(
-                            "reqwest source capture failed: {}; chromium content capture failed: {chromium_error}",
-                            failure.final_error.message
-                        ),
+                        "html_fetch",
+                        failure.final_error.message,
                         failure.attempts,
-                    )),
-                };
+                    )
+                })?;
+        return capture_snapshot_from_source_response(
+            &client,
+            source_response,
+            deadline,
+            HtmlCaptureMethod::Reqwest,
+            false,
+            None,
+        )
+        .await;
+    }
+
+    match capture_html_with_chromium_response(parsed.clone(), deadline).await {
+        Ok(chromium_response) => {
+            if looks_like_pdf_viewer_dom(&chromium_response.body) {
+                let source_response =
+                    fetch_response_with_retry(&client, parsed.clone(), MAX_HTML_BYTES, deadline)
+                        .await
+                        .map_err(|failure| {
+                            snapshot_capture_error(
+                                parsed.as_str(),
+                                "reqwest_fallback",
+                                format!(
+                                    "chromium dump-dom looked like a PDF viewer; reqwest source capture failed: {}",
+                                    failure.final_error.message
+                                ),
+                                failure.attempts,
+                            )
+                        })?;
+                return capture_snapshot_from_source_response(
+                    &client,
+                    source_response,
+                    deadline,
+                    HtmlCaptureMethod::ReqwestFallback,
+                    true,
+                    Some(
+                        "chromium dump-dom looked like a PDF viewer; used reqwest source capture"
+                            .to_string(),
+                    ),
+                )
+                .await;
             }
 
-            return Err(snapshot_capture_error(
-                parsed.as_str(),
-                "html_fetch",
-                failure.final_error.message,
-                failure.attempts,
-            ));
+            capture_snapshot_from_source_response(
+                &client,
+                chromium_response,
+                deadline,
+                HtmlCaptureMethod::Chromium,
+                false,
+                None,
+            )
+            .await
         }
-    };
+        Err(chromium_error) => {
+            let source_response =
+                fetch_response_with_retry(&client, parsed.clone(), MAX_HTML_BYTES, deadline)
+                    .await
+                    .map_err(|failure| {
+                        snapshot_capture_error(
+                            parsed.as_str(),
+                            "chromium_fallback",
+                            format!(
+                                "chromium content capture failed: {chromium_error}; reqwest source capture failed: {}",
+                                failure.final_error.message
+                            ),
+                            failure.attempts,
+                        )
+                    })?;
 
+            capture_snapshot_from_source_response(
+                &client,
+                source_response,
+                deadline,
+                HtmlCaptureMethod::ReqwestFallback,
+                true,
+                Some(chromium_error),
+            )
+            .await
+        }
+    }
+}
+
+async fn capture_snapshot_from_source_response(
+    client: &reqwest::Client,
+    source_response: FetchedResponse,
+    deadline: Instant,
+    capture_method: HtmlCaptureMethod,
+    fallback_used: bool,
+    chromium_error: Option<String>,
+) -> Result<SnapshotCapture, SnapshotCaptureError> {
     let source_kind = classify_source_kind(
         source_response.content_type.as_deref(),
         &source_response.body,
@@ -997,55 +1056,13 @@ async fn capture_snapshot(url: &str) -> Result<SnapshotCapture, SnapshotCaptureE
         ));
     }
 
-    if snapshot_content_use_chromium() {
-        match capture_html_with_chromium_response(parsed.clone(), deadline).await {
-            Ok(chromium_response) => {
-                if looks_like_pdf_viewer_dom(&chromium_response.body) {
-                    return capture_snapshot_from_html_response(
-                        &client,
-                        source_response,
-                        deadline,
-                        HtmlCaptureMethod::ReqwestFallback,
-                        true,
-                        Some(
-                            "chromium dump-dom looked like a PDF viewer; used reqwest source capture"
-                                .to_string(),
-                        ),
-                    )
-                    .await;
-                }
-
-                return capture_snapshot_from_html_response(
-                    &client,
-                    chromium_response,
-                    deadline,
-                    HtmlCaptureMethod::Chromium,
-                    false,
-                    None,
-                )
-                .await;
-            }
-            Err(chromium_error) => {
-                return capture_snapshot_from_html_response(
-                    &client,
-                    source_response,
-                    deadline,
-                    HtmlCaptureMethod::ReqwestFallback,
-                    true,
-                    Some(chromium_error),
-                )
-                .await;
-            }
-        }
-    }
-
     capture_snapshot_from_html_response(
-        &client,
+        client,
         source_response,
         deadline,
-        HtmlCaptureMethod::Reqwest,
-        false,
-        None,
+        capture_method,
+        fallback_used,
+        chromium_error,
     )
     .await
 }
@@ -1388,8 +1405,16 @@ async fn capture_single_screenshot(
         Ok(capture) => Ok(capture),
         Err(exact_error) => {
             let exact_message = exact_error.message;
-            let disabled_for_job = exact_height_state.disable_for_job_on_error(&exact_message);
             let mut attempts = exact_error.attempts;
+            if should_skip_fixed_viewport_fallback_for_exact_error(&exact_message) {
+                return Err(ScreenshotCaptureFailure {
+                    message: format!(
+                        "exact-height screenshot capture failed with non-recoverable chromium startup error: {exact_message}"
+                    ),
+                    attempts,
+                });
+            }
+            let disabled_for_job = exact_height_state.disable_for_job_on_error(&exact_message);
             match capture_single_screenshot_fixed_viewport_with_retries(url, viewport, variant)
                 .await
             {
@@ -1553,6 +1578,7 @@ async fn capture_single_screenshot_exact_height_inner(
             .new_page("about:blank")
             .await
             .map_err(|err| format!("failed to create chromium page for screenshot: {err}"))?;
+        apply_screenshot_variant_media_emulation(&page, variant).await?;
         page.goto(url)
             .await
             .map_err(|err| format!("chromium screenshot navigation failed: {err}"))?;
@@ -1669,6 +1695,29 @@ fn screenshot_exact_height_enabled() -> bool {
     env_bool("SCREENSHOT_EXACT_HEIGHT_ENABLED", true)
 }
 
+fn screenshot_variant_media_features(variant: ScreenshotVariant) -> Option<Vec<MediaFeature>> {
+    match variant {
+        ScreenshotVariant::Dark => Some(vec![MediaFeature::new("prefers-color-scheme", "dark")]),
+        ScreenshotVariant::Light => None,
+    }
+}
+
+async fn apply_screenshot_variant_media_emulation(
+    page: &Page,
+    variant: ScreenshotVariant,
+) -> Result<(), String> {
+    let Some(features) = screenshot_variant_media_features(variant) else {
+        return Ok(());
+    };
+
+    page.emulate_media_features(features)
+        .await
+        .map(|_| ())
+        .map_err(|err| {
+            format!("failed to emulate chromium media features for screenshot variant: {err}")
+        })
+}
+
 async fn capture_single_screenshot_fixed_viewport(
     url: &str,
     viewport: Viewport,
@@ -1688,6 +1737,7 @@ async fn capture_single_screenshot_fixed_viewport(
             .new_page("about:blank")
             .await
             .map_err(|err| format!("failed to create chromium page for screenshot: {err}"))?;
+        apply_screenshot_variant_media_emulation(&page, variant).await?;
         page.goto(url)
             .await
             .map_err(|err| format!("chromium screenshot navigation failed: {err}"))?;
@@ -1958,10 +2008,6 @@ fn snapshot_content_render_wait_ms() -> u64 {
     )
 }
 
-fn snapshot_content_use_chromium() -> bool {
-    env_bool("SNAPSHOT_CONTENT_USE_CHROMIUM", true)
-}
-
 fn screenshot_timeout() -> Duration {
     Duration::from_secs(env_u64(
         "SCREENSHOT_TIMEOUT_SECS",
@@ -2046,6 +2092,10 @@ fn screenshot_retry_backoff_delay(attempt: usize) -> Duration {
     Duration::from_millis(base.saturating_add(jitter))
 }
 
+fn should_skip_fixed_viewport_fallback_for_exact_error(error: &str) -> bool {
+    is_chromium_startup_or_environment_error(error)
+}
+
 fn log_chromium_shutdown_warnings(warnings: &[String]) {
     for warning in warnings {
         tracing::warn!(warning = %warning, "chromium session shutdown warning");
@@ -2059,7 +2109,7 @@ fn exact_height_capture_error_retryable(error: &str) -> bool {
 fn screenshot_capture_error_retryable(error: &str) -> bool {
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("invalid screenshot url")
-        || normalized.contains("failed to launch chromium browser")
+        || is_chromium_startup_or_environment_error(error)
         || normalized.contains("page-height evaluation raised an exception")
         || normalized.contains("page-height evaluation returned a non-numeric result")
         || normalized.contains("page-height evaluation returned an invalid value")
@@ -2071,6 +2121,17 @@ fn screenshot_capture_error_retryable(error: &str) -> bool {
     }
 
     true
+}
+
+fn is_chromium_startup_or_environment_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("failed to launch chromium browser")
+        || normalized.contains("timed out waiting for chromium devtools endpoint")
+        || normalized.contains("running as root without --no-sandbox is not supported")
+        || normalized.contains("zygote_host_impl_linux.cc")
+        || normalized.contains("failed to create chromium runtime directory")
+        || normalized.contains("failed to set chromium runtime permissions")
+        || normalized.contains("/run/user/0")
 }
 
 fn is_exact_height_empty_payload_error(error: &str) -> bool {
@@ -2500,6 +2561,19 @@ fn is_pdf_content_type(content_type: &str) -> bool {
         .contains("application/pdf")
 }
 
+fn is_likely_pdf_url(url: &Url) -> bool {
+    let path = url.path();
+    if path.to_ascii_lowercase().ends_with(".pdf") {
+        return true;
+    }
+
+    url.path_segments().is_some_and(|segments| {
+        segments
+            .filter(|segment| !segment.is_empty())
+            .any(|segment| segment.eq_ignore_ascii_case("pdf"))
+    })
+}
+
 fn looks_like_pdf_viewer_dom(payload: &[u8]) -> bool {
     let lowercase = String::from_utf8_lossy(payload).to_ascii_lowercase();
     lowercase.contains("application/pdf")
@@ -2768,6 +2842,26 @@ mod tests {
     }
 
     #[test]
+    fn detects_likely_pdf_urls() {
+        let arxiv = Url::parse("https://arxiv.org/pdf/2602.11988").expect("valid arxiv url");
+        assert!(is_likely_pdf_url(&arxiv));
+
+        let suffix =
+            Url::parse("https://example.com/files/paper.PDF").expect("valid pdf suffix url");
+        assert!(is_likely_pdf_url(&suffix));
+    }
+
+    #[test]
+    fn does_not_detect_non_pdf_urls_as_likely_pdf() {
+        let html = Url::parse("https://example.com/posts/123").expect("valid html url");
+        assert!(!is_likely_pdf_url(&html));
+
+        let query_hint =
+            Url::parse("https://example.com/download?format=pdf").expect("valid query url");
+        assert!(!is_likely_pdf_url(&query_hint));
+    }
+
+    #[test]
     fn detects_pdf_viewer_dom_payloads() {
         let html = r#"
         <html><body>
@@ -2839,6 +2933,41 @@ mod tests {
     }
 
     #[test]
+    fn dark_screenshot_variant_sets_prefers_color_scheme_media_feature() {
+        let features = screenshot_variant_media_features(ScreenshotVariant::Dark)
+            .expect("dark variant should define media features");
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].name, "prefers-color-scheme");
+        assert_eq!(features[0].value, "dark");
+    }
+
+    #[test]
+    fn light_screenshot_variant_does_not_set_media_features() {
+        assert!(screenshot_variant_media_features(ScreenshotVariant::Light).is_none());
+    }
+
+    #[test]
+    fn chromium_launch_args_include_dark_flags_for_dark_variant() {
+        let args = chromium_launch_args(Some(ScreenshotVariant::Dark), 5_000);
+        assert!(args.iter().any(|arg| arg == "--force-dark-mode"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--enable-features=WebContentsForceDark")
+        );
+    }
+
+    #[test]
+    fn chromium_launch_args_exclude_dark_flags_for_light_variant() {
+        let args = chromium_launch_args(Some(ScreenshotVariant::Light), 5_000);
+        assert!(!args.iter().any(|arg| arg == "--force-dark-mode"));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--enable-features=WebContentsForceDark")
+        );
+    }
+
+    #[test]
     fn normalize_page_height_bounds_swaps_inverted_values() {
         let bounds = normalize_page_height_bounds(PageHeightBounds {
             min: 1800,
@@ -2895,12 +3024,31 @@ mod tests {
         assert!(!screenshot_capture_error_retryable(
             "failed to launch chromium browser: No such file or directory (os error 2)"
         ));
+        assert!(!screenshot_capture_error_retryable(
+            "timed out waiting for chromium devtools endpoint"
+        ));
+        assert!(!screenshot_capture_error_retryable(
+            "mkdir: cannot create directory '/run/user/0': Permission denied"
+        ));
     }
 
     #[test]
     fn exact_height_retryable_error_classifier_rejects_connection_reset() {
         assert!(!exact_height_capture_error_retryable(
             "failed to read chromium devtools response for `Emulation.setDeviceMetricsOverride`: WebSocket protocol error: Connection reset without closing handshake"
+        ));
+    }
+
+    #[test]
+    fn exact_height_skips_fixed_viewport_fallback_for_startup_errors() {
+        assert!(should_skip_fixed_viewport_fallback_for_exact_error(
+            "failed to launch chromium browser: No such file or directory (os error 2)"
+        ));
+        assert!(should_skip_fixed_viewport_fallback_for_exact_error(
+            "timed out waiting for chromium devtools endpoint"
+        ));
+        assert!(!should_skip_fixed_viewport_fallback_for_exact_error(
+            "chromium page-height evaluation returned a non-numeric result"
         ));
     }
 
