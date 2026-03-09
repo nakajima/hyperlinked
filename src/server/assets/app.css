@@ -249,6 +249,9 @@
   .mx-auto {
     margin-inline: auto;
   }
+  .mt-0 {
+    margin-top: calc(var(--spacing) * 0);
+  }
   .mt-0\.5 {
     margin-top: calc(var(--spacing) * 0.5);
   }
@@ -357,6 +360,9 @@
   .flex-1 {
     flex: 1;
   }
+  .flex-shrink {
+    flex-shrink: 1;
+  }
   .shrink-0 {
     flex-shrink: 0;
   }
@@ -410,6 +416,9 @@
   }
   .justify-center {
     justify-content: center;
+  }
+  .gap-0 {
+    gap: calc(var(--spacing) * 0);
   }
   .gap-0\.5 {
     gap: calc(var(--spacing) * 0.5);
@@ -536,10 +545,40 @@
   .bg-tertiary {
     background-color: var(--color-tertiary);
   }
+  .bg-tertiary\/6 {
+    background-color: color-mix(in srgb, oklch(47.6% 0.051 242) 6%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-tertiary) 6%, transparent);
+    }
+  }
+  .bg-tertiary\/10 {
+    background-color: color-mix(in srgb, oklch(47.6% 0.051 242) 10%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-tertiary) 10%, transparent);
+    }
+  }
+  .bg-tertiary\/25 {
+    background-color: color-mix(in srgb, oklch(47.6% 0.051 242) 25%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-tertiary) 25%, transparent);
+    }
+  }
   .bg-tertiary\/40 {
     background-color: color-mix(in srgb, oklch(47.6% 0.051 242) 40%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
       background-color: color-mix(in oklab, var(--color-tertiary) 40%, transparent);
+    }
+  }
+  .bg-tertiary\/50 {
+    background-color: color-mix(in srgb, oklch(47.6% 0.051 242) 50%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-tertiary) 50%, transparent);
+    }
+  }
+  .bg-tertiary\/65 {
+    background-color: color-mix(in srgb, oklch(47.6% 0.051 242) 65%, transparent);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--color-tertiary) 65%, transparent);
     }
   }
   .bg-transparent {
@@ -754,6 +793,9 @@
   .no-underline {
     text-decoration-line: none;
   }
+  .underline {
+    text-decoration-line: underline;
+  }
   .antialiased {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -763,6 +805,10 @@
   }
   .opacity-0 {
     opacity: 0%;
+  }
+  .outline {
+    outline-style: var(--tw-outline-style);
+    outline-width: 1px;
   }
   .filter {
     filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
@@ -1370,6 +1416,11 @@
   syntax: "*";
   inherits: false;
 }
+@property --tw-outline-style {
+  syntax: "*";
+  inherits: false;
+  initial-value: solid;
+}
 @property --tw-blur {
   syntax: "*";
   inherits: false;
@@ -1516,6 +1567,7 @@
       --tw-leading: initial;
       --tw-font-weight: initial;
       --tw-tracking: initial;
+      --tw-outline-style: solid;
       --tw-blur: initial;
       --tw-brightness: initial;
       --tw-contrast: initial;

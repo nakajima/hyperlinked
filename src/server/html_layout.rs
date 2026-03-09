@@ -29,9 +29,9 @@ impl BaseLayoutTemplate<'_> {
 
     fn admin_tab_link_class(&self, href: &str) -> &'static str {
         if self.admin_tab_is_active(href) {
-            "inline-flex h-8 items-center gap-1 rounded-t-[0.3rem] border-b-2 border-accent bg-form-control px-3 text-accent no-underline"
+            "inline-flex h-8 items-center gap-1 rounded-t-[0.3rem] border-b-2 border-accent bg-tertiary/10 px-3 text-accent no-underline"
         } else {
-            "inline-flex h-8 items-center gap-1 rounded-t-[0.3rem] border-b-2 border-transparent bg-form-control/65 px-3 text-accent/80 no-underline hover:bg-form-control hover:text-accent"
+            "inline-flex h-8 items-center gap-1 rounded-t-[0.3rem] border-b-2 border-transparent bg-tertiary/25 px-3 text-accent/80 no-underline hover:bg-form-control hover:text-accent"
         }
     }
 }
