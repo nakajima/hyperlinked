@@ -2,7 +2,7 @@ use chromiumoxide::{
     Page,
     browser::{Browser, BrowserConfig},
     cdp::browser_protocol::{
-        emulation::{MediaFeature, SetDeviceMetricsOverrideParams},
+        emulation::{MediaFeature, SetAutoDarkModeOverrideParams, SetDeviceMetricsOverrideParams},
         page::CaptureScreenshotFormat,
     },
     page::ScreenshotParams,
@@ -1362,6 +1362,9 @@ async fn capture_screenshots(
                 if let Some(warning) = warning {
                     warnings.push(format!("dark screenshot fallback: {warning}"));
                 }
+                if let Some(warning) = dark_capture_matches_light_warning(&desktop_webp, &bytes) {
+                    warnings.push(warning);
+                }
                 let thumbnail = match build_square_thumbnail(&bytes, screenshot_thumbnail_size()) {
                     Ok(thumbnail) => Some(thumbnail),
                     Err(error) => {
@@ -1702,20 +1705,42 @@ fn screenshot_variant_media_features(variant: ScreenshotVariant) -> Option<Vec<M
     }
 }
 
+fn screenshot_variant_auto_dark_mode_enabled(variant: ScreenshotVariant) -> bool {
+    matches!(variant, ScreenshotVariant::Dark)
+}
+
+fn dark_capture_matches_light_warning(light: &[u8], dark: &[u8]) -> Option<String> {
+    (light == dark).then_some(
+        "dark screenshot matched light screenshot bytes; page may not expose a distinct dark theme under automation"
+            .to_string(),
+    )
+}
+
 async fn apply_screenshot_variant_media_emulation(
     page: &Page,
     variant: ScreenshotVariant,
 ) -> Result<(), String> {
-    let Some(features) = screenshot_variant_media_features(variant) else {
-        return Ok(());
-    };
-
-    page.emulate_media_features(features)
-        .await
-        .map(|_| ())
-        .map_err(|err| {
+    if let Some(features) = screenshot_variant_media_features(variant) {
+        page.emulate_media_features(features).await.map_err(|err| {
             format!("failed to emulate chromium media features for screenshot variant: {err}")
-        })
+        })?;
+    }
+
+    if screenshot_variant_auto_dark_mode_enabled(variant) {
+        page.execute(
+            SetAutoDarkModeOverrideParams::builder()
+                .enabled(true)
+                .build(),
+        )
+        .await
+        .map_err(|err| {
+            format!(
+                "failed to enable chromium auto dark mode override for screenshot variant: {err}"
+            )
+        })?;
+    }
+
+    Ok(())
 }
 
 async fn capture_single_screenshot_fixed_viewport(
@@ -2944,6 +2969,32 @@ mod tests {
     #[test]
     fn light_screenshot_variant_does_not_set_media_features() {
         assert!(screenshot_variant_media_features(ScreenshotVariant::Light).is_none());
+    }
+
+    #[test]
+    fn dark_screenshot_variant_enables_auto_dark_mode_override() {
+        assert!(screenshot_variant_auto_dark_mode_enabled(
+            ScreenshotVariant::Dark
+        ));
+    }
+
+    #[test]
+    fn light_screenshot_variant_disables_auto_dark_mode_override() {
+        assert!(!screenshot_variant_auto_dark_mode_enabled(
+            ScreenshotVariant::Light
+        ));
+    }
+
+    #[test]
+    fn warns_when_dark_capture_matches_light_payload() {
+        let warning = dark_capture_matches_light_warning(b"same", b"same");
+        assert!(warning.is_some());
+    }
+
+    #[test]
+    fn does_not_warn_when_dark_capture_differs_from_light_payload() {
+        let warning = dark_capture_matches_light_warning(b"light", b"dark");
+        assert!(warning.is_none());
     }
 
     #[test]
