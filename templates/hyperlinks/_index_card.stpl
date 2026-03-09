@@ -37,14 +37,6 @@
         <span>
           <%- render_relative_time(&link.created_at) %>
         </span>
-        <% if !visible_tags.is_empty() { %>
-          <span>|</span>
-          <span class="inline-flex flex-row flex-wrap items-center gap-[0.4rem]">
-            <% for tag in visible_tags { %>
-              <span class="inline-flex whitespace-nowrap rounded-[0.25rem] border border-form-control-border bg-form-control px-[0.2rem] py-[0.2rem] text-xs leading-none text-tertiary"><%= tag %></span>
-            <% } %>
-          </span>
-        <% } %>
         <% if let Some(status) = status.as_ref() { %>
           <span>|</span>
           <% if matches!(status, IndexStatus::Processing) { %>
@@ -56,6 +48,14 @@
         <% } %>
         <span>|</span>
         <a class="text-tertiary no-underline hover:text-primary" href="/hyperlinks/<%= link.id %>">Details</a>
+        <% if !visible_tags.is_empty() { %>
+          <span>|</span>
+          <span class="inline-flex flex-row flex-wrap items-center gap-[0.4rem] uppercase">
+            <% for tag in visible_tags { %>
+              <span class="inline-flex whitespace-nowrap rounded-[0.25rem] border border-form-control-border bg-form-control px-[0.2rem] py-[0.2rem] text-xs leading-none text-tertiary"><%= tag %></span>
+            <% } %>
+          </span>
+        <% } %>
       </div>
     </div>
   </article>
