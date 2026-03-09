@@ -1,6 +1,6 @@
 <section class="flex flex-col gap-4" aria-labelledby="show-link-heading">
-  <section class="flex flex-col gap-3 md:flex-row md:items-stretch md:gap-6">
-    <article class="flex flex-col gap-3 md:min-h-0 md:min-w-0 md:flex-1">
+  <section class="flex flex-col gap-3">
+    <article class="flex flex-col gap-3">
       <h2 class="text-2xl font-semibold leading-8 tracking-tight"><%= self.display_title() %></h2>
       <p>
         <a href="<%= self.link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= self.link.id %>" class="break-all text-sm text-accent no-underline hover:text-accent/80"><%= self.link.url %></a>
@@ -20,12 +20,12 @@
         </div>
         <% if self.link.updated_at.format("%b %d, %Y %H:%M UTC").to_string() != self.link.created_at.format("%b %d, %Y %H:%M UTC").to_string() { %>
         <div class="flex flex-row gap-1">
-        <dt>Updated</dt>
+        <dt>Updated:</dt>
         <dd><%- render_relative_time(&self.link.updated_at) %></dd>
         </div>
         <% } %>
         <div class="flex flex-row gap-1">
-        <dt>Last clicked</dt>
+        <dt>Last clicked:</dt>
         <dd>
           <% if let Some(last_clicked_at) = self.link.last_clicked_at.as_ref() { %>
             <%- render_relative_time(&last_clicked_at) %>
@@ -35,11 +35,11 @@
         </dd>
         </div>
         <div class="flex flex-row gap-1">
-        <dt>Processing state</dt>
+        <dt>Processing state:</dt>
         <dd class="capitalize"><%= self.processing_state() %></dd>
         </div>
         <div class="flex flex-row gap-1">
-        <dt>Total clicks</dt>
+        <dt>Total clicks:</dt>
         <dd><%= self.link.clicks_count %></dd>
         </div>
       </dl>
@@ -112,31 +112,31 @@
 
     <% if let Some(summary) = self.og_summary() { %>
       <% if summary.has_values() { %>
-        <aside class="flex w-full flex-col gap-2 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3 text-sm md:w-80 md:flex-none">
+        <section class="flex w-full flex-col gap-2 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3 text-sm">
           <h4 class="text-base font-semibold leading-6">Open Graph</h4>
           <dl class="flex flex-col gap-2">
             <% if let Some(title) = summary.title() { %>
               <div class="flex flex-col gap-0.5">
                 <dt class="text-subdued">Title</dt>
-                <dd><%= title %></dd>
+                <dd class="break-words"><%= title %></dd>
               </div>
             <% } %>
             <% if let Some(description) = summary.description() { %>
               <div class="flex flex-col gap-0.5">
                 <dt class="text-subdued">Description</dt>
-                <dd><%= description %></dd>
+                <dd class="break-words"><%= description %></dd>
               </div>
             <% } %>
             <% if let Some(og_type) = summary.og_type() { %>
               <div class="flex flex-col gap-0.5">
                 <dt class="text-subdued">Type</dt>
-                <dd><%= og_type %></dd>
+                <dd class="break-words"><%= og_type %></dd>
               </div>
             <% } %>
             <% if let Some(site_name) = summary.site_name() { %>
               <div class="flex flex-col gap-0.5">
                 <dt class="text-subdued">Site</dt>
-                <dd><%= site_name %></dd>
+                <dd class="break-words"><%= site_name %></dd>
               </div>
             <% } %>
             <% if let Some(url) = summary.url() { %>
@@ -146,8 +146,8 @@
               </div>
             <% } %>
             <% if let Some(image_url) = summary.image_url() { %>
-              <picture>
-                <img src="<%= image_url %>" />
+              <picture class="block max-w-full overflow-hidden rounded-[0.3rem] border border-form-control-border bg-surface">
+                <img class="block max-h-56 w-full object-contain" src="<%= image_url %>" loading="lazy" alt="Open Graph image preview" />
               </picture>
               <div class="flex flex-col gap-0.5">
                 <dt class="text-subdued">Image</dt>
@@ -158,7 +158,7 @@
           <% if let Some(og_json_path) = self.og_meta_inline_path() { %>
             <p><a class="text-accent no-underline hover:text-accent/80" href="<%= og_json_path %>" target="_blank" rel="noopener noreferrer">View full Open Graph JSON</a></p>
           <% } %>
-        </aside>
+        </section>
       <% } %>
     <% } %>
   </section>

@@ -1,9 +1,17 @@
 use axum::response::Html;
 use sailfish::{RenderError, TemplateOnce};
+use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
 
 use crate::server::flash::{Flash, FlashName};
 
 const POINTER_LOGO_SVG: &str = include_str!("assets/pointer.svg");
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const ASSET_TOKEN_PATHS: [&str; 3] = [
+    "src/server/assets/app.css",
+    "src/server/assets/fonts.css",
+    "src/server/assets/app.js",
+];
 
 #[derive(TemplateOnce)]
 #[template(path = "layout/base.stpl")]
@@ -16,6 +24,7 @@ struct BaseLayoutTemplate<'a> {
     alert_flash: Option<String>,
     show_admin_warning_badge: bool,
     active_admin_tab_href: Option<&'a str>,
+    asset_version_token: String,
 }
 
 impl BaseLayoutTemplate<'_> {
@@ -98,9 +107,33 @@ fn page_with_flags(
         alert_flash,
         show_admin_warning_badge,
         active_admin_tab_href,
+        asset_version_token: asset_version_token(),
     }
     .render_once()
     .map(Html)
+}
+
+fn asset_version_token() -> String {
+    let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut latest_modified_millis = 0u128;
+    for relative_path in ASSET_TOKEN_PATHS {
+        let Ok(metadata) = std::fs::metadata(source_root.join(relative_path)) else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(duration) = modified.duration_since(UNIX_EPOCH) else {
+            continue;
+        };
+        latest_modified_millis = latest_modified_millis.max(duration.as_millis());
+    }
+
+    if latest_modified_millis == 0 {
+        APP_VERSION.to_string()
+    } else {
+        format!("{APP_VERSION}-{latest_modified_millis}")
+    }
 }
 
 #[cfg(test)]
@@ -168,7 +201,10 @@ mod tests {
         let html = page_with_flags("Title", "<p>Body</p>", &mut flash, None, false, None)
             .expect("layout should render")
             .0;
-        assert!(html.contains("href=\"/assets/favicon.png\""));
+        assert!(html.contains("href=\"/assets/favicon.png?v="));
+        assert!(html.contains("href=\"/assets/fonts.css?v="));
+        assert!(html.contains("href=\"/assets/app.css?v="));
+        assert!(html.contains("src=\"/assets/app.js?v="));
         assert!(html.contains("href=\"/favicon.ico\""));
     }
 

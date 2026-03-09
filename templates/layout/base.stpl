@@ -4,15 +4,15 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title><%= self.title %></title>
-    <link rel="icon" type="image/png" href="/assets/favicon.png" />
+    <link rel="icon" type="image/png" href="/assets/favicon.png?v=<%= self.asset_version_token %>" />
     <link rel="shortcut icon" href="/favicon.ico" />
     <link rel="stylesheet" href="https://use.typekit.net/bpw6fxi.css" />
-    <link rel="stylesheet" href="/assets/fonts.css" />
-    <link rel="stylesheet" href="/assets/app.css" />
+    <link rel="stylesheet" href="/assets/fonts.css?v=<%= self.asset_version_token %>" />
+    <link rel="stylesheet" href="/assets/app.css?v=<%= self.asset_version_token %>" />
     <script type="module" src="https://cdn.jsdelivr.net/npm/@github/relative-time-element/+esm"></script>
-    <script src="/assets/app.js" defer></script>
+    <script src="/assets/app.js?v=<%= self.asset_version_token %>" defer></script>
   </head>
-  <body class="min-h-svh bg-page font-sans text-primary antialiased [font-synthesis:none]">
+  <body class="min-h-svh bg-page font-sans text-primary [font-synthesis:none]">
     <% include!("../shared/_header.stpl"); %>
     <main class="mx-auto flex w-full max-w-[75rem] flex-col gap-3 px-3 pb-4 sm:px-6">
       <% if let Some(dev_restart_alert) = self.dev_restart_alert.as_ref() { %>
