@@ -3,7 +3,8 @@
 @layer theme, base, components, utilities;
 @layer theme {
   :root, :host {
-    --font-sans: "Lucida Grande", sans-serif;
+    --font-sans: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
+    'Noto Color Emoji';
     --font-mono: "iA Writer Mono S", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", "Courier New", monospace;
     --color-black: #000;
@@ -438,9 +439,6 @@
   .gap-\[0\.4rem\] {
     gap: 0.4rem;
   }
-  .gap-\[0\.25rem\] {
-    gap: 0.25rem;
-  }
   .overflow-hidden {
     overflow: hidden;
   }
@@ -756,10 +754,6 @@
   }
   .no-underline {
     text-decoration-line: none;
-  }
-  .antialiased {
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
   }
   .accent-accent {
     accent-color: var(--color-accent);

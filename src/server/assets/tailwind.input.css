@@ -4,7 +4,7 @@
 @source "../../../src/**/*.rs";
 
 @theme {
-  --font-sans: "Lucida Grande", sans-serif;
+  /* --font-sans: "Lucida Grande", sans-serif; */
   --font-mono:
     "iA Writer Mono S", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", "Courier New", monospace;
