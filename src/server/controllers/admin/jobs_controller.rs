@@ -41,10 +41,8 @@ pub fn routes() -> Router<Context> {
             "/admin/jobs/recover-orphans",
             routing::post(recover_orphans),
         )
-        .route(
-            "/admin/jobs/clear-failed",
-            routing::post(clear_failed_selected),
-        )
+        .route("/admin/jobs/clear-selected", routing::post(clear_selected))
+        .route("/admin/jobs/clear-failed", routing::post(clear_selected))
         .route(
             "/admin/jobs/clear-failed-all",
             routing::post(clear_failed_all),
@@ -121,7 +119,7 @@ struct QueueJobRow {
 struct AdminJobRowView {
     queue_id: i64,
     queue_status: String,
-    selectable_failed: bool,
+    selectable_for_clear: bool,
     processing_job_id: Option<i32>,
     processing_state: Option<String>,
     processing_kind: Option<String>,
@@ -263,7 +261,7 @@ async fn recover_orphans(State(state): State<Context>, headers: HeaderMap) -> Re
     )
 }
 
-async fn clear_failed_selected(
+async fn clear_selected(
     State(state): State<Context>,
     headers: HeaderMap,
     RawForm(raw_form): RawForm,
@@ -287,16 +285,16 @@ async fn clear_failed_selected(
             &headers,
             "/admin/jobs",
             FlashName::Notice,
-            "No failed queue rows selected.",
+            "No queue rows selected.",
         );
     }
 
-    let cleared = match set_failed_rows_cleared_by_ids(&state.connection, &queue_ids).await {
+    let cleared = match set_selected_rows_cleared_by_ids(&state.connection, &queue_ids).await {
         Ok(cleared) => cleared,
         Err(err) => {
             return response_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to clear selected failed rows: {err}"),
+                format!("failed to clear selected queue rows: {err}"),
             );
         }
     };
@@ -306,7 +304,7 @@ async fn clear_failed_selected(
         "/admin/jobs",
         FlashName::Notice,
         format!(
-            "Cleared {} failed queue row(s) out of {} selected.",
+            "Cleared {} queue row(s) out of {} selected.",
             cleared,
             queue_ids.len()
         ),
@@ -611,12 +609,12 @@ async fn enrich_queue_rows(
             (None, Some(queue)) => Some(queue.to_string()),
             (None, None) => None,
         };
-        let selectable_failed = row.queue_status == "failed";
+        let selectable_for_clear = row.queue_status != "cleared";
 
         rows.push(AdminJobRowView {
             queue_id: row.queue_id,
             queue_status: row.queue_status,
-            selectable_failed,
+            selectable_for_clear,
             processing_job_id: row.processing_job_id,
             processing_state,
             processing_kind,
@@ -718,7 +716,7 @@ async fn has_active_queue_row_for_processing_job(
     Ok(connection.query_one(statement).await?.is_some())
 }
 
-async fn set_failed_rows_cleared_by_ids(
+async fn set_selected_rows_cleared_by_ids(
     connection: &DatabaseConnection,
     queue_ids: &[i64],
 ) -> Result<u64, DbErr> {
@@ -732,7 +730,7 @@ async fn set_failed_rows_cleared_by_ids(
              updated_at = ?,
              last_finished_at = COALESCE(last_finished_at, ?)
          WHERE job_type = ?
-           AND status = 'failed'
+           AND status != 'cleared'
            AND id IN (",
     );
 
@@ -1253,7 +1251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_failed_selected_marks_only_selected_failed_rows_cleared() {
+    async fn clear_selected_marks_only_selected_rows_cleared() {
         let (server, connection) = new_server("").await;
 
         insert_queue_job(
@@ -1285,7 +1283,7 @@ mod tests {
         .await;
 
         let response = server
-            .post("/admin/jobs/clear-failed")
+            .post("/admin/jobs/clear-selected")
             .text("queue_id=2")
             .content_type("application/x-www-form-urlencoded")
             .await;
@@ -1295,6 +1293,51 @@ mod tests {
         assert_eq!(queue_status(&connection, 1).await, "failed");
         assert_eq!(queue_status(&connection, 2).await, "cleared");
         assert_eq!(queue_status(&connection, 3).await, "queued");
+    }
+
+    #[tokio::test]
+    async fn clear_selected_can_clear_processing_and_completed_rows() {
+        let (server, connection) = new_server("").await;
+
+        insert_queue_job(
+            &connection,
+            21,
+            "processing",
+            r#"{"processing_job_id":21}"#,
+            None,
+            processing_task_job_type(),
+        )
+        .await;
+        insert_queue_job(
+            &connection,
+            22,
+            "completed",
+            r#"{"processing_job_id":22}"#,
+            None,
+            processing_task_job_type(),
+        )
+        .await;
+        insert_queue_job(
+            &connection,
+            23,
+            "cleared",
+            r#"{"processing_job_id":23}"#,
+            None,
+            processing_task_job_type(),
+        )
+        .await;
+
+        let response = server
+            .post("/admin/jobs/clear-selected")
+            .text("queue_id=21&queue_id=22&queue_id=23")
+            .content_type("application/x-www-form-urlencoded")
+            .await;
+        response.assert_status_see_other();
+        response.assert_header("location", "/admin/jobs");
+
+        assert_eq!(queue_status(&connection, 21).await, "cleared");
+        assert_eq!(queue_status(&connection, 22).await, "cleared");
+        assert_eq!(queue_status(&connection, 23).await, "cleared");
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@
   <article class="flex flex-row items-start gap-2 min-w-0 sm:gap-4">
     <% let display_title = self.link_display_title(link); %>
     <% let is_pdf = self.link_is_pdf(link); %>
+    <% let visible_tags = self.link_visible_tags(link.id); %>
     <% if let Some(thumbnail_path) = self.thumbnail_inline_path(link.id) { %>
       <a href="/hyperlinks/<%= link.id %>" class="block h-16 w-16 shrink-0 overflow-hidden rounded" style="aspect-ratio: 1 / 1;">
         <picture class="block h-full w-full">
@@ -16,7 +17,7 @@
       <div class="h-16 w-16 shrink-0 rounded bg-tertiary" style="aspect-ratio: 1 / 1;"></div>
     <% } %>
 
-    <div class="flex flex-col gap-1 min-w-0">
+    <div class="flex flex-col gap-2 min-w-0">
       <h3 class="text-base font-bold min-w-0 leading-none">
         <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= link.id %>" class="block break-all no-underline hover:text-accent/80"><%= display_title.as_str() %></a>
       </h3>
@@ -25,13 +26,10 @@
         <blockquote class="border-l border-subdued px-2 py-2 text-sm leading-5"><%- snippet %></blockquote>
       <% } %>
 
-      <p class="flex w-full min-w-0 flex-row flex-wrap items-center gap-[0.4rem] text-sm leading-none">
-        <a class="min-w-0 flex-1 break-all text-tertiary no-underline hover:text-primary" href="<%= link.url %>" data-hyperlink-id="<%= link.id %>"><%= link.url %></a>
+      <p class="flex w-full min-w-0 flex-row flex-wrap items-start gap-[0.4rem] text-sm leading-none">
+        <a class="min-w-0 break-all text-tertiary no-underline hover:text-primary" href="<%= link.url %>" data-hyperlink-id="<%= link.id %>"><%= link.url %></a>
         <% if is_pdf { %>
-          <span class="inline-block whitespace-nowrap rounded-[0.25rem] bg-badge px-[0.2rem] py-1 text-[0.5rem] leading-[0.5rem] text-center align-baseline text-black">PDF</span>
-        <% } %>
-        <% if let Some(primary_tag) = self.link_primary_tag(link.id) { %>
-          <span class="whitespace-nowrap text-sm text-tertiary">Tag: <%= primary_tag %></span>
+          <span class="inline-flex whitespace-nowrap rounded-[0.25rem] bg-badge px-[0.2rem] py-[0.2rem] text-[0.5rem] leading-[0.5rem] text-center text-black">PDF</span>
         <% } %>
       </p>
       
@@ -39,6 +37,14 @@
         <span>
           <%- render_relative_time(&link.created_at) %>
         </span>
+        <% if !visible_tags.is_empty() { %>
+          <span>|</span>
+          <span class="inline-flex flex-row flex-wrap items-center gap-[0.4rem]">
+            <% for tag in visible_tags { %>
+              <span class="inline-flex whitespace-nowrap rounded-[0.25rem] border border-form-control-border bg-form-control px-[0.2rem] py-[0.2rem] text-xs leading-none text-tertiary"><%= tag %></span>
+            <% } %>
+          </span>
+        <% } %>
         <% if let Some(status) = status.as_ref() { %>
           <span>|</span>
           <% if matches!(status, IndexStatus::Processing) { %>

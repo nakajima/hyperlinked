@@ -1413,10 +1413,11 @@ impl<'a> HyperlinksIndexTemplate<'a> {
         matches!(hyperlink.source_type, HyperlinkSourceType::Pdf)
     }
 
-    fn link_primary_tag(&self, hyperlink_id: i32) -> Option<&str> {
+    fn link_visible_tags(&self, hyperlink_id: i32) -> &[String] {
         self.tags_by_hyperlink
             .get(&hyperlink_id)
-            .and_then(|meta| meta.primary_visible_tag.as_deref())
+            .map(|set| set.visible_tags.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -1628,16 +1629,15 @@ impl<'a> HyperlinksShowTemplate<'a> {
         matches!(hyperlink.source_type, HyperlinkSourceType::Pdf)
     }
 
-    fn link_primary_tag(&self, hyperlink_id: i32) -> Option<&str> {
+    fn link_visible_tags(&self, hyperlink_id: i32) -> &[String] {
         if hyperlink_id == self.link.id {
-            return self
-                .tag_set
-                .and_then(|set| set.primary_visible_tag.as_deref());
+            return self.visible_tags();
         }
 
         self.discovered_tags_by_hyperlink
             .get(&hyperlink_id)
-            .and_then(|set| set.primary_visible_tag.as_deref())
+            .map(|set| set.visible_tags.as_slice())
+            .unwrap_or(&[])
     }
 
     fn visible_tags(&self) -> &[String] {
@@ -2611,7 +2611,7 @@ mod tests {
         assert!(index_body.contains("data-filter-key=\"order\""));
         assert!(index_body.contains("data-discovered-filter"));
         assert!(!index_body.contains("id=\"scope-filter\""));
-        assert!(index_body.contains("class=\"flex flex-row gap-2 min-w-0 sm:gap-4\""));
+        assert!(index_body.contains("class=\"flex flex-row items-start gap-2 min-w-0 sm:gap-4\""));
         assert!(index_body.contains(&format!("/hyperlinks/{}\">Details", created.id)));
         assert!(!index_body.contains("/hyperlinks/1/visit"));
 
@@ -3767,6 +3767,38 @@ mod tests {
         let body = html.text();
         assert!(body.contains("ArXiv"));
         assert!(body.contains("PDF</span>"));
+    }
+
+    #[tokio::test]
+    async fn index_renders_visible_tag_chips_without_tag_prefix() {
+        let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'ArXiv', 'https://arxiv.org/pdf/2602.11988', 'https://arxiv.org/pdf/2602.11988', 'pdf', 0, 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO tag (id, name, name_key, state, created_at, updated_at)
+                VALUES
+                    (1, 'buy', 'buy', 'USER', '2026-02-19 00:00:01', '2026-02-19 00:00:01'),
+                    (2, 'design', 'design', 'AI_APPROVED', '2026-02-19 00:00:02', '2026-02-19 00:00:02'),
+                    (3, 'pending', 'pending', 'AI_PENDING', '2026-02-19 00:00:03', '2026-02-19 00:00:03');
+                INSERT INTO hyperlink_tag (id, hyperlink_id, tag_id, source, created_at, updated_at)
+                VALUES
+                    (1, 1, 1, 'USER', '2026-02-19 00:00:04', '2026-02-19 00:00:04'),
+                    (2, 1, 2, 'AI', '2026-02-19 00:00:05', '2026-02-19 00:00:05'),
+                    (3, 1, 3, 'AI', '2026-02-19 00:00:06', '2026-02-19 00:00:06');
+            "#,
+        ))
+        .await;
+
+        let html = server.get("/hyperlinks").await;
+        html.assert_status_ok();
+        let body = html.text();
+
+        assert!(body.contains("ArXiv"));
+        assert!(body.contains(">buy</span>"));
+        assert!(body.contains(">design</span>"));
+        assert!(!body.contains(">pending</span>"));
+        assert!(!body.contains("Tag: "));
     }
 
     #[tokio::test]
