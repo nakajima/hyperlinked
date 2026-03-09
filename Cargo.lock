@@ -2544,7 +2544,7 @@ dependencies = [
 [[package]]
 name = "lilqueue"
 version = "0.1.1"
-source = "git+https://github.com/nakajima/lilqueue?branch=main#83a74d84ffc43a9af50c05cb3facc568de99009f"
+source = "git+https://github.com/nakajima/lilqueue?branch=main#ffd45347a14753e057bd20e8566e3775f5050b7b"
 dependencies = [
  "async-trait",
  "axum",
