@@ -34,6 +34,8 @@ pub enum HyperlinkProcessingJobKind {
     SublinkDiscovery,
     #[sea_orm(string_value = "tag_classification")]
     TagClassification,
+    #[sea_orm(string_value = "tag_reclassify")]
+    TagReclassify,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]

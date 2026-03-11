@@ -202,6 +202,47 @@ pub async fn process_job(
                 }
             }
         }
+        HyperlinkProcessingJobKind::TagReclassify => {
+            match crate::processors::tag_classify::classify_hyperlink(
+                connection,
+                &mut hyperlink_active_model,
+                Some(running_job.id),
+                crate::processors::tag_classify::TagClassificationMode::DiscoverWithPending,
+            )
+            .await
+            {
+                Ok(output) => {
+                    if let Some(reason) = output.skipped_reason.as_deref() {
+                        tracing::info!(
+                            hyperlink_id = running_job.hyperlink_id,
+                            job_id = running_job.id,
+                            kind = "tag_reclassify",
+                            skipped_reason = reason,
+                            "tag reclassify skipped"
+                        );
+                    } else {
+                        tracing::info!(
+                            hyperlink_id = running_job.hyperlink_id,
+                            job_id = running_job.id,
+                            kind = "tag_reclassify",
+                            tag_count = output.tag_count,
+                            "tag reclassify completed"
+                        );
+                    }
+                    mark_job_succeeded(connection, running_job.id).await?;
+                }
+                Err(error) => {
+                    mark_job_failed(connection, running_job.id, &error.to_string()).await?;
+                    tracing::warn!(
+                        hyperlink_id = running_job.hyperlink_id,
+                        job_id = running_job.id,
+                        kind = "tag_reclassify",
+                        error = %error,
+                        "hyperlink processing job failed"
+                    );
+                }
+            }
+        }
     }
 
     Ok(())

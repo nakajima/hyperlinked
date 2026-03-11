@@ -609,9 +609,6 @@
   .text-center {
     text-align: center;
   }
-  .align-baseline {
-    vertical-align: baseline;
-  }
   .font-brand {
     font-family: var(--font-brand);
   }
@@ -674,6 +671,10 @@
   .leading-\[0\.5rem\] {
     --tw-leading: 0.5rem;
     line-height: 0.5rem;
+  }
+  .leading-\[0\.8rem\] {
+    --tw-leading: 0.8rem;
+    line-height: 0.8rem;
   }
   .leading-none {
     --tw-leading: 1;
@@ -922,6 +923,17 @@
     &:focus {
       --tw-outline-style: none;
       outline-style: none;
+    }
+  }
+  .active\:mt-1 {
+    &:active {
+      margin-top: calc(var(--spacing) * 1);
+    }
+  }
+  .active\:translate-y-\[1px\] {
+    &:active {
+      --tw-translate-y: 1px;
+      translate: var(--tw-translate-x) var(--tw-translate-y);
     }
   }
   .active\:bg-tertiary\/50 {
@@ -1457,6 +1469,21 @@
   inherits: false;
   initial-value: 0 0 #0000;
 }
+@property --tw-translate-x {
+  syntax: "*";
+  inherits: false;
+  initial-value: 0;
+}
+@property --tw-translate-y {
+  syntax: "*";
+  inherits: false;
+  initial-value: 0;
+}
+@property --tw-translate-z {
+  syntax: "*";
+  inherits: false;
+  initial-value: 0;
+}
 @property --tw-ease {
   syntax: "*";
   inherits: false;
@@ -1509,6 +1536,9 @@
       --tw-ring-offset-width: 0px;
       --tw-ring-offset-color: #fff;
       --tw-ring-offset-shadow: 0 0 #0000;
+      --tw-translate-x: 0;
+      --tw-translate-y: 0;
+      --tw-translate-z: 0;
       --tw-ease: initial;
     }
   }

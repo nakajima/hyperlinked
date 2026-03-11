@@ -18,8 +18,8 @@
     <% } %>
 
     <div class="flex flex-col gap-2 min-w-0">
-      <h3 class="text-base font-bold min-w-0 leading-none">
-        <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= link.id %>" class="block break-all no-underline hover:text-accent/80"><%= display_title.as_str() %></a>
+      <h3 class="text-base min-w-0 leading-none">
+        <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= link.id %>" class="block break-all no-underline hover:text-primary active:translate-y-[1px]"><%= display_title.as_str() %></a>
       </h3>
 
       <% if let Some(snippet) = match_snippet { %>
@@ -29,7 +29,7 @@
       <p class="flex w-full min-w-0 flex-row flex-wrap items-start gap-[0.4rem] text-sm leading-none">
         <a class="min-w-0 break-all text-tertiary no-underline hover:text-primary" href="<%= link.url %>" data-hyperlink-id="<%= link.id %>"><%= link.url %></a>
         <% if is_pdf { %>
-          <span class="inline-flex whitespace-nowrap rounded-[0.25rem] bg-badge px-[0.2rem] py-[0.2rem] text-[0.5rem] leading-[0.5rem] text-center text-black">PDF</span>
+          <span class="inline-flex whitespace-nowrap bg-badge px-[0.2rem] py-[0.2rem] text-[0.5rem] leading-[0.5rem] text-center text-black">PDF</span>
         <% } %>
       </p>
       
@@ -52,7 +52,7 @@
           <span>|</span>
           <span class="inline-flex flex-row flex-wrap items-center gap-[0.4rem] uppercase">
             <% for tag in visible_tags { %>
-              <span class="inline-flex whitespace-nowrap rounded-[0.25rem] border border-form-control-border bg-form-control px-[0.2rem] py-[0.2rem] text-xs leading-none text-tertiary"><%= tag %></span>
+              <span class="inline-flex whitespace-nowrap bg-form-control px-[0.2rem] py-[0.2rem] text-xs leading-none text-tertiary"><%= tag %></span>
             <% } %>
           </span>
         <% } %>

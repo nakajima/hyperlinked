@@ -58,7 +58,8 @@ impl ArtifactCollectionSettings {
             HyperlinkProcessingJobKind::Readability => self.collect_readability,
             HyperlinkProcessingJobKind::SublinkDiscovery
             | HyperlinkProcessingJobKind::Oembed
-            | HyperlinkProcessingJobKind::TagClassification => true,
+            | HyperlinkProcessingJobKind::TagClassification
+            | HyperlinkProcessingJobKind::TagReclassify => true,
         }
     }
 }

@@ -561,12 +561,25 @@ async fn start_tag_reclassify(State(state): State<Context>) -> Response {
     let manager = state.tag_reclassify.clone();
     let manager_for_job = manager.clone();
     let connection = state.connection.clone();
+    let processing_queue = state.processing_queue.clone();
 
     let started = manager.start_job(move |job_id| {
         let manager = manager_for_job.clone();
+        let processing_queue = processing_queue.clone();
         tokio::spawn(async move {
-            let result = run_tag_reclassify_job(&connection, &manager, job_id).await;
+            let result =
+                run_tag_reclassify_job(&connection, processing_queue.as_ref(), &manager, job_id)
+                    .await;
             if let Err(error) = result {
+                let snapshot = manager.snapshot();
+                manager.mark_failed(
+                    job_id,
+                    error.clone(),
+                    TagReclassifyProgress {
+                        processed: snapshot.processed.unwrap_or(0),
+                        total: snapshot.total.unwrap_or(0),
+                    },
+                );
                 tracing::warn!(job_id, error = %error, "tag reclassify job failed");
             }
         })
@@ -665,41 +678,90 @@ async fn approve_pending_tags(
 
 async fn run_tag_reclassify_job(
     connection: &DatabaseConnection,
+    processing_queue: Option<&ProcessingQueueSender>,
     manager: &crate::server::admin_tag_reclassify::AdminTagReclassifyManager,
     job_id: u64,
 ) -> Result<(), String> {
+    let Some(queue) = processing_queue else {
+        return Err("processing queue unavailable for tag reclassify".to_string());
+    };
+
     let hyperlinks = hyperlink::Entity::find()
         .order_by_asc(hyperlink::Column::Id)
         .all(connection)
         .await
         .map_err(|error| format!("failed to load hyperlinks for reclassify: {error}"))?;
-    let total = hyperlinks.len();
+    let hyperlink_ids = hyperlinks
+        .into_iter()
+        .map(|model| model.id)
+        .collect::<Vec<_>>();
+    let total = hyperlink_ids.len();
     let mut progress = TagReclassifyProgress {
         processed: 0,
         total,
     };
     manager.update_progress(job_id, progress);
 
-    for model in hyperlinks {
-        let mut active_model: hyperlink::ActiveModel = model.into();
-        if let Err(error) = crate::processors::tag_classify::classify_hyperlink(
+    let mut processing_job_ids = Vec::with_capacity(hyperlink_ids.len());
+    for hyperlink_id in hyperlink_ids {
+        let queued = hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
             connection,
-            &mut active_model,
-            None,
-            crate::processors::tag_classify::TagClassificationMode::DiscoverWithPending,
+            hyperlink_id,
+            HyperlinkProcessingJobKind::TagReclassify,
+            Some(queue),
         )
         .await
-        {
-            let message = format!(
-                "failed to classify hyperlink {}: {error}",
-                active_model.id.as_ref()
-            );
-            manager.mark_failed(job_id, message.clone(), progress);
-            return Err(message);
+        .map_err(|error| {
+            format!(
+                "failed to enqueue tag classification job for hyperlink {hyperlink_id}: {error}"
+            )
+        })?;
+        processing_job_ids.push(queued.id);
+    }
+
+    processing_job_ids.sort_unstable();
+    processing_job_ids.dedup();
+    progress.total = processing_job_ids.len();
+    manager.update_progress(job_id, progress);
+
+    if processing_job_ids.is_empty() {
+        manager.mark_ready(
+            job_id,
+            TagReclassifyCompletionSummary {
+                processed: 0,
+                total: 0,
+            },
+        );
+        return Ok(());
+    }
+
+    loop {
+        let (processed, failed) =
+            count_terminal_tag_reclassify_jobs(connection, &processing_job_ids)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "failed while monitoring reclassify queued jobs for job {job_id}: {error}"
+                    )
+                })?;
+
+        progress.processed = processed;
+        manager.update_progress(job_id, progress);
+
+        if processed >= progress.total {
+            if failed > 0 {
+                tracing::warn!(
+                    job_id,
+                    processed = progress.processed,
+                    total = progress.total,
+                    failed,
+                    "tag reclassify completed with failed hyperlinks"
+                );
+            }
+            break;
         }
 
-        progress.processed = progress.processed.saturating_add(1);
-        manager.update_progress(job_id, progress);
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
     manager.mark_ready(
@@ -710,6 +772,37 @@ async fn run_tag_reclassify_job(
         },
     );
     Ok(())
+}
+
+async fn count_terminal_tag_reclassify_jobs(
+    connection: &DatabaseConnection,
+    processing_job_ids: &[i32],
+) -> Result<(usize, usize), DbErr> {
+    if processing_job_ids.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let rows = hyperlink_processing_job::Entity::find()
+        .filter(hyperlink_processing_job::Column::Id.is_in(processing_job_ids.to_vec()))
+        .all(connection)
+        .await?;
+
+    let mut processed = 0usize;
+    let mut failed = 0usize;
+    for row in rows {
+        match row.state {
+            HyperlinkProcessingJobState::Succeeded => {
+                processed = processed.saturating_add(1);
+            }
+            HyperlinkProcessingJobState::Failed => {
+                processed = processed.saturating_add(1);
+                failed = failed.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    Ok((processed, failed))
 }
 
 async fn start_backup_export(State(state): State<Context>) -> Response {
@@ -3561,6 +3654,35 @@ mod tests {
 
     fn default_tagging_settings() -> TaggingSettings {
         TaggingSettings::default()
+    }
+
+    #[tokio::test]
+    async fn count_terminal_tag_reclassify_jobs_counts_only_terminal_states() {
+        let connection = test_support::new_memory_connection().await;
+        test_support::initialize_hyperlinks_schema(&connection).await;
+
+        connection
+            .execute_unprepared(
+                r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'A', 'https://example.com/a', 'https://example.com/a', 'html', 0, 0, NULL, '2026-03-10 00:00:00', '2026-03-10 00:00:00');
+                INSERT INTO hyperlink_processing_job (id, hyperlink_id, kind, state, error_message, queued_at, started_at, finished_at, created_at, updated_at)
+                VALUES
+                    (1, 1, 'tag_classification', 'queued', NULL, '2026-03-10 00:00:01', NULL, NULL, '2026-03-10 00:00:01', '2026-03-10 00:00:01'),
+                    (2, 1, 'tag_classification', 'running', NULL, '2026-03-10 00:00:02', '2026-03-10 00:00:03', NULL, '2026-03-10 00:00:02', '2026-03-10 00:00:03'),
+                    (3, 1, 'tag_classification', 'succeeded', NULL, '2026-03-10 00:00:04', '2026-03-10 00:00:05', '2026-03-10 00:00:06', '2026-03-10 00:00:04', '2026-03-10 00:00:06'),
+                    (4, 1, 'tag_classification', 'failed', 'timeout', '2026-03-10 00:00:07', '2026-03-10 00:00:08', '2026-03-10 00:00:09', '2026-03-10 00:00:07', '2026-03-10 00:00:09');
+                "#,
+            )
+            .await
+            .expect("seed should insert");
+
+        let (processed, failed) = count_terminal_tag_reclassify_jobs(&connection, &[1, 2, 3, 4])
+            .await
+            .expect("counts should load");
+
+        assert_eq!(processed, 2);
+        assert_eq!(failed, 1);
     }
 
     #[test]
