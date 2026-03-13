@@ -31,7 +31,11 @@ struct WidgetLocalStore {
         let message: String
     }
 
-    func listHyperlinks(configuration: ConfigurationAppIntent, limit: Int) throws -> [WidgetHyperlink] {
+    func listHyperlinks(
+        configuration: ConfigurationAppIntent,
+        limit: Int,
+        recordShown: Bool = true
+    ) throws -> [WidgetHyperlink] {
         guard limit > 0 else {
             return []
         }
@@ -90,69 +94,53 @@ struct WidgetLocalStore {
             }
         }
 
-        if configuration.rotateSlowly && !supportsLastShownInWidget {
-            let failureContext = WidgetRotationFailureContext(
-                dbOpenMode: opened.canWrite ? "read_write" : "read_only",
-                sqliteCode: SQLITE_ERROR,
-                sqliteMessage: "missing \(Self.lastShownInWidgetColumn) column",
-                stage: "schema_check"
+        if recordShown && configuration.rotateSlowly {
+            recordShownHyperlinks(
+                hyperlinks.map(\.id),
+                at: now,
+                supportsLastShownInWidget: supportsLastShownInWidget,
+                opened: opened,
+                database: database
             )
-            WidgetDiagnosticsBridge.recordRotationStampFailure(failureContext, at: now)
-            Self.logger.error(
-                "Widget rotation stamp unavailable; missing column \(Self.lastShownInWidgetColumn, privacy: .public)"
-            )
-        }
-
-        if shouldPrioritizeUnshown && !opened.canWrite {
-            let failureContext = WidgetRotationFailureContext(
-                dbOpenMode: "read_only",
-                sqliteCode: SQLITE_READONLY,
-                sqliteMessage: "database opened read-only; stamp write skipped",
-                stage: "open_database"
-            )
-            WidgetDiagnosticsBridge.recordRotationStampFailure(failureContext, at: now)
-            Self.logger.error(
-                "Widget rotation stamp skipped because database opened read-only"
-            )
-        }
-
-        if shouldPrioritizeUnshown, opened.canWrite, !hyperlinks.isEmpty {
-            let shownAt = Self.shownAtFormatter.string(from: now)
-            do {
-                try updateLastShownInWidget(
-                    hyperlinkIDs: hyperlinks.map(\.id),
-                    shownAt: shownAt,
-                    database: database
-                )
-                WidgetDiagnosticsBridge.recordRotationStampSuccess(at: now)
-            } catch let failure as SQLiteFailure {
-                let failureContext = WidgetRotationFailureContext(
-                    dbOpenMode: "read_write",
-                    sqliteCode: failure.code,
-                    sqliteMessage: failure.message,
-                    stage: failure.stage
-                )
-                WidgetDiagnosticsBridge.recordRotationStampFailure(failureContext, at: now)
-                Self.logger.error(
-                    "Failed to stamp widget display metadata. mode=read_write stage=\(failure.stage, privacy: .public) code=\(failure.code, privacy: .public) message=\(failure.message, privacy: .public)"
-                )
-            } catch {
-                let sqliteCode = sqlite3_errcode(database)
-                let sqliteMessage = String(cString: sqlite3_errmsg(database))
-                let failureContext = WidgetRotationFailureContext(
-                    dbOpenMode: "read_write",
-                    sqliteCode: sqliteCode,
-                    sqliteMessage: sqliteMessage,
-                    stage: "update_unknown"
-                )
-                WidgetDiagnosticsBridge.recordRotationStampFailure(failureContext, at: now)
-                Self.logger.debug(
-                    "Failed to stamp widget display metadata with unknown error: \(error.localizedDescription, privacy: .public)"
-                )
-            }
         }
 
         return hyperlinks
+    }
+
+    func recordShownHyperlinks(_ hyperlinkIDs: [Int], at shownAt: Date = .now) {
+        guard !hyperlinkIDs.isEmpty else {
+            return
+        }
+
+        guard let databaseURL = Self.databaseURL(),
+              FileManager.default.fileExists(atPath: databaseURL.path) else {
+            return
+        }
+
+        do {
+            let opened = try openDatabase(path: databaseURL.path)
+            let database = opened.handle
+            defer { sqlite3_close(database) }
+            sqlite3_busy_timeout(database, 1_000)
+
+            let supportsLastShownInWidget = Self.columnExists(
+                Self.lastShownInWidgetColumn,
+                in: Self.tableName,
+                database: database
+            )
+
+            recordShownHyperlinks(
+                hyperlinkIDs,
+                at: shownAt,
+                supportsLastShownInWidget: supportsLastShownInWidget,
+                opened: opened,
+                database: database
+            )
+        } catch {
+            Self.logger.debug(
+                "Failed to open widget local cache for rotation stamp: \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     private func hyperlink(from statement: OpaquePointer?) -> WidgetHyperlink? {
@@ -275,7 +263,7 @@ struct WidgetLocalStore {
             }
         }()
         let orderPrefix = prioritizeUnshown
-            ? "CASE WHEN last_shown_in_widget IS NULL OR last_shown_in_widget <= ? THEN 0 ELSE 1 END ASC, "
+            ? "CASE WHEN last_shown_in_widget IS NULL OR last_shown_in_widget <= ? THEN 0 ELSE 1 END ASC, COALESCE(last_shown_in_widget, '') ASC, "
             : ""
 
         return """
@@ -378,6 +366,80 @@ struct WidgetLocalStore {
             return nil
         }
         return String(cString: raw)
+    }
+
+    private func recordShownHyperlinks(
+        _ hyperlinkIDs: [Int],
+        at shownAt: Date,
+        supportsLastShownInWidget: Bool,
+        opened: OpenedDatabase,
+        database: OpaquePointer?
+    ) {
+        guard !hyperlinkIDs.isEmpty else {
+            return
+        }
+
+        if !supportsLastShownInWidget {
+            let failureContext = WidgetRotationFailureContext(
+                dbOpenMode: opened.canWrite ? "read_write" : "read_only",
+                sqliteCode: SQLITE_ERROR,
+                sqliteMessage: "missing \(Self.lastShownInWidgetColumn) column",
+                stage: "schema_check"
+            )
+            WidgetDiagnosticsBridge.recordRotationStampFailure(failureContext, at: shownAt)
+            Self.logger.error(
+                "Widget rotation stamp unavailable; missing column \(Self.lastShownInWidgetColumn, privacy: .public)"
+            )
+            return
+        }
+
+        guard opened.canWrite else {
+            let failureContext = WidgetRotationFailureContext(
+                dbOpenMode: "read_only",
+                sqliteCode: SQLITE_READONLY,
+                sqliteMessage: "database opened read-only; stamp write skipped",
+                stage: "open_database"
+            )
+            WidgetDiagnosticsBridge.recordRotationStampFailure(failureContext, at: shownAt)
+            Self.logger.error(
+                "Widget rotation stamp skipped because database opened read-only"
+            )
+            return
+        }
+
+        let shownAtText = Self.shownAtFormatter.string(from: shownAt)
+        do {
+            try updateLastShownInWidget(
+                hyperlinkIDs: hyperlinkIDs,
+                shownAt: shownAtText,
+                database: database
+            )
+            WidgetDiagnosticsBridge.recordRotationStampSuccess(at: shownAt)
+        } catch let failure as SQLiteFailure {
+            let failureContext = WidgetRotationFailureContext(
+                dbOpenMode: "read_write",
+                sqliteCode: failure.code,
+                sqliteMessage: failure.message,
+                stage: failure.stage
+            )
+            WidgetDiagnosticsBridge.recordRotationStampFailure(failureContext, at: shownAt)
+            Self.logger.error(
+                "Failed to stamp widget display metadata. mode=read_write stage=\(failure.stage, privacy: .public) code=\(failure.code, privacy: .public) message=\(failure.message, privacy: .public)"
+            )
+        } catch {
+            let sqliteCode = sqlite3_errcode(database)
+            let sqliteMessage = String(cString: sqlite3_errmsg(database))
+            let failureContext = WidgetRotationFailureContext(
+                dbOpenMode: "read_write",
+                sqliteCode: sqliteCode,
+                sqliteMessage: sqliteMessage,
+                stage: "update_unknown"
+            )
+            WidgetDiagnosticsBridge.recordRotationStampFailure(failureContext, at: shownAt)
+            Self.logger.debug(
+                "Failed to stamp widget display metadata with unknown error: \(error.localizedDescription, privacy: .public)"
+            )
+        }
     }
 
     private func normalizeDisplayText(_ value: String) -> String {

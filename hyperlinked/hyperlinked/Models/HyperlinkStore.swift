@@ -50,6 +50,41 @@ final class HyperlinkStore {
         try upsert(hyperlinks: [hyperlink])
     }
 
+    func replaceAll(hyperlinks: [Hyperlink]) throws {
+        let fetchedIDs = Set(hyperlinks.map(\.id))
+        var didDeleteExistingRows = false
+
+        try dbQueue.write { db in
+            if fetchedIDs.isEmpty {
+                didDeleteExistingRows = (try Hyperlink.deleteAll(db)) > 0
+                return
+            }
+
+            for hyperlink in hyperlinks {
+                try hyperlink.upsert(db)
+            }
+
+            let persistedIDs = try Int.fetchAll(
+                db,
+                sql: "SELECT id FROM \(DB.hyperlinkTableName)"
+            )
+            let idsToDelete = persistedIDs.filter { !fetchedIDs.contains($0) }
+            guard !idsToDelete.isEmpty else {
+                return
+            }
+
+            for id in idsToDelete {
+                _ = try Hyperlink.deleteOne(db, key: id)
+            }
+            didDeleteExistingRows = true
+        }
+
+        guard !hyperlinks.isEmpty || didDeleteExistingRows else {
+            return
+        }
+        timelineReloader.reloadHyperlinksWidgetTimeline()
+    }
+
     func apply(updatedBatch: UpdatedHyperlinksBatch) throws {
         guard !updatedBatch.changes.isEmpty else {
             return

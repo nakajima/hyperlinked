@@ -452,6 +452,7 @@ private enum WidgetPreviewData {
 
 struct HyperlinksProvider: AppIntentTimelineProvider {
     private static let refreshInterval: TimeInterval = 20 * 60
+    private static let timelineEntryCount = 6
 
     func placeholder(in context: Context) -> HyperlinksEntry {
         .placeholder
@@ -461,18 +462,19 @@ struct HyperlinksProvider: AppIntentTimelineProvider {
         if context.isPreview {
             return .preview(configuration: configuration)
         }
-        return await Self.loadEntry(configuration: configuration, family: context.family)
+        return await Self.loadSingleEntry(configuration: configuration, family: context.family)
     }
 
     func timeline(for configuration: ConfigurationAppIntent, in context: Context) async -> Timeline<HyperlinksEntry> {
-        let entry = await Self.loadEntry(configuration: configuration, family: context.family)
+        let entries = await Self.loadTimelineEntries(configuration: configuration, family: context.family)
+        let refreshDate = (entries.last?.date ?? .now).addingTimeInterval(Self.refreshInterval)
         return Timeline(
-            entries: [entry],
-            policy: .after(Date().addingTimeInterval(Self.refreshInterval))
+            entries: entries,
+            policy: .after(refreshDate)
         )
     }
 
-    private static func loadEntry(
+    private static func loadSingleEntry(
         configuration: ConfigurationAppIntent,
         family: WidgetFamily
     ) async -> HyperlinksEntry {
@@ -481,7 +483,8 @@ struct HyperlinksProvider: AppIntentTimelineProvider {
             let displayLimit = limit(for: family)
             let baseHyperlinks = try localStore.listHyperlinks(
                 configuration: configuration,
-                limit: displayLimit
+                limit: displayLimit,
+                recordShown: configuration.rotateSlowly
             )
             if baseHyperlinks.isEmpty {
                 return .empty(configuration: configuration)
@@ -509,6 +512,100 @@ struct HyperlinksProvider: AppIntentTimelineProvider {
                 "Failed to load widget links from local cache: \(error.localizedDescription, privacy: .public)"
             )
             return .error(configuration: configuration)
+        }
+    }
+
+    private static func loadTimelineEntries(
+        configuration: ConfigurationAppIntent,
+        family: WidgetFamily
+    ) async -> [HyperlinksEntry] {
+        guard configuration.rotateSlowly else {
+            return [await loadSingleEntry(configuration: configuration, family: family)]
+        }
+
+        do {
+            let localStore = WidgetLocalStore()
+            let displayLimit = limit(for: family)
+            let candidateLimit = max(displayLimit, displayLimit * Self.timelineEntryCount)
+            let baseHyperlinks = try localStore.listHyperlinks(
+                configuration: configuration,
+                limit: candidateLimit,
+                recordShown: false
+            )
+            guard !baseHyperlinks.isEmpty else {
+                return [.empty(configuration: configuration)]
+            }
+
+            let decorated = await WidgetVisualResolver.decorate(
+                hyperlinks: baseHyperlinks,
+                session: .shared
+            )
+            let startDate = Date()
+            let entryDates = (0..<Self.timelineEntryCount).map {
+                startDate.addingTimeInterval(Double($0) * Self.refreshInterval)
+            }
+            let plannedHyperlinkSets = plannedHyperlinkSets(
+                from: decorated,
+                displayLimit: displayLimit,
+                entryCount: entryDates.count
+            )
+
+            if let firstHyperlinks = plannedHyperlinkSets.first {
+                localStore.recordShownHyperlinks(firstHyperlinks.map(\.id), at: entryDates[0])
+            }
+
+            let rotationStampStatus = WidgetDiagnosticsBridge.rotationStampStatus()
+            return zip(entryDates, plannedHyperlinkSets).map { entryDate, hyperlinks in
+                HyperlinksEntry(
+                    date: entryDate,
+                    configuration: configuration,
+                    hyperlinks: hyperlinks,
+                    status: .loaded,
+                    rotationStampStatus: rotationStampStatus
+                )
+            }
+        } catch {
+            WidgetDiagnostics.cache.debug(
+                "Failed to build rotating widget timeline: \(error.localizedDescription, privacy: .public)"
+            )
+            return [.error(configuration: configuration)]
+        }
+    }
+
+    private static func plannedHyperlinkSets(
+        from hyperlinks: [WidgetHyperlink],
+        displayLimit: Int,
+        entryCount: Int
+    ) -> [[WidgetHyperlink]] {
+        guard !hyperlinks.isEmpty else {
+            return []
+        }
+
+        let windowSize = min(displayLimit, hyperlinks.count)
+        let step = max(1, windowSize)
+
+        return (0..<max(1, entryCount)).map { entryIndex in
+            let offset = (entryIndex * step) % hyperlinks.count
+            return rotatedWindow(
+                from: hyperlinks,
+                offset: offset,
+                limit: windowSize
+            )
+        }
+    }
+
+    private static func rotatedWindow(
+        from hyperlinks: [WidgetHyperlink],
+        offset: Int,
+        limit: Int
+    ) -> [WidgetHyperlink] {
+        guard !hyperlinks.isEmpty else {
+            return []
+        }
+
+        let windowSize = min(limit, hyperlinks.count)
+        return (0..<windowSize).map { index in
+            hyperlinks[(offset + index) % hyperlinks.count]
         }
     }
 

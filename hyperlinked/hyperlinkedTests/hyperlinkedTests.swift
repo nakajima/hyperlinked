@@ -130,7 +130,7 @@ struct hyperlinkedTests {
 
     @Test
     func upsertNonEmptyReloadsWidgetTimeline() throws {
-        let (store, reloader) = try makeStoreForWidgetReloadTesting()
+        let (store, reloader, _) = try makeStoreForWidgetReloadTesting()
 
         try store.upsert(hyperlinks: [makeHyperlink(id: 1)])
 
@@ -139,7 +139,7 @@ struct hyperlinkedTests {
 
     @Test
     func upsertEmptyDoesNotReloadWidgetTimeline() throws {
-        let (store, reloader) = try makeStoreForWidgetReloadTesting()
+        let (store, reloader, _) = try makeStoreForWidgetReloadTesting()
 
         try store.upsert(hyperlinks: [])
 
@@ -148,7 +148,7 @@ struct hyperlinkedTests {
 
     @Test
     func applyNonEmptyBatchReloadsWidgetTimeline() throws {
-        let (store, reloader) = try makeStoreForWidgetReloadTesting()
+        let (store, reloader, _) = try makeStoreForWidgetReloadTesting()
         let batch = UpdatedHyperlinksBatch(
             serverUpdatedAt: "2026-03-05T00:00:00Z",
             changes: [
@@ -168,7 +168,7 @@ struct hyperlinkedTests {
 
     @Test
     func applyEmptyBatchDoesNotReloadWidgetTimeline() throws {
-        let (store, reloader) = try makeStoreForWidgetReloadTesting()
+        let (store, reloader, _) = try makeStoreForWidgetReloadTesting()
         let batch = UpdatedHyperlinksBatch(
             serverUpdatedAt: "2026-03-05T00:00:00Z",
             changes: []
@@ -181,14 +181,46 @@ struct hyperlinkedTests {
 
     @Test
     func clearAllReloadsWidgetTimeline() throws {
-        let (store, reloader) = try makeStoreForWidgetReloadTesting()
+        let (store, reloader, _) = try makeStoreForWidgetReloadTesting()
 
         try store.clearAll()
 
         #expect(reloader.reloadCount == 1)
     }
 
-    private func makeStoreForWidgetReloadTesting() throws -> (HyperlinkStore, WidgetTimelineReloaderSpy) {
+    @Test
+    func replaceAllRemovesDeletedRowsAndReloadsWidgetTimeline() throws {
+        let (store, reloader, dbQueue) = try makeStoreForWidgetReloadTesting()
+
+        try store.upsert(hyperlinks: [makeHyperlink(id: 1), makeHyperlink(id: 2)])
+        reloader.reset()
+
+        try store.replaceAll(hyperlinks: [makeHyperlink(id: 2), makeHyperlink(id: 3)])
+
+        let persistedIDs = try dbQueue.read {
+            try Int.fetchAll($0, sql: "SELECT id FROM \(DB.hyperlinkTableName) ORDER BY id ASC")
+        }
+        #expect(persistedIDs == [2, 3])
+        #expect(reloader.reloadCount == 1)
+    }
+
+    @Test
+    func replaceAllEmptyClearsRowsAndReloadsWidgetTimeline() throws {
+        let (store, reloader, dbQueue) = try makeStoreForWidgetReloadTesting()
+
+        try store.upsert(hyperlinks: [makeHyperlink(id: 1)])
+        reloader.reset()
+
+        try store.replaceAll(hyperlinks: [])
+
+        let persistedCount = try dbQueue.read {
+            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM \(DB.hyperlinkTableName)") ?? 0
+        }
+        #expect(persistedCount == 0)
+        #expect(reloader.reloadCount == 1)
+    }
+
+    private func makeStoreForWidgetReloadTesting() throws -> (HyperlinkStore, WidgetTimelineReloaderSpy, DatabaseQueue) {
         let reloader = WidgetTimelineReloaderSpy()
         let dbQueue = try DatabaseQueue(path: ":memory:")
         try dbQueue.write { db in
@@ -214,7 +246,7 @@ struct hyperlinkedTests {
             }
         }
         let store = HyperlinkStore(dbQueue: dbQueue, timelineReloader: reloader)
-        return (store, reloader)
+        return (store, reloader, dbQueue)
     }
 
     private func makeHyperlink(id: Int) -> Hyperlink {
@@ -246,5 +278,9 @@ private final class WidgetTimelineReloaderSpy: WidgetTimelineReloading {
 
     func reloadHyperlinksWidgetTimeline() {
         reloadCount += 1
+    }
+
+    func reset() {
+        reloadCount = 0
     }
 }

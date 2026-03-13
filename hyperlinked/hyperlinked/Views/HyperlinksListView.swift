@@ -22,6 +22,7 @@ struct HyperlinksListView: View {
     @State private var activeSheet: ActiveSheet?
     @State private var isSearchPresented = false
     @State private var queryText = ""
+    @State private var latestServerUpdatedAt: String?
     @AppStorage("hyperlinks.view_options.show_discovered_links")
     private var showDiscoveredLinks = false
     @AppStorage("hyperlinks.view_options.order_override")
@@ -144,10 +145,14 @@ struct HyperlinksListView: View {
             )
         }
         .task(id: appModel.selectedServerURL?.absoluteString) {
+            latestServerUpdatedAt = nil
             await loadHyperlinks()
         }
         .task(id: appModel.selectedServerURL?.absoluteString) {
             await retryPendingOutboxLoop()
+        }
+        .task(id: appModel.selectedServerURL?.absoluteString) {
+            await refreshUpdatedHyperlinksLoop()
         }
         .refreshable {
             await loadHyperlinks()
@@ -160,6 +165,9 @@ struct HyperlinksListView: View {
             if !hasFreeText, orderOverride == .relevance {
                 orderOverrideRawValue = ""
             }
+        }
+        .onChange(of: appModel.selectedServerURL?.absoluteString) {
+            latestServerUpdatedAt = nil
         }
         .onReceive(
             NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
@@ -285,7 +293,8 @@ struct HyperlinksListView: View {
         do {
             await retryPendingOutbox(using: client)
             let fetched = try await client.listHyperlinks()
-            persistHyperlinks(hyperlinks: fetched)
+            replaceCachedHyperlinks(hyperlinks: fetched)
+            latestServerUpdatedAt = newestUpdatedAt(in: fetched) ?? latestServerUpdatedAt
             errorMessage = nil
         } catch is CancellationError {
             return
@@ -293,6 +302,35 @@ struct HyperlinksListView: View {
             return
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func refreshUpdatedHyperlinksLoop() async {
+        while !Task.isCancelled {
+            guard let client = appModel.apiClient else {
+                return
+            }
+
+            guard let cursor = latestServerUpdatedAt ?? newestUpdatedAt(in: cachedAllHyperlinks) else {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                continue
+            }
+
+            do {
+                let batch = try await client.fetchUpdatedHyperlinks(updatedAt: cursor)
+                applyUpdatedHyperlinks(batch)
+                latestServerUpdatedAt = batch.serverUpdatedAt
+            } catch is CancellationError {
+                return
+            } catch let urlError as URLError where urlError.code == .cancelled {
+                return
+            } catch {
+                Self.logger.debug(
+                    "Failed to refresh updated hyperlinks: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
         }
     }
 
@@ -314,6 +352,17 @@ struct HyperlinksListView: View {
         _ = await coordinator.drainDueItems(limit: 20)
     }
 
+    private func replaceCachedHyperlinks(hyperlinks: [Hyperlink]) {
+        do {
+            let store = try HyperlinkStore.openShared()
+            try store.replaceAll(hyperlinks: hyperlinks)
+        } catch {
+            Self.logger.debug(
+                "Failed to replace cached hyperlinks: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
     private func persistHyperlinks(hyperlinks: [Hyperlink]) {
         guard !hyperlinks.isEmpty else {
             return
@@ -325,6 +374,27 @@ struct HyperlinksListView: View {
         } catch {
             Self.logger.debug("Failed to persist hyperlinks: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    private func applyUpdatedHyperlinks(_ batch: UpdatedHyperlinksBatch) {
+        guard !batch.changes.isEmpty else {
+            return
+        }
+
+        do {
+            let store = try HyperlinkStore.openShared()
+            try store.apply(updatedBatch: batch)
+        } catch {
+            Self.logger.debug(
+                "Failed to apply updated hyperlinks: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    private func newestUpdatedAt(in hyperlinks: [Hyperlink]) -> String? {
+        hyperlinks
+            .map(\.updatedAt)
+            .max()
     }
 
     private func filterHyperlinks(_ hyperlinks: [Hyperlink], query: String) -> [Hyperlink] {
@@ -481,6 +551,29 @@ struct HyperlinksListView: View {
             break
         }
         return newestFirst(lhs: lhs, rhs: rhs)
+    }
+}
+
+enum HyperlinksListQueryBuilder {
+    static func build(
+        queryText: String,
+        showDiscoveredLinks: Bool,
+        orderOverrideRawValue: String?
+    ) -> String {
+        var tokens = [showDiscoveredLinks ? "scope:all" : "scope:root"]
+
+        let trimmedQuery = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedQuery.isEmpty {
+            tokens.append(trimmedQuery)
+        }
+
+        let trimmedOrder = orderOverrideRawValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedOrder.isEmpty {
+            tokens.append("order:\(trimmedOrder)")
+        }
+
+        return tokens.joined(separator: " ")
     }
 }
 
