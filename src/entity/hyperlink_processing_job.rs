@@ -32,10 +32,6 @@ pub enum HyperlinkProcessingJobKind {
     Readability,
     #[sea_orm(string_value = "sublink_discovery")]
     SublinkDiscovery,
-    #[sea_orm(string_value = "tag_classification")]
-    TagClassification,
-    #[sea_orm(string_value = "tag_reclassify")]
-    TagReclassify,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
@@ -43,13 +39,18 @@ pub enum HyperlinkProcessingJobKind {
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
+    #[sea_orm(indexed)]
     pub hyperlink_id: i32,
+    #[sea_orm(indexed)]
+    #[sea_orm(default_value = "snapshot")]
     pub kind: HyperlinkProcessingJobKind,
+    #[sea_orm(indexed)]
     pub state: HyperlinkProcessingJobState,
     pub error_message: Option<String>,
     pub queued_at: DateTime,
     pub started_at: Option<DateTime>,
     pub finished_at: Option<DateTime>,
+    #[sea_orm(indexed)]
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
@@ -66,6 +67,8 @@ pub enum Relation {
     Hyperlink,
     #[sea_orm(has_many = "super::hyperlink_artifact::Entity")]
     HyperlinkArtifact,
+    #[sea_orm(has_many = "super::llm_interaction::Entity")]
+    LlmInteraction,
 }
 
 impl Related<super::hyperlink::Entity> for Entity {
@@ -77,6 +80,12 @@ impl Related<super::hyperlink::Entity> for Entity {
 impl Related<super::hyperlink_artifact::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::HyperlinkArtifact.def()
+    }
+}
+
+impl Related<super::llm_interaction::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::LlmInteraction.def()
     }
 }
 

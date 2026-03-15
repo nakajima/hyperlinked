@@ -24,9 +24,18 @@ pub struct Model {
     pub id: i32,
     pub name: String,
     pub name_key: String,
+    #[sea_orm(default_value = "AI_PENDING")]
     pub state: ActionTagState,
     pub created_at: DateTime,
     pub updated_at: DateTime,
+    #[sea_orm(indexed)]
+    pub parent_action_tag_id: Option<i32>,
+    #[sea_orm(default_value = "")]
+    pub path: String,
+    #[sea_orm(unique, default_value = "")]
+    pub path_key: String,
+    #[sea_orm(default_value = 0)]
+    pub depth: i32,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

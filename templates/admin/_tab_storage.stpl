@@ -1,0 +1,74 @@
+      <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+        <h3 class="text-lg font-semibold leading-7 tracking-tight">Storage utilization</h3>
+        <div class="overflow-x-auto">
+          <table class="min-w-max border-collapse bg-form-control text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top" aria-label="Storage utilization summary">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Size</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>DB size (SQLite main + wal + shm)</td>
+                <td>
+                  <%= self.format_u64_bytes(self.stats.db_size_total_bytes) %>
+                  <div class="text-sm text-tertiary">main <%= self.format_u64_bytes(self.stats.db_size_main_bytes) %>, wal <%= self.format_u64_bytes(self.stats.db_size_wal_bytes) %>, shm <%= self.format_u64_bytes(self.stats.db_size_shm_bytes) %></div>
+                </td>
+              </tr>
+              <tr>
+                <td>Saved artifacts size (saved links, all types)</td>
+                <td>
+                  <%= self.format_i64_bytes(self.stats.saved_artifacts_size_bytes) %>
+                  <div class="text-sm text-tertiary">avg <%= self.format_average_i64_bytes(self.stats.saved_artifacts_size_bytes, self.stats.saved_artifacts_count) %></div>
+                </td>
+              </tr>
+              <tr>
+                <td>Discovered artifacts size (discovered links, all types)</td>
+                <td>
+                  <%= self.format_i64_bytes(self.stats.discovered_artifacts_size_bytes) %>
+                  <div class="text-sm text-tertiary">avg <%= self.format_average_i64_bytes(self.stats.discovered_artifacts_size_bytes, self.stats.discovered_artifacts_count) %></div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="min-w-max border-collapse bg-form-control text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top" aria-label="Artifact storage by type">
+            <thead>
+              <tr>
+                <th>Artifact type</th>
+                <th>Saved links</th>
+                <th>Discovered links</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% if self.stats.artifact_storage_by_kind.is_empty() { %>
+                <tr>
+                  <td colspan="4">No artifact storage yet.</td>
+                </tr>
+              <% } else { %>
+                <% for entry in self.stats.artifact_storage_by_kind.iter() { %>
+                  <tr>
+                    <td><code><%= entry.kind %></code></td>
+                    <td>
+                      <%= self.format_i64_bytes(entry.saved_size_bytes) %>
+                      <div class="text-sm text-tertiary">avg <%= self.format_average_i64_bytes(entry.saved_size_bytes, entry.saved_artifact_count) %></div>
+                    </td>
+                    <td>
+                      <%= self.format_i64_bytes(entry.discovered_size_bytes) %>
+                      <div class="text-sm text-tertiary">avg <%= self.format_average_i64_bytes(entry.discovered_size_bytes, entry.discovered_artifact_count) %></div>
+                    </td>
+                    <td>
+                      <%= self.format_i64_bytes(entry.saved_size_bytes + entry.discovered_size_bytes) %>
+                      <div class="text-sm text-tertiary">avg <%= self.format_average_i64_bytes(entry.saved_size_bytes + entry.discovered_size_bytes, entry.saved_artifact_count + entry.discovered_artifact_count) %></div>
+                    </td>
+                  </tr>
+                <% } %>
+              <% } %>
+            </tbody>
+          </table>
+        </div>
+      </section>

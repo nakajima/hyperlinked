@@ -21,6 +21,10 @@ mod m20260227_000018_create_app_kv_store;
 mod m20260306_000019_add_hyperlink_source_type;
 mod m20260306_000020_create_tags_and_hyperlink_tags;
 mod m20260309_000021_create_topic_and_action_tags;
+mod m20260311_000022_add_tag_hierarchy;
+mod m20260312_000023_create_llm_interactions;
+mod m20260314_000024_remove_tagging;
+mod m20260315_063746_create_tags;
 
 pub struct Migrator;
 
@@ -49,6 +53,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20260306_000019_add_hyperlink_source_type::Migration),
             Box::new(m20260306_000020_create_tags_and_hyperlink_tags::Migration),
             Box::new(m20260309_000021_create_topic_and_action_tags::Migration),
+            Box::new(m20260311_000022_add_tag_hierarchy::Migration),
+            Box::new(m20260312_000023_create_llm_interactions::Migration),
+            Box::new(m20260314_000024_remove_tagging::Migration),
+            Box::new(m20260315_063746_create_tags::Migration),
         ]
     }
 }

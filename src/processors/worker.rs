@@ -6,14 +6,15 @@ use sea_orm::{
 };
 
 use crate::{
-    entity::{
-        hyperlink,
-        hyperlink_processing_job::{self, HyperlinkProcessingJobKind, HyperlinkProcessingJobState},
-    },
-    model::{
+    app::models::{
+        artifact_job::{self, ArtifactFetchMode, ArtifactJobResolveResult},
         hyperlink::ROOT_DISCOVERY_DEPTH,
         hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
         settings,
+    },
+    entity::{
+        hyperlink,
+        hyperlink_processing_job::{self, HyperlinkProcessingJobKind, HyperlinkProcessingJobState},
     },
     processors::pipeline::Pipeline,
 };
@@ -87,10 +88,24 @@ pub async fn process_job(
                 hyperlink_active_model.update(connection).await?;
                 mark_job_succeeded(connection, running_job.id).await?;
                 if collection_settings.collect_og {
-                    enqueue_og_job(connection, sender, running_job.hyperlink_id).await?;
+                    enqueue_followup_artifact_job_after_snapshot(
+                        connection,
+                        sender,
+                        running_job.hyperlink_id,
+                        HyperlinkProcessingJobKind::Og,
+                        collection_settings,
+                    )
+                    .await?;
                 }
                 if collection_settings.collect_readability {
-                    enqueue_readability_job(connection, sender, running_job.hyperlink_id).await?;
+                    enqueue_followup_artifact_job_after_snapshot(
+                        connection,
+                        sender,
+                        running_job.hyperlink_id,
+                        HyperlinkProcessingJobKind::Readability,
+                        collection_settings,
+                    )
+                    .await?;
                 }
             }
             Err(error) => {
@@ -168,113 +183,43 @@ pub async fn process_job(
                 }
             }
         }
-        HyperlinkProcessingJobKind::TagClassification => {
-            match pipeline.process_tag_classification(connection).await {
-                Ok(output) => {
-                    if let Some(reason) = output.skipped_reason.as_deref() {
-                        tracing::info!(
-                            hyperlink_id = running_job.hyperlink_id,
-                            job_id = running_job.id,
-                            kind = "tag_classification",
-                            skipped_reason = reason,
-                            "tag classification skipped"
-                        );
-                    } else {
-                        tracing::info!(
-                            hyperlink_id = running_job.hyperlink_id,
-                            job_id = running_job.id,
-                            kind = "tag_classification",
-                            tag_count = output.tag_count,
-                            "tag classification completed"
-                        );
-                    }
-                    mark_job_succeeded(connection, running_job.id).await?;
-                }
-                Err(error) => {
-                    mark_job_failed(connection, running_job.id, &error.to_string()).await?;
-                    tracing::warn!(
-                        hyperlink_id = running_job.hyperlink_id,
-                        job_id = running_job.id,
-                        kind = "tag_classification",
-                        error = %error,
-                        "hyperlink processing job failed"
-                    );
-                }
-            }
-        }
-        HyperlinkProcessingJobKind::TagReclassify => {
-            match crate::processors::tag_classify::classify_hyperlink(
-                connection,
-                &mut hyperlink_active_model,
-                Some(running_job.id),
-                crate::processors::tag_classify::TagClassificationMode::DiscoverWithPending,
-            )
-            .await
-            {
-                Ok(output) => {
-                    if let Some(reason) = output.skipped_reason.as_deref() {
-                        tracing::info!(
-                            hyperlink_id = running_job.hyperlink_id,
-                            job_id = running_job.id,
-                            kind = "tag_reclassify",
-                            skipped_reason = reason,
-                            "tag reclassify skipped"
-                        );
-                    } else {
-                        tracing::info!(
-                            hyperlink_id = running_job.hyperlink_id,
-                            job_id = running_job.id,
-                            kind = "tag_reclassify",
-                            tag_count = output.tag_count,
-                            "tag reclassify completed"
-                        );
-                    }
-                    mark_job_succeeded(connection, running_job.id).await?;
-                }
-                Err(error) => {
-                    mark_job_failed(connection, running_job.id, &error.to_string()).await?;
-                    tracing::warn!(
-                        hyperlink_id = running_job.hyperlink_id,
-                        job_id = running_job.id,
-                        kind = "tag_reclassify",
-                        error = %error,
-                        "hyperlink processing job failed"
-                    );
-                }
-            }
-        }
     }
 
     Ok(())
 }
 
-async fn enqueue_readability_job(
+async fn enqueue_followup_artifact_job_after_snapshot(
     connection: &DatabaseConnection,
     sender: &ProcessingQueueSender,
     hyperlink_id: i32,
+    kind: HyperlinkProcessingJobKind,
+    settings: settings::ArtifactCollectionSettings,
 ) -> Result<(), sea_orm::DbErr> {
-    hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
+    let result = artifact_job::resolve_and_enqueue_for_job_kind_with_settings(
         connection,
         hyperlink_id,
-        HyperlinkProcessingJobKind::Readability,
+        kind.clone(),
+        ArtifactFetchMode::RefetchTarget,
+        settings,
         Some(sender),
     )
     .await?;
-    Ok(())
-}
 
-async fn enqueue_og_job(
-    connection: &DatabaseConnection,
-    sender: &ProcessingQueueSender,
-    hyperlink_id: i32,
-) -> Result<(), sea_orm::DbErr> {
-    hyperlink_processing_job_model::enqueue_for_hyperlink_kind(
-        connection,
-        hyperlink_id,
-        HyperlinkProcessingJobKind::Og,
-        Some(sender),
-    )
-    .await?;
+    match result {
+        ArtifactJobResolveResult::EnqueuedRequested { .. }
+        | ArtifactJobResolveResult::EnqueuedDependency { .. }
+        | ArtifactJobResolveResult::AlreadySatisfied { .. }
+        | ArtifactJobResolveResult::DisabledRequested { .. }
+        | ArtifactJobResolveResult::DisabledDependency { .. }
+        | ArtifactJobResolveResult::UnfetchableDependency { .. } => {}
+        ArtifactJobResolveResult::UnsupportedArtifactKind { .. }
+        | ArtifactJobResolveResult::UnsupportedJobKind { .. } => {
+            return Err(sea_orm::DbErr::Custom(
+                format!("unsupported artifact follow-up job kind: {kind:?}").into(),
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -349,16 +294,6 @@ fn now_utc() -> DateTime {
 fn should_enqueue_sublink_discovery(discovery_depth: i32) -> bool {
     discovery_depth == ROOT_DISCOVERY_DEPTH
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_root_hyperlinks_enqueue_sublink_discovery() {
-        assert!(should_enqueue_sublink_discovery(ROOT_DISCOVERY_DEPTH));
-        assert!(!should_enqueue_sublink_discovery(
-            crate::model::hyperlink::DISCOVERED_DISCOVERY_DEPTH
-        ));
-    }
-}
+#[path = "../../tests/unit/processors_worker.rs"]
+mod tests;

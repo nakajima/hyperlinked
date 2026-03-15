@@ -6,7 +6,10 @@ document.addEventListener(
       return;
     }
 
-    const message = form.dataset.confirm;
+    const submitter = "submitter" in event ? event.submitter : null;
+    const message =
+      (submitter instanceof HTMLElement ? submitter.dataset.confirm : null) ||
+      form.dataset.confirm;
     if (!message) {
       return;
     }
@@ -418,20 +421,20 @@ function initializeUrlIntent() {
   scheduleLookup();
 }
 
-function initializeTaggingModelDiscovery() {
-  const form = document.querySelector("[data-tagging-settings-form]");
+function initializeLlmModelDiscovery() {
+  const form = document.querySelector("[data-llm-settings-form]");
   if (!(form instanceof HTMLFormElement)) {
     return;
   }
 
-  const baseUrlInput = form.querySelector("[data-tagging-base-url]");
-  const modelSelect = form.querySelector("[data-tagging-model-select]");
-  const apiKeyInput = form.querySelector("[data-tagging-api-key]");
-  const authHeaderNameInput = form.querySelector("[data-tagging-auth-header-name]");
-  const authHeaderPrefixInput = form.querySelector("[data-tagging-auth-header-prefix]");
-  const backendKindInput = form.querySelector("[data-tagging-backend-kind]");
-  const checkButton = form.querySelector("[data-tagging-check-button]");
-  const modelStatus = form.querySelector("[data-tagging-model-status]");
+  const baseUrlInput = form.querySelector("[data-llm-base-url]");
+  const modelSelect = form.querySelector("[data-llm-model-select]");
+  const apiKeyInput = form.querySelector("[data-llm-api-key]");
+  const authHeaderNameInput = form.querySelector("[data-llm-auth-header-name]");
+  const authHeaderPrefixInput = form.querySelector("[data-llm-auth-header-prefix]");
+  const backendKindInput = form.querySelector("[data-llm-backend-kind]");
+  const checkButton = form.querySelector("[data-llm-check-button]");
+  const modelStatus = form.querySelector("[data-llm-model-status]");
 
   if (
     !(baseUrlInput instanceof HTMLInputElement) ||
@@ -462,32 +465,24 @@ function initializeTaggingModelDiscovery() {
     }
   };
   const updateBackendKind = (kind) => {
-    if (!(backendKindInput instanceof HTMLInputElement)) {
-      return;
+    if (backendKindInput instanceof HTMLInputElement) {
+      backendKindInput.value = trimmedOrEmpty(kind) || "unknown";
     }
-    backendKindInput.value = trimmedOrEmpty(kind) || "unknown";
   };
-
   const selectedModel = () => {
     const value = trimmedOrEmpty(modelSelect.value);
     if (value) {
       return value;
     }
     const selected = modelSelect.selectedOptions.item(0);
-    if (!selected) {
-      return "";
-    }
-    return trimmedOrEmpty(selected.value || selected.textContent || "");
+    return selected ? trimmedOrEmpty(selected.value || selected.textContent || "") : "";
   };
-
   const setStatus = (text) => {
     modelStatus.textContent = text;
   };
-
   const applyModelOptions = (models, preferredModel) => {
     const options = [];
     const seen = new Set();
-
     for (const model of models) {
       const normalized = trimmedOrEmpty(model);
       if (!normalized) {
@@ -533,7 +528,6 @@ function initializeTaggingModelDiscovery() {
       modelSelect.selectedIndex = 0;
     }
   };
-
   const buildRequestPayload = () => ({
     base_url: trimmedOrEmpty(baseUrlInput.value),
     api_key: readInputValue(apiKeyInput),
@@ -545,13 +539,11 @@ function initializeTaggingModelDiscovery() {
     model: selectedModel(),
     backend_kind: readInputValue(backendKindInput),
   });
-
   const cancelLookup = () => {
     if (lookupTimer !== null) {
       window.clearTimeout(lookupTimer);
       lookupTimer = null;
     }
-
     if (activeController) {
       activeController.abort();
       activeController = null;
@@ -585,7 +577,7 @@ function initializeTaggingModelDiscovery() {
     setStatus("Loading model options...");
 
     try {
-      const response = await fetch("/admin/tagging-models", {
+      const response = await fetch("/admin/llm-models", {
         method: "POST",
         credentials: "same-origin",
         headers: {
@@ -615,27 +607,18 @@ function initializeTaggingModelDiscovery() {
 
       const models = Array.isArray(payload?.models) ? payload.models : [];
       const backendKind = trimmedOrEmpty(payload?.backend_kind);
-      updateBackendKind(backendKind);
       applyModelOptions(models, previousSelection);
-
-      const backendText = backendKindLabel(backendKind);
-      if (models.length > 0) {
-        setStatus(
-          `Detected ${backendText} backend. Loaded ${models.length} model option${models.length === 1 ? "" : "s"}.`,
-        );
-      } else {
-        setStatus(
-          `Detected ${backendText} backend. Endpoint returned no models. Keeping the current model.`,
-        );
-      }
+      updateBackendKind(backendKind);
+      setStatus(
+        models.length > 0
+          ? `${models.length} model${models.length === 1 ? "" : "s"} found (${backendKindLabel(backendKind)}).`
+          : `No models found (${backendKindLabel(backendKind)}).`,
+      );
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
+      if (controller.signal.aborted || lookupRequestId !== latestLookupRequestId) {
         return;
       }
-      if (lookupRequestId !== latestLookupRequestId) {
-        return;
-      }
-      setStatus("Could not load models from the endpoint.");
+      setStatus(error instanceof Error ? error.message : "Model lookup failed.");
     } finally {
       if (activeController === controller) {
         activeController = null;
@@ -657,10 +640,10 @@ function initializeTaggingModelDiscovery() {
     if (checkButton instanceof HTMLButtonElement) {
       checkButton.disabled = true;
     }
-    setStatus("Checking chat endpoint...");
+    setStatus("Checking endpoint...");
 
     try {
-      const response = await fetch("/admin/tagging-check", {
+      const response = await fetch("/admin/llm-check", {
         method: "POST",
         credentials: "same-origin",
         headers: {
@@ -684,14 +667,12 @@ function initializeTaggingModelDiscovery() {
       }
 
       const backendKind = trimmedOrEmpty(payload?.backend_kind);
-      if (backendKind) {
-        updateBackendKind(backendKind);
-      }
-      const successMessage =
+      updateBackendKind(backendKind);
+      setStatus(
         typeof payload?.message === "string" && payload.message.trim().length > 0
           ? payload.message.trim()
-          : "Check succeeded.";
-      setStatus(successMessage);
+          : `Check succeeded (${backendKindLabel(backendKind)}).`,
+      );
     } catch (_) {
       setStatus("Could not run check request.");
     } finally {
@@ -705,11 +686,10 @@ function initializeTaggingModelDiscovery() {
     if (lookupTimer !== null) {
       window.clearTimeout(lookupTimer);
     }
-
     lookupTimer = window.setTimeout(() => {
       lookupTimer = null;
       void runLookup();
-    }, 350);
+    }, 250);
   };
 
   const watchInput = (input) => {
@@ -810,7 +790,7 @@ document.addEventListener(
 );
 
 initializeUrlIntent();
-initializeTaggingModelDiscovery();
+initializeLlmModelDiscovery();
 
 function updateQueuePendingBadge(pending) {
   const badge = document.querySelector("[data-queue-pending-badge]");
@@ -1165,160 +1145,28 @@ function initializeAdminImportControls() {
   return true;
 }
 
-function initializeAdminTagReclassifyControls() {
-  const container = document.querySelector("[data-admin-tag-reclassify]");
-  if (!(container instanceof HTMLElement)) {
-    return false;
-  }
-
-  const startButton = container.querySelector("[data-admin-tag-reclassify-start]");
-  const cancelButton = container.querySelector("[data-admin-tag-reclassify-cancel]");
-  const statusText = container.querySelector("[data-admin-tag-reclassify-status]");
-  const progressText = container.querySelector("[data-admin-tag-reclassify-progress]");
-
-  if (
-    !(startButton instanceof HTMLButtonElement) ||
-    !(cancelButton instanceof HTMLButtonElement) ||
-    !(statusText instanceof HTMLElement) ||
-    !(progressText instanceof HTMLElement)
-  ) {
-    return false;
-  }
-
-  let actionInFlight = false;
-  let latestStatus = null;
-  let previousState = "idle";
-  let reloadedAfterReady = false;
-
-  const applyStatus = (status) => {
-    latestStatus = status;
-    const state = typeof status?.state === "string" ? status.state : "idle";
-    const isRunning = state === "running";
-    startButton.disabled = actionInFlight || isRunning;
-    cancelButton.disabled = actionInFlight || !isRunning;
-    cancelButton.classList.toggle("hidden", !isRunning);
-
-    if (isRunning) {
-      const processed = Number(status?.processed);
-      const total = Number(status?.total);
-      statusText.textContent = "Reclassifying tags...";
-      if (Number.isFinite(processed) && Number.isFinite(total) && total >= 0) {
-        progressText.textContent = `${processed}/${total} links`;
-      } else {
-        progressText.textContent = "Working";
-      }
-      progressText.classList.remove("hidden");
-      return;
+async function readAdminError(response, fallbackMessage) {
+  try {
+    const payload = await response.json();
+    if (payload && typeof payload.error === "string" && payload.error.trim().length > 0) {
+      return payload.error.trim();
     }
-
-    progressText.classList.add("hidden");
-    progressText.textContent = "";
-
-    if (state === "ready") {
-      const processed = Number(status?.processed);
-      const total = Number(status?.total);
-      if (Number.isFinite(processed) && Number.isFinite(total) && total >= 0) {
-        statusText.textContent = `Reclassify complete (${processed}/${total} links).`;
-      } else {
-        statusText.textContent = "Reclassify complete.";
-      }
-      if (previousState === "running" && !reloadedAfterReady) {
-        reloadedAfterReady = true;
-        window.setTimeout(() => {
-          window.location.reload();
-        }, 350);
-      }
-      previousState = state;
-      return;
+    if (payload && typeof payload.message === "string" && payload.message.trim().length > 0) {
+      return payload.message.trim();
     }
-
-    if (state === "failed") {
-      const error =
-        typeof status?.error === "string" && status.error.trim().length > 0
-          ? status.error.trim()
-          : "unknown error";
-      statusText.textContent = `Reclassify failed: ${error}`;
-      previousState = state;
-      return;
-    }
-
-    if (state === "cancelled") {
-      statusText.textContent = "Reclassify canceled.";
-      previousState = state;
-      return;
-    }
-
-    statusText.textContent = "Reclassify is idle.";
-    previousState = state;
-  };
-
-  async function postReclassifyStart() {
-    if (actionInFlight) {
-      return;
-    }
-    actionInFlight = true;
-    applyStatus(latestStatus);
-    try {
-      await fetch("/admin/tags/reclassify/start", {
-        method: "POST",
-        credentials: "same-origin",
-      });
-    } catch (_) {
-    } finally {
-      actionInFlight = false;
-      applyStatus(latestStatus);
-      await refreshAdminStatus();
-    }
-  }
-
-  async function postReclassifyCancel() {
-    if (actionInFlight) {
-      return;
-    }
-    actionInFlight = true;
-    applyStatus(latestStatus);
-    try {
-      await fetch("/admin/tags/reclassify/cancel", {
-        method: "POST",
-        credentials: "same-origin",
-      });
-    } catch (_) {
-    } finally {
-      actionInFlight = false;
-      applyStatus(latestStatus);
-      await refreshAdminStatus();
-    }
-  }
-
-  startButton.addEventListener("click", () => {
-    void postReclassifyStart();
-  });
-  cancelButton.addEventListener("click", () => {
-    void postReclassifyCancel();
-  });
-
-  window.addEventListener(ADMIN_STATUS_EVENT, (event) => {
-    if (!(event instanceof CustomEvent)) {
-      return;
-    }
-    applyStatus(event.detail?.tag_reclassify);
-  });
-
-  applyStatus(null);
-  return true;
+  } catch (_) {}
+  return fallbackMessage;
 }
 
 function initializeAdminStatusPolling() {
   const hasQueueBadge = document.querySelector("[data-queue-pending-badge]");
   const hasBackupControls = initializeAdminBackupControls();
   const hasImportControls = initializeAdminImportControls();
-  const hasTagReclassifyControls = initializeAdminTagReclassifyControls();
 
   if (
     !hasQueueBadge &&
     !hasBackupControls &&
-    !hasImportControls &&
-    !hasTagReclassifyControls
+    !hasImportControls
   ) {
     return;
   }

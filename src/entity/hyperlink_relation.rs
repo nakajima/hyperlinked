@@ -7,8 +7,11 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
+    #[sea_orm(indexed)]
     pub parent_hyperlink_id: i32,
+    #[sea_orm(indexed)]
     pub child_hyperlink_id: i32,
+    #[sea_orm(indexed)]
     pub created_at: DateTime,
 }
 

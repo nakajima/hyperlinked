@@ -24,6 +24,7 @@ pub struct Model {
     pub id: i32,
     pub name: String,
     pub name_key: String,
+    #[sea_orm(default_value = "AI_PENDING")]
     pub state: TagState,
     pub created_at: DateTime,
     pub updated_at: DateTime,

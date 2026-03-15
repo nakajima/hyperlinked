@@ -7,6 +7,7 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub hyperlink_id: i32,
+    #[sea_orm(indexed)]
     pub updated_at: DateTime,
 }
 

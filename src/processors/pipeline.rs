@@ -1,13 +1,12 @@
 use crate::{
+    app::models::hyperlink_processing_job::ProcessingQueueSender,
     entity::hyperlink,
-    model::hyperlink_processing_job::ProcessingQueueSender,
     processors::{
         og_fetch::{OgFetchOutput, OgFetcher},
         processor::{ProcessingError, Processor},
         readability_fetch::{ReadabilityFetchOutput, ReadabilityFetcher},
         snapshot_fetch::{SnapshotFetchOutput, SnapshotFetcher},
         sublink_discovery::{SublinkDiscoveryOutput, SublinkDiscoveryProcessor},
-        tag_classify::{TagClassificationOutput, TagClassifier},
         title_fetch::TitleFetcher,
     },
 };
@@ -65,15 +64,6 @@ impl<'a> Pipeline<'a> {
         connection: &DatabaseConnection,
     ) -> Result<SublinkDiscoveryOutput, ProcessingError> {
         SublinkDiscoveryProcessor::new(self.processing_queue.clone())
-            .process(self.hyperlink, connection)
-            .await
-    }
-
-    pub async fn process_tag_classification(
-        &mut self,
-        connection: &DatabaseConnection,
-    ) -> Result<TagClassificationOutput, ProcessingError> {
-        TagClassifier::new(self.job_id)
             .process(self.hyperlink, connection)
             .await
     }

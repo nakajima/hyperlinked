@@ -51,9 +51,13 @@
       <% for kind in &missing_kinds { %>
         <li class="flex flex-row flex-wrap items-center gap-2">
           <span><%= artifact_kind_label(kind) %></span>
-          <form action="<%= self.artifact_fetch_path(kind) %>" method="post" class="inline">
-            <button class="inline min-h-0 border-0 bg-transparent p-0 text-accent hover:text-accent/80" type="submit">Fetch</button>
-          </form>
+          <% if self.artifact_fetch_enabled(kind) { %>
+            <form action="<%= self.artifact_fetch_path(kind) %>" method="post" class="inline">
+              <button class="inline min-h-0 border-0 bg-transparent p-0 text-accent hover:text-accent/80" type="submit">Fetch</button>
+            </form>
+          <% } else { %>
+            <span class="text-sm text-body/60">Fetch disabled by settings</span>
+          <% } %>
         </li>
       <% } %>
     </ul>

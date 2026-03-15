@@ -3,13 +3,19 @@
 pub mod prelude;
 
 pub mod action_tag;
+pub mod app_kv;
+pub mod artifact_gc_pending;
 pub mod hyperlink;
 pub mod hyperlink_action_tag;
 pub mod hyperlink_artifact;
 pub mod hyperlink_processing_job;
 pub mod hyperlink_relation;
+pub mod hyperlink_search_doc;
 pub mod hyperlink_tag;
 pub mod hyperlink_tombstone;
 pub mod hyperlink_topic_tag;
+pub mod job_events;
+pub mod jobs;
+pub mod llm_interaction;
 pub mod tag;
 pub mod topic_tag;

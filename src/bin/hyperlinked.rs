@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, prelude::*};
 use tracing_tree::HierarchicalLayer;
 
-const AUTO_MIGRATE_ON_SERVE_ENV: &str = "HYPERLINKED_AUTO_MIGRATE_ON_SERVE";
-const DEV_MODE_ENV: &str = "HYPERLINKED_DEV_MODE";
+const AUTO_SCHEMA_SYNC_ON_SERVE_ENV: &str = "HYPERLINKED_AUTO_SYNC_SCHEMA_ON_SERVE";
 const PAPERLESS_NGX_BASE_URL_ENV: &str = "PAPERLESS_NGX_BASE_URL";
 const PAPERLESS_NGX_TOKEN_ENV: &str = "PAPERLESS_NGX_TOKEN";
 
@@ -144,21 +143,16 @@ async fn run() -> Result<i32, String> {
         } => {
             let mdns_options =
                 build_mdns_options(mdns_enabled, mdns_service_name, mdns_service_type);
-            let connection = hyperlinked::db::connection::init()
-                .await
-                .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+            let connection = init_connection().await?;
 
-            let auto_migrate_enabled = auto_migrate_on_serve_enabled();
-            let dev_mode = running_in_dev_mode();
-            if dev_mode {
-                tracing::info!("skipping startup migrations in dev mode");
-            } else if auto_migrate_enabled {
-                tracing::info!("running pending startup migrations");
-                hyperlinked::db::migrate::migrate_pending(&connection).await?;
-                tracing::info!("startup migrations complete");
+            let auto_schema_enabled = auto_schema_sync_on_serve_enabled();
+            if auto_schema_enabled {
+                tracing::info!("running startup schema sync");
+                hyperlinked::db::schema::ensure_current(&connection).await?;
+                tracing::info!("startup schema sync complete");
             } else {
                 tracing::info!(
-                    "{AUTO_MIGRATE_ON_SERVE_ENV}=false; skipping startup migrations on serve"
+                    "{AUTO_SCHEMA_SYNC_ON_SERVE_ENV}=false; skipping startup schema sync on serve"
                 );
             }
 
@@ -208,11 +202,19 @@ fn build_mdns_options(
     hyperlinked::server::MdnsOptions::new(enabled, service_name, service_type)
 }
 
-fn auto_migrate_on_serve_enabled() -> bool {
-    parse_auto_migrate_on_serve(std::env::var(AUTO_MIGRATE_ON_SERVE_ENV).ok().as_deref())
+async fn init_connection() -> Result<sea_orm::DatabaseConnection, String> {
+    let connection = hyperlinked::db::connection::init()
+        .await
+        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    hyperlinked::db::schema::ensure_current(&connection).await?;
+    Ok(connection)
 }
 
-fn parse_auto_migrate_on_serve(raw: Option<&str>) -> bool {
+fn auto_schema_sync_on_serve_enabled() -> bool {
+    parse_auto_schema_sync_on_serve(std::env::var(AUTO_SCHEMA_SYNC_ON_SERVE_ENV).ok().as_deref())
+}
+
+fn parse_auto_schema_sync_on_serve(raw: Option<&str>) -> bool {
     match raw {
         Some(value) => !matches!(
             value.trim().to_ascii_lowercase().as_str(),
@@ -222,14 +224,8 @@ fn parse_auto_migrate_on_serve(raw: Option<&str>) -> bool {
     }
 }
 
-fn running_in_dev_mode() -> bool {
-    std::env::var(DEV_MODE_ENV).ok().as_deref() == Some("1")
-}
-
 async fn run_linkwarden_import(input: PathBuf) -> Result<i32, String> {
-    let connection = hyperlinked::db::connection::init()
-        .await
-        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    let connection = init_connection().await?;
     let processing_queue = hyperlinked::queue::ProcessingQueue::connect(connection.clone())
         .await
         .map_err(|err| format!("failed to initialize processing queue: {err}"))?;
@@ -287,9 +283,7 @@ async fn run_paperless_ngx_import(
         return Err("--page-size must be between 1 and 1000".to_string());
     }
 
-    let connection = hyperlinked::db::connection::init()
-        .await
-        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    let connection = init_connection().await?;
     let processing_queue = if dry_run {
         None
     } else {
@@ -368,11 +362,9 @@ fn parse_paperless_since_filter(raw: Option<&str>) -> Result<Option<ChronoDateTi
 }
 
 async fn run_artifacts_backfill(batch_size: u64) -> Result<i32, String> {
-    let connection = hyperlinked::db::connection::init()
-        .await
-        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    let connection = init_connection().await?;
 
-    let report = hyperlinked::model::hyperlink_artifact::backfill_blob_payloads_to_disk(
+    let report = hyperlinked::app::models::hyperlink_artifact::backfill_blob_payloads_to_disk(
         &connection,
         batch_size,
     )
@@ -388,16 +380,15 @@ async fn run_artifacts_backfill(batch_size: u64) -> Result<i32, String> {
 }
 
 async fn run_warcs_compress_backfill(batch_size: u64) -> Result<i32, String> {
-    let connection = hyperlinked::db::connection::init()
-        .await
-        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    let connection = init_connection().await?;
 
-    let report = hyperlinked::model::hyperlink_artifact::backfill_snapshot_warc_payloads_to_gzip(
-        &connection,
-        batch_size,
-    )
-    .await
-    .map_err(|err| format!("warc compression backfill failed: {err}"))?;
+    let report =
+        hyperlinked::app::models::hyperlink_artifact::backfill_snapshot_warc_payloads_to_gzip(
+            &connection,
+            batch_size,
+        )
+        .await
+        .map_err(|err| format!("warc compression backfill failed: {err}"))?;
 
     println!(
         "warc compression backfill: scanned={}, compressed={}, skipped_already_compressed={}, failed={}",
@@ -408,13 +399,12 @@ async fn run_warcs_compress_backfill(batch_size: u64) -> Result<i32, String> {
 }
 
 async fn run_titles_backfill(batch_size: u64) -> Result<i32, String> {
-    let connection = hyperlinked::db::connection::init()
-        .await
-        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    let connection = init_connection().await?;
 
-    let report = hyperlinked::model::hyperlink::backfill_clean_titles(&connection, batch_size)
-        .await
-        .map_err(|err| format!("title backfill failed: {err}"))?;
+    let report =
+        hyperlinked::app::models::hyperlink::backfill_clean_titles(&connection, batch_size)
+            .await
+            .map_err(|err| format!("title backfill failed: {err}"))?;
 
     println!(
         "title backfill: scanned={}, updated={}, unchanged={}",
@@ -430,9 +420,7 @@ async fn run_cleanup_malformed_sublinks(dry_run: bool) -> Result<i32, String> {
     };
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 
-    let connection = hyperlinked::db::connection::init()
-        .await
-        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    let connection = init_connection().await?;
 
     let malformed_links = hyperlink::Entity::find()
         .filter(hyperlink::Column::DiscoveryDepth.gt(0))
@@ -492,7 +480,7 @@ async fn run_cleanup_malformed_sublinks(dry_run: bool) -> Result<i32, String> {
 
     let mut queued = 0usize;
     for parent_id in affected_parent_ids.iter().copied() {
-        hyperlinked::model::hyperlink_processing_job::enqueue_for_hyperlink_kind(
+        hyperlinked::app::models::hyperlink_processing_job::enqueue_for_hyperlink_kind(
             &connection,
             parent_id,
             HyperlinkProcessingJobKind::SublinkDiscovery,
@@ -518,15 +506,14 @@ async fn run_cleanup_malformed_sublinks(dry_run: bool) -> Result<i32, String> {
 }
 
 async fn run_reprocess_all_snapshots() -> Result<i32, String> {
+    use hyperlinked::app::models::artifact_job::{self, ArtifactFetchMode};
     use hyperlinked::entity::{
         hyperlink,
         hyperlink_processing_job::{self, HyperlinkProcessingJobKind, HyperlinkProcessingJobState},
     };
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 
-    let connection = hyperlinked::db::connection::init()
-        .await
-        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    let connection = init_connection().await?;
     let processing_queue = hyperlinked::queue::ProcessingQueue::connect(connection.clone())
         .await
         .map_err(|err| format!("failed to initialize processing queue: {err}"))?;
@@ -569,17 +556,20 @@ async fn run_reprocess_all_snapshots() -> Result<i32, String> {
             continue;
         }
 
-        hyperlinked::model::hyperlink_processing_job::enqueue_for_hyperlink_kind(
+        let result = artifact_job::resolve_and_enqueue_for_job_kind(
             &connection,
             hyperlink_id,
             HyperlinkProcessingJobKind::Snapshot,
+            ArtifactFetchMode::RefetchTarget,
             Some(&processing_queue),
         )
         .await
         .map_err(|err| {
             format!("failed to enqueue snapshot job for hyperlink {hyperlink_id}: {err}")
         })?;
-        queued += 1;
+        if result.was_enqueued() {
+            queued += 1;
+        }
     }
 
     println!(
@@ -590,9 +580,7 @@ async fn run_reprocess_all_snapshots() -> Result<i32, String> {
 }
 
 async fn run_export_graphql_schema(out: PathBuf) -> Result<i32, String> {
-    let connection = hyperlinked::db::connection::init()
-        .await
-        .map_err(|err| format!("failed to initialize database connection: {err}"))?;
+    let connection = init_connection().await?;
 
     let sdl = hyperlinked::server::graphql::export_schema_sdl(connection)
         .map_err(|err| format!("failed to export graphql schema: {err}"))?;
@@ -611,27 +599,6 @@ async fn run_export_graphql_schema(out: PathBuf) -> Result<i32, String> {
     println!("wrote graphql schema to {}", out.display());
     Ok(0)
 }
-
 #[cfg(test)]
-mod tests {
-    use super::parse_auto_migrate_on_serve;
-
-    #[test]
-    fn auto_migrate_defaults_to_enabled() {
-        assert!(parse_auto_migrate_on_serve(None));
-    }
-
-    #[test]
-    fn auto_migrate_disable_values_are_honored() {
-        for value in ["0", "false", "no", "off", " FALSE ", "Off"] {
-            assert!(!parse_auto_migrate_on_serve(Some(value)));
-        }
-    }
-
-    #[test]
-    fn auto_migrate_non_disable_values_enable_migration() {
-        for value in ["1", "true", "yes", "on", "custom", ""] {
-            assert!(parse_auto_migrate_on_serve(Some(value)));
-        }
-    }
-}
+#[path = "../../tests/unit/bin_hyperlinked.rs"]
+mod tests;

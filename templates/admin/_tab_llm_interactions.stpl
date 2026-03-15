@@ -1,0 +1,134 @@
+<section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+  <h3 class="text-lg font-semibold leading-7 tracking-tight">LLM settings</h3>
+  <p class="text-sm text-tertiary">
+    Configure the endpoint, model, and auth details used for LLM connectivity checks and future integrations.
+  </p>
+  <form action="/admin/llm-settings" method="post" class="flex flex-col gap-3 text-sm" data-llm-settings-form>
+    <input type="hidden" name="backend_kind" value="<%= self.llm_settings.backend_kind.as_storage() %>" data-llm-backend-kind />
+
+    <label class="flex flex-col gap-1">
+      <span>Base URL</span>
+      <input type="text" name="base_url" value="<%= self.llm_settings.base_url %>" data-llm-base-url class="min-h-10 w-full min-w-0 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+    </label>
+
+    <label class="flex flex-col gap-1">
+      <span>Model</span>
+      <select name="model" data-llm-model-select class="min-h-10 w-full min-w-0 rounded-[0.4rem] border border-form-control-border bg-form-control pl-[0.65rem] pr-[1.4rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30">
+        <option value="<%= self.llm_settings.model %>"><%= self.llm_settings.model %></option>
+      </select>
+      <div class="flex flex-row items-center gap-2">
+        <button type="button" data-llm-check-button class="inline-flex min-h-9 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-1.5 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Check</button>
+        <span class="text-sm text-tertiary" data-llm-model-status>Model options load from the configured endpoint.</span>
+      </div>
+    </label>
+
+    <label class="flex flex-col gap-1">
+      <span>API key (optional)</span>
+      <input type="password" name="api_key" value="" autocomplete="off" data-llm-api-key class="min-h-10 w-full min-w-0 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+      <span class="text-sm text-tertiary">Leave blank to keep the existing key.</span>
+    </label>
+
+    <label class="flex flex-col gap-1">
+      <span>Auth header name (optional)</span>
+      <input type="text" name="auth_header_name" value="<%= self.llm_settings.auth_header_name.as_deref().unwrap_or("") %>" data-llm-auth-header-name class="min-h-10 w-full min-w-0 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+    </label>
+
+    <label class="flex flex-col gap-1">
+      <span>Auth header prefix (optional)</span>
+      <input type="text" name="auth_header_prefix" value="<%= self.llm_settings.auth_header_prefix.as_deref().unwrap_or("") %>" data-llm-auth-header-prefix class="min-h-10 w-full min-w-0 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30" />
+    </label>
+
+    <div>
+      <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Save LLM settings</button>
+    </div>
+  </form>
+</section>
+
+<section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+  <h3 class="text-lg font-semibold leading-7 tracking-tight">LLM interactions</h3>
+  <p class="text-sm text-tertiary">Raw request and response payloads for recent LLM connectivity checks and runtime calls.</p>
+  <div class="flex flex-row flex-wrap items-center gap-[0.4rem]">
+    <form
+      action="/admin/clear-llm-interactions"
+      method="post"
+      data-confirm="Clear all recorded LLM interactions? This removes saved request and response payloads."
+    >
+      <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65"<% if self.llm_interactions.total_items == 0 { %> disabled<% } %>>Clear interactions</button>
+    </form>
+    <% if self.llm_interactions.total_items == 0 { %>
+      <span class="text-sm text-tertiary">Nothing to clear.</span>
+    <% } else { %>
+      <span class="text-sm text-tertiary">Clears all <%= self.llm_interactions.total_items %> recorded interaction(s), including older pages.</span>
+    <% } %>
+  </div>
+  <% if self.llm_interactions.items.is_empty() { %>
+    <p class="text-sm text-tertiary">No LLM interactions recorded yet.</p>
+  <% } else { %>
+    <div class="overflow-x-auto">
+      <table class="min-w-full border-collapse text-left text-sm">
+        <thead>
+          <tr class="border-b border-form-control-border/80 text-xs uppercase tracking-[0.08em] text-tertiary">
+            <th class="px-2 py-2 font-semibold">When</th>
+            <th class="px-2 py-2 font-semibold">Kind</th>
+            <th class="px-2 py-2 font-semibold">Context</th>
+            <th class="px-2 py-2 font-semibold">Endpoint</th>
+            <th class="px-2 py-2 font-semibold">Status</th>
+            <th class="px-2 py-2 font-semibold">Raw</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% for interaction in &self.llm_interactions.items { %>
+            <tr class="border-b border-form-control-border/60 align-top">
+              <td class="px-2 py-2">
+                <code class="font-mono text-[0.9em]" title="<%= self.llm_interaction_created_at_title(interaction) %>"><%= self.llm_interaction_created_at(interaction) %></code>
+                <div class="text-xs text-tertiary"><%= self.llm_interaction_duration(interaction) %></div>
+              </td>
+              <td class="px-2 py-2">
+                <div><code class="font-mono text-[0.9em]"><%= interaction.kind %></code></div>
+                <div class="text-xs text-tertiary"><%= interaction.model %></div>
+              </td>
+              <td class="px-2 py-2 text-tertiary"><%= self.llm_interaction_context(interaction) %></td>
+              <td class="px-2 py-2">
+                <div class="break-all"><code class="font-mono text-[0.9em]"><%= interaction.endpoint_url %></code></div>
+                <div class="text-xs text-tertiary"><%= interaction.api_kind %></div>
+              </td>
+              <td class="px-2 py-2 text-tertiary"><%= self.llm_interaction_status(interaction) %></td>
+              <td class="px-2 py-2">
+                <details>
+                  <summary class="cursor-pointer text-accent">View raw</summary>
+                  <div class="mt-2 flex min-w-[24rem] flex-col gap-2">
+                    <label class="flex flex-col gap-1">
+                      <span class="text-xs font-semibold uppercase tracking-[0.08em] text-tertiary">Request</span>
+                      <textarea rows="9" readonly class="w-full min-w-0 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 font-mono text-xs text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"><%= interaction.request_body %></textarea>
+                    </label>
+                    <label class="flex flex-col gap-1">
+                      <span class="text-xs font-semibold uppercase tracking-[0.08em] text-tertiary">Response</span>
+                      <textarea rows="10" readonly class="w-full min-w-0 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 font-mono text-xs text-primary focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"><%= interaction.response_body.as_deref().unwrap_or("") %></textarea>
+                    </label>
+                    <% if let Some(error_message) = interaction.error_message.as_deref() { %>
+                      <p class="text-xs text-tertiary"><%= error_message %></p>
+                    <% } %>
+                  </div>
+                </details>
+              </td>
+            </tr>
+          <% } %>
+        </tbody>
+      </table>
+    </div>
+
+    <nav class="flex flex-row items-center gap-[0.4rem] rounded-[0.4rem] border border-form-control-border bg-white/30 px-3 py-3 text-sm" aria-label="LLM interactions pagination">
+      <% if let Some(prev_href) = self.llm_interactions.prev_page_href.as_ref() { %>
+        <a class="text-accent no-underline hover:text-accent/80" href="<%= prev_href %>">Previous</a>
+      <% } else { %>
+        <span class="text-tertiary">Previous</span>
+      <% } %>
+      <span class="text-tertiary">Page <%= self.llm_interactions.page %> of <%= self.llm_interactions.total_pages %> (<%= self.llm_interactions.total_items %> total)</span>
+      <% if let Some(next_href) = self.llm_interactions.next_page_href.as_ref() { %>
+        <a class="text-accent no-underline hover:text-accent/80" href="<%= next_href %>">Next</a>
+      <% } else { %>
+        <span class="text-tertiary">Next</span>
+      <% } %>
+    </nav>
+  <% } %>
+</section>

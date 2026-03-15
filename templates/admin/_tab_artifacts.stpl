@@ -1,0 +1,121 @@
+      <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+        <h3 class="text-lg font-semibold leading-7 tracking-tight">Artifact collection settings</h3>
+        <p class="text-sm text-tertiary">
+          Control which artifact pipelines run for future processing.
+        </p>
+        <form action="/admin/artifact-settings" method="post" class="flex flex-col gap-3 text-sm [&_label]:text-sm [&_label]:font-normal [&_input[type='checkbox']]:mt-0.5 [&_input[type='checkbox']]:h-4 [&_input[type='checkbox']]:w-4 [&_input[type='checkbox']]:shrink-0 [&_input[type='checkbox']]:rounded [&_input[type='checkbox']]:border [&_input[type='checkbox']]:border-form-control-border [&_input[type='checkbox']]:bg-form-control [&_input[type='checkbox']]:accent-accent [&_input[type='checkbox']]:focus:outline-none [&_input[type='checkbox']]:focus:ring-2 [&_input[type='checkbox']]:focus:ring-accent/30">
+          <div class="flex flex-col gap-[0.4rem]">
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="collect_source" value="1"<% if self.artifact_settings.collect_source { %> checked<% } %> />
+              <span>Collect source artifacts (snapshot warc / pdf source)</span>
+            </label>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="collect_screenshots" value="1"<% if self.artifact_settings.collect_screenshots { %> checked<% } %> />
+              <span>Collect screenshot artifacts</span>
+            </label>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="collect_screenshot_dark" value="1"<% if self.artifact_settings.collect_screenshot_dark { %> checked<% } %> />
+              <span>Collect dark-mode screenshot variants</span>
+            </label>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="collect_og" value="1"<% if self.artifact_settings.collect_og { %> checked<% } %> />
+              <span>Collect Open Graph artifacts</span>
+            </label>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="collect_readability" value="1"<% if self.artifact_settings.collect_readability { %> checked<% } %> />
+              <span>Collect readability artifacts</span>
+            </label>
+          </div>
+
+          <div class="flex flex-col gap-[0.4rem]">
+            <p class="text-sm text-tertiary">If a pipeline is being disabled, optionally delete existing artifacts:</p>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="delete_source_on_disable" value="1" />
+              <span>Also delete existing source artifacts</span>
+            </label>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="delete_screenshots_on_disable" value="1" />
+              <span>Also delete existing screenshot artifacts</span>
+            </label>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="delete_og_on_disable" value="1" />
+              <span>Also delete existing Open Graph artifacts</span>
+            </label>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="delete_readability_on_disable" value="1" />
+              <span>Also delete existing readability artifacts</span>
+            </label>
+          </div>
+
+          <div class="flex flex-col gap-[0.4rem]">
+            <p class="text-sm text-tertiary">If a pipeline is being enabled, optionally queue missing backfill jobs:</p>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="queue_source_on_enable" value="1" />
+              <span>Queue missing source artifacts now</span>
+            </label>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="queue_screenshots_on_enable" value="1" />
+              <span>Queue missing screenshots now</span>
+            </label>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="queue_og_on_enable" value="1" />
+              <span>Queue missing Open Graph now</span>
+            </label>
+            <label class="flex items-start gap-2">
+              <input type="checkbox" name="queue_readability_on_enable" value="1" />
+              <span>Queue missing readability now</span>
+            </label>
+          </div>
+
+          <div>
+            <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65">Save artifact settings</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+        <h3 class="text-lg font-semibold leading-7 tracking-tight">Process all missing artifacts</h3>
+        <div class="flex flex-col gap-3">
+          <div class="overflow-x-auto" aria-label="Missing artifacts summary">
+            <table class="min-w-max border-collapse bg-form-control text-sm [&_th]:border [&_th]:border-form-control-border [&_th]:px-2 [&_th]:py-2 [&_th]:text-left [&_th]:font-normal [&_td]:border [&_td]:border-form-control-border [&_td]:px-2 [&_td]:py-2 [&_td]:align-top">
+              <thead>
+                <tr>
+                  <th>Total links</th>
+                  <th>Missing source</th>
+                  <th>Missing Open Graph</th>
+                  <th>Missing readability</th>
+                  <th>Snapshot active</th>
+                  <th>Open Graph active</th>
+                  <th>Readability active</th>
+                  <th>Snapshot to queue</th>
+                  <th>Open Graph to queue</th>
+                  <th>Readability to queue</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><%= self.summary.total_hyperlinks %></td>
+                  <td><%= self.summary.missing_source %></td>
+                  <td><%= self.summary.missing_og %></td>
+                  <td><%= self.summary.missing_readability %></td>
+                  <td><%= self.summary.snapshot_already_processing %></td>
+                  <td><%= self.summary.og_already_processing %></td>
+                  <td><%= self.summary.readability_already_processing %></td>
+                  <td><%= self.summary.snapshot_will_queue %></td>
+                  <td><%= self.summary.og_will_queue %></td>
+                  <td><%= self.summary.readability_will_queue %></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <form
+            action="/admin/process-missing-artifacts"
+            method="post"
+            class="flex flex-row flex-wrap items-center gap-[0.4rem]"
+            data-confirm="Process all artifacts? This will queue snapshot, Open Graph, and readability jobs for every link missing required artifacts."
+          >
+            <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50 disabled:cursor-not-allowed disabled:opacity-65"<% if !self.has_missing_artifacts_to_process { %> disabled<% } %>>Process all artifacts</button>
+          </form>
+        </div>
+      </section>

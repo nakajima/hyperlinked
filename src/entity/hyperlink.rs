@@ -19,7 +19,9 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub title: String,
+    #[sea_orm(unique, indexed)]
     pub url: String,
+    #[sea_orm(indexed, default_value = "")]
     pub raw_url: String,
     pub og_title: Option<String>,
     pub og_description: Option<String>,
@@ -27,20 +29,35 @@ pub struct Model {
     pub og_url: Option<String>,
     pub og_image_url: Option<String>,
     pub og_site_name: Option<String>,
+    #[sea_orm(indexed, default_value = 0)]
     pub discovery_depth: i32,
+    #[sea_orm(indexed, default_value = 0)]
     pub clicks_count: i32,
+    #[sea_orm(indexed)]
     pub last_clicked_at: Option<DateTime>,
+    #[sea_orm(default_value = "unknown")]
     pub source_type: HyperlinkSourceType,
+    #[sea_orm(indexed)]
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::hyperlink_processing_job::Entity")]
-    HyperlinkProcessingJob,
+    #[sea_orm(has_many = "super::hyperlink_action_tag::Entity")]
+    HyperlinkActionTag,
     #[sea_orm(has_many = "super::hyperlink_artifact::Entity")]
     HyperlinkArtifact,
+    #[sea_orm(has_many = "super::hyperlink_processing_job::Entity")]
+    HyperlinkProcessingJob,
+    #[sea_orm(has_one = "super::hyperlink_search_doc::Entity")]
+    HyperlinkSearchDoc,
+    #[sea_orm(has_many = "super::hyperlink_tag::Entity")]
+    HyperlinkTag,
+    #[sea_orm(has_many = "super::hyperlink_topic_tag::Entity")]
+    HyperlinkTopicTag,
+    #[sea_orm(has_many = "super::llm_interaction::Entity")]
+    LlmInteraction,
 }
 
 impl Related<super::hyperlink_processing_job::Entity> for Entity {
@@ -52,6 +69,36 @@ impl Related<super::hyperlink_processing_job::Entity> for Entity {
 impl Related<super::hyperlink_artifact::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::HyperlinkArtifact.def()
+    }
+}
+
+impl Related<super::hyperlink_action_tag::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::HyperlinkActionTag.def()
+    }
+}
+
+impl Related<super::hyperlink_search_doc::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::HyperlinkSearchDoc.def()
+    }
+}
+
+impl Related<super::hyperlink_tag::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::HyperlinkTag.def()
+    }
+}
+
+impl Related<super::hyperlink_topic_tag::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::HyperlinkTopicTag.def()
+    }
+}
+
+impl Related<super::llm_interaction::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::LlmInteraction.def()
     }
 }
 

@@ -49,8 +49,6 @@ pub enum HyperlinkArtifactKind {
     ScreenshotThumbDarkWebp,
     #[sea_orm(string_value = "screenshot_error")]
     ScreenshotError,
-    #[sea_orm(string_value = "tag_meta")]
-    TagMeta,
 }
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
@@ -58,15 +56,20 @@ pub enum HyperlinkArtifactKind {
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
+    #[sea_orm(indexed)]
     pub hyperlink_id: i32,
+    #[sea_orm(indexed)]
     pub job_id: Option<i32>,
+    #[sea_orm(indexed)]
     pub kind: HyperlinkArtifactKind,
     pub payload: Vec<u8>,
     pub storage_path: Option<String>,
     pub storage_backend: Option<String>,
     pub checksum_sha256: Option<String>,
     pub content_type: String,
+    #[sea_orm(indexed)]
     pub size_bytes: i32,
+    #[sea_orm(indexed)]
     pub created_at: DateTime,
 }
 

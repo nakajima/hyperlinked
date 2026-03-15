@@ -1,21 +1,11 @@
-pub mod admin;
 pub(crate) mod admin_backup;
 pub(crate) mod admin_import;
-pub mod admin_jobs;
-pub(crate) mod admin_tag_reclassify;
-mod chromium_diagnostics;
+pub(crate) mod chromium_diagnostics;
 pub mod context;
-pub mod controllers;
-mod flash;
 pub(crate) mod font_diagnostics;
 pub mod graphql;
-mod html_layout;
 mod http_logging;
-mod hyperlink_fetcher;
 mod mdns;
-#[cfg(test)]
-pub(crate) mod test_support;
-mod views;
 
 use axum::{Router, response::Redirect, routing::get};
 use axum::{
@@ -30,7 +20,13 @@ use std::path::{Component, Path as StdPath, PathBuf};
 use std::sync::{Arc, LazyLock};
 use tracing::instrument;
 
-pub mod hyperlinks;
+pub use crate::app::controllers;
+pub use crate::app::controllers::admin::dashboard_controller as admin;
+pub use crate::app::controllers::admin::jobs_controller as admin_jobs;
+pub(crate) use crate::app::controllers::flash;
+pub use crate::app::controllers::hyperlinks_controller as hyperlinks;
+pub(crate) use crate::app::services::hyperlink_fetcher;
+pub(crate) use crate::app::views::renderer as views;
 pub use mdns::MdnsOptions;
 
 static EMBEDDED_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/src/server/assets");
@@ -43,13 +39,23 @@ pub async fn start(
     port: &str,
     mdns_options: MdnsOptions,
 ) -> Result<(), String> {
-    match crate::model::hyperlink_processing_job::delete_stale_active_rows(&connection).await {
+    match crate::app::models::hyperlink_processing_job::delete_stale_active_rows(&connection).await
+    {
         Ok(repaired) if repaired > 0 => {
             tracing::info!(repaired, "deleted stale queued/running processing jobs");
         }
         Ok(_) => {}
         Err(err) => {
             tracing::warn!(error = %err, "failed to delete stale queued/running processing jobs");
+        }
+    }
+    match crate::app::models::hyperlink_processing_job::delete_removed_job_rows(&connection).await {
+        Ok(repaired) if repaired > 0 => {
+            tracing::info!(repaired, "deleted legacy removed processing jobs");
+        }
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to delete legacy removed processing jobs");
         }
     }
     let processing_queue = crate::queue::ProcessingQueue::connect(connection.clone()).await?;
@@ -66,7 +72,6 @@ pub async fn start(
         processing_queue: Some(processing_queue),
         backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
         backup_imports: crate::server::admin_import::AdminImportManager::default(),
-        tag_reclassify: crate::server::admin_tag_reclassify::AdminTagReclassifyManager::default(),
     };
     let app = Router::<context::Context>::new()
         .route("/", get(|| async { Redirect::temporary("/hyperlinks") }))
@@ -206,47 +211,6 @@ fn asset_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body;
-    use axum::http::header::CONTENT_TYPE;
-
-    #[test]
-    fn embedded_assets_include_core_files() {
-        assert!(EMBEDDED_ASSETS.get_file("app.css").is_some());
-        assert!(EMBEDDED_ASSETS.get_file("fonts.css").is_some());
-        assert!(EMBEDDED_ASSETS.get_file("app.js").is_some());
-    }
-
-    #[test]
-    fn sanitize_asset_path_rejects_parent_segments() {
-        assert!(sanitize_asset_path("../app.css").is_none());
-        assert!(sanitize_asset_path("Barlow/../../app.css").is_none());
-        assert!(sanitize_asset_path("/app.css").is_none());
-    }
-
-    #[test]
-    fn sanitize_asset_path_accepts_safe_nested_paths() {
-        let path = sanitize_asset_path("Barlow/Barlow-Regular.woff2")
-            .expect("safe asset path should be accepted");
-        assert_eq!(path, PathBuf::from("Barlow/Barlow-Regular.woff2"));
-    }
-
-    #[tokio::test]
-    async fn favicon_route_serves_png_content() {
-        let response = serve_favicon().await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok());
-        assert_eq!(content_type, Some("image/png"));
-
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("favicon body should be readable");
-        assert!(!body.is_empty());
-    }
-}
+#[path = "../../tests/unit/server.rs"]
+mod tests;

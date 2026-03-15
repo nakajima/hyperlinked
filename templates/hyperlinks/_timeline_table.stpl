@@ -14,8 +14,8 @@
       </thead>
       <tbody>
         <% for job in self.recent_jobs { %>
-          <% let state = crate::model::hyperlink_processing_job::state_name(job.state.clone()); %>
-          <% let kind = crate::model::hyperlink_processing_job::kind_name(job.kind.clone()); %>
+          <% let state = crate::app::models::hyperlink_processing_job::state_name(job.state.clone()); %>
+          <% let kind = crate::app::models::hyperlink_processing_job::kind_name(job.kind.clone()); %>
           <tr>
             <td><%= kind %></td>
             <td><%= state %></td>

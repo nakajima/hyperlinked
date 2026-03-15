@@ -27,7 +27,7 @@
     <nav class="basis-full flex flex-row flex-wrap items-end gap-2 pt-1 text-sm" aria-label="Admin sections">
       <a href="/admin/overview" class="<%= self.admin_tab_link_class("/admin/overview") %>"<% if self.admin_tab_is_active("/admin/overview") { %> aria-current="page"<% } %>>Overview</a>
       <a href="/admin/artifacts" class="<%= self.admin_tab_link_class("/admin/artifacts") %>"<% if self.admin_tab_is_active("/admin/artifacts") { %> aria-current="page"<% } %>>Artifacts</a>
-      <a href="/admin/tags" class="<%= self.admin_tab_link_class("/admin/tags") %>"<% if self.admin_tab_is_active("/admin/tags") { %> aria-current="page"<% } %>>Tags</a>
+      <a href="/admin/llm-interactions" class="<%= self.admin_tab_link_class("/admin/llm-interactions") %>"<% if self.admin_tab_is_active("/admin/llm-interactions") { %> aria-current="page"<% } %>>LLM</a>
       <a href="/admin/queue" class="<%= self.admin_tab_link_class("/admin/queue") %>"<% if self.admin_tab_is_active("/admin/queue") { %> aria-current="page"<% } %>>
         <span>Queue</span>
         <span
