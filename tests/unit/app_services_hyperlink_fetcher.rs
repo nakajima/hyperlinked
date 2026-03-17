@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support;
 
 fn fuzzy(value: &str) -> SearchTerm {
     SearchTerm {
@@ -187,4 +188,68 @@ fn exact_term_highlighting_uses_word_boundaries() {
 fn markdown_to_plain_text_strips_link_markup() {
     let plain = markdown_to_plain_text("Read [parser docs](https://example.com/docs) now");
     assert_eq!(plain, "Read parser docs now");
+}
+
+#[test]
+fn direct_hyperlink_query_fast_path_only_handles_simple_non_sqlite_specific_cases() {
+    let parsed = ParsedHyperlinkQuery::default();
+    assert!(can_use_direct_hyperlink_query(
+        &parsed,
+        &[],
+        OrderToken::Newest
+    ));
+    assert!(can_use_direct_hyperlink_query(
+        &parsed,
+        &[],
+        OrderToken::MostClicked
+    ));
+    assert!(!can_use_direct_hyperlink_query(
+        &parsed,
+        &[fuzzy("rust")],
+        OrderToken::Newest
+    ));
+    assert!(!can_use_direct_hyperlink_query(
+        &parsed,
+        &[],
+        OrderToken::Random
+    ));
+
+    let mut with_status = ParsedHyperlinkQuery::default();
+    with_status.statuses.push(StatusToken::Failed);
+    assert!(!can_use_direct_hyperlink_query(
+        &with_status,
+        &[],
+        OrderToken::Newest
+    ));
+}
+
+#[tokio::test]
+async fn fetch_hyperlink_page_slice_uses_direct_query_filters_for_simple_cases() {
+    let connection = test_support::new_memory_connection().await;
+    test_support::initialize_hyperlinks_schema(&connection).await;
+    test_support::execute_sql(
+        &connection,
+        r#"
+            INSERT INTO hyperlink (id, title, url, raw_url, source_type, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+            VALUES
+                (1, 'Newest Root Pdf', 'https://example.com/pdf', 'https://example.com/pdf', 'pdf', 0, 0, NULL, '2026-02-19 00:00:03', '2026-02-19 00:00:03'),
+                (2, 'Newest Root Html', 'https://example.com/html-new', 'https://example.com/html-new', 'html', 0, 0, NULL, '2026-02-19 00:00:02', '2026-02-19 00:00:02'),
+                (3, 'Clicked Root Html', 'https://example.com/html-clicked', 'https://example.com/html-clicked', 'html', 0, 4, NULL, '2026-02-19 00:00:01', '2026-02-19 00:00:01'),
+                (4, 'Discovered Html', 'https://example.com/discovered', 'https://example.com/discovered', 'html', 1, 0, NULL, '2026-02-19 00:00:04', '2026-02-19 00:00:04');
+        "#,
+    )
+    .await;
+
+    let mut parsed = ParsedHyperlinkQuery::default();
+    parsed.types.push(TypeToken::NonPdf);
+    parsed.clicks.push(ClickToken::Unclicked);
+
+    let slice =
+        fetch_hyperlink_page_slice(&connection, &parsed, &[], OrderToken::Newest, 1, 10, false)
+            .await
+            .expect("page slice should load");
+
+    assert_eq!(slice.hyperlink_ids, vec![2]);
+    assert_eq!(slice.page, 1);
+    assert_eq!(slice.total_pages, 1);
 }

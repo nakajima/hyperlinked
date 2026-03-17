@@ -1,3 +1,4 @@
+pub mod admin_jobs;
 pub mod artifact_job;
 pub mod hyperlink;
 pub mod hyperlink_artifact;
@@ -7,8 +8,10 @@ pub mod hyperlink_search_doc;
 pub mod hyperlink_title;
 pub mod hyperlink_tombstone;
 pub mod kv_store;
+pub mod llm_discovery;
 pub mod llm_interaction;
 pub mod llm_settings;
 pub mod model_trait;
 pub mod settings;
+pub mod upload;
 pub mod url_canonicalize;

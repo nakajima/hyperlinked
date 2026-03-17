@@ -1,6 +1,13 @@
 use std::collections::HashMap;
 
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, Statement, Value};
+use sea_orm::{
+    ActiveModelTrait,
+    ActiveValue::Set,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Statement,
+    entity::prelude::{DateTime, DateTimeUtc},
+};
+
+use crate::entity::app_kv;
 
 const APP_KV_TABLE_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS app_kv (
@@ -12,47 +19,39 @@ const APP_KV_TABLE_SQL: &str = r#"
 
 pub async fn get(connection: &DatabaseConnection, key: &str) -> Result<Option<String>, DbErr> {
     ensure_table(connection).await?;
-    let backend = connection.get_database_backend();
-    let row = connection
-        .query_one(Statement::from_sql_and_values(
-            backend,
-            "SELECT value FROM app_kv WHERE key = ?".to_string(),
-            vec![Value::from(key.to_string())],
-        ))
-        .await?;
-
-    Ok(row.and_then(|row| row.try_get::<String>("", "value").ok()))
+    Ok(app_kv::Entity::find_by_id(key.to_string())
+        .one(connection)
+        .await?
+        .map(|row| row.value))
 }
 
 pub async fn set(connection: &DatabaseConnection, key: &str, value: &str) -> Result<(), DbErr> {
     ensure_table(connection).await?;
-    let backend = connection.get_database_backend();
-    connection
-        .execute(Statement::from_sql_and_values(
-            backend,
-            r#"
-                INSERT INTO app_kv (key, value, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(key) DO UPDATE SET
-                    value = excluded.value,
-                    updated_at = CURRENT_TIMESTAMP
-            "#
-            .to_string(),
-            vec![Value::from(key.to_string()), Value::from(value.to_string())],
-        ))
-        .await
-        .map(|_| ())
+    let updated_at = now_utc();
+    if let Some(existing) = app_kv::Entity::find_by_id(key.to_string())
+        .one(connection)
+        .await?
+    {
+        let mut active_model: app_kv::ActiveModel = existing.into();
+        active_model.value = Set(value.to_string());
+        active_model.updated_at = Set(updated_at);
+        active_model.update(connection).await?;
+    } else {
+        app_kv::ActiveModel {
+            key: Set(key.to_string()),
+            value: Set(value.to_string()),
+            updated_at: Set(updated_at),
+        }
+        .insert(connection)
+        .await?;
+    }
+    Ok(())
 }
 
 pub async fn delete(connection: &DatabaseConnection, key: &str) -> Result<(), DbErr> {
     ensure_table(connection).await?;
-    let backend = connection.get_database_backend();
-    connection
-        .execute(Statement::from_sql_and_values(
-            backend,
-            "DELETE FROM app_kv WHERE key = ?".to_string(),
-            vec![Value::from(key.to_string())],
-        ))
+    app_kv::Entity::delete_by_id(key.to_string())
+        .exec(connection)
         .await
         .map(|_| ())
 }
@@ -62,24 +61,36 @@ pub async fn get_many(
     keys: &[&str],
 ) -> Result<HashMap<String, String>, DbErr> {
     ensure_table(connection).await?;
-    let mut values = HashMap::with_capacity(keys.len());
-    for key in keys {
-        if let Some(value) = get(connection, key).await? {
-            values.insert((*key).to_string(), value);
-        }
+    if keys.is_empty() {
+        return Ok(HashMap::new());
     }
+
+    let rows = app_kv::Entity::find()
+        .filter(app_kv::Column::Key.is_in(keys.iter().map(|key| (*key).to_string())))
+        .all(connection)
+        .await?;
+
+    let mut values = HashMap::with_capacity(rows.len());
+    for row in rows {
+        values.insert(row.key, row.value);
+    }
+
     Ok(values)
 }
 
 async fn ensure_table(connection: &DatabaseConnection) -> Result<(), DbErr> {
     let backend = connection.get_database_backend();
     connection
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             backend,
             APP_KV_TABLE_SQL.to_string(),
         ))
         .await
         .map(|_| ())
+}
+
+fn now_utc() -> DateTime {
+    DateTimeUtc::from(std::time::SystemTime::now()).naive_utc()
 }
 #[cfg(test)]
 #[path = "../../../tests/unit/app_models_kv_store.rs"]

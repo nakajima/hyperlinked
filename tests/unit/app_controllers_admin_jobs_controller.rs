@@ -55,7 +55,7 @@ async fn insert_queue_job(
             ],
         );
     connection
-        .execute(statement)
+        .execute_raw(statement)
         .await
         .expect("queue row should insert");
 }
@@ -67,7 +67,7 @@ async fn queue_status(connection: &DatabaseConnection, id: i64) -> String {
         vec![id.into()],
     );
     let row = connection
-        .query_one(statement)
+        .query_one_raw(statement)
         .await
         .expect("queue lookup should succeed")
         .expect("queue row should exist");
@@ -515,7 +515,7 @@ async fn recover_orphans_marks_running_jobs_failed_and_requeues() {
     response.assert_header("location", "/admin/jobs");
 
     let orphan_row = connection
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "SELECT state FROM hyperlink_processing_job WHERE id = ?".to_string(),
             vec![101.into()],
@@ -529,7 +529,7 @@ async fn recover_orphans_marks_running_jobs_failed_and_requeues() {
     assert_eq!(orphan_state, "failed");
 
     let active_row = connection
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "SELECT state FROM hyperlink_processing_job WHERE id = ?".to_string(),
             vec![102.into()],
@@ -543,7 +543,7 @@ async fn recover_orphans_marks_running_jobs_failed_and_requeues() {
     assert_eq!(active_state, "running");
 
     let requeue_count_row = connection
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "SELECT COUNT(*) FROM hyperlink_processing_job
                  WHERE hyperlink_id = ? AND kind = 'readability' AND state = 'queued'"

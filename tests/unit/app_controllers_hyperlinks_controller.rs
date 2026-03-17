@@ -195,6 +195,24 @@ async fn json_create_autofills_empty_title() {
 }
 
 #[tokio::test]
+async fn html_create_invalid_input_rerenders_new_form_with_errors() {
+    let server = new_server().await;
+
+    let response = server
+        .post("/hyperlinks")
+        .text(form_body("", "mailto:test@example.com"))
+        .content_type("application/x-www-form-urlencoded")
+        .await;
+    response.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+
+    let body = response.text();
+    assert!(body.contains("Please fix the highlighted issue."));
+    assert!(body.contains("url must use http or https"));
+    assert!(body.contains("value=\"mailto:test@example.com\""));
+    assert!(body.contains("action=\"/hyperlinks\" method=\"post\""));
+}
+
+#[tokio::test]
 async fn json_create_canonicalizes_query_params_and_preserves_raw_url() {
     let server = new_server().await;
     let created = create_json_hyperlink(
@@ -1216,6 +1234,58 @@ async fn html_write_flows_redirect() {
         .get("/hyperlinks/1.json")
         .await
         .assert_status_not_found();
+}
+
+#[tokio::test]
+async fn html_update_invalid_input_rerenders_edit_form_with_errors() {
+    let server = new_server().await;
+    let created = create_json_hyperlink(&server, "Example", "https://example.com").await;
+
+    let update = server
+        .post(&format!("/hyperlinks/{}/update", created.id))
+        .text(form_body("Broken", "mailto:test@example.com"))
+        .content_type("application/x-www-form-urlencoded")
+        .await;
+    update.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+
+    let body = update.text();
+    assert!(body.contains("Please fix the highlighted issue."));
+    assert!(body.contains("url must use http or https"));
+    assert!(body.contains("value=\"Broken\""));
+    assert!(body.contains("value=\"mailto:test@example.com\""));
+    assert!(body.contains(&format!("action=\"/hyperlinks/{}/update\"", created.id)));
+}
+
+#[tokio::test]
+async fn path_id_params_take_precedence_over_query_id_params() {
+    let server = new_server().await;
+    let first = create_json_hyperlink(&server, "First", "https://example.com/first").await;
+    let second = create_json_hyperlink(&server, "Second", "https://example.com/second").await;
+
+    let show = server
+        .get(&format!("/hyperlinks/{}.json?id={}", first.id, second.id))
+        .await;
+    show.assert_status_ok();
+    let shown: HyperlinkResponse = show.json();
+
+    assert_eq!(shown.id, first.id);
+    assert_eq!(shown.title, "First");
+}
+
+#[tokio::test]
+async fn malformed_json_body_returns_json_bad_request() {
+    let server = new_server().await;
+
+    let response = server
+        .post("/hyperlinks.json")
+        .text("{not valid json")
+        .content_type("application/json")
+        .await;
+    response.assert_status_bad_request();
+
+    let body = response.text();
+    assert!(body.contains("\"error\""));
+    assert!(body.contains("failed to parse json body"));
 }
 
 #[tokio::test]

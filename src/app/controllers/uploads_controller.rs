@@ -6,34 +6,31 @@ use axum::{
     response::{IntoResponse, Response},
     routing,
 };
-use sea_orm::{
-    ActiveModelTrait,
-    ActiveValue::Set,
-    ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
-    entity::prelude::{DateTime, DateTimeUtc},
-};
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::{
     app::models::{
         artifact_job::{self, ArtifactFetchMode, ArtifactJobResolveResult},
         hyperlink_artifact as hyperlink_artifact_model, hyperlink_processing_job, settings,
+        upload::{
+            DEFAULT_FILENAME, find_existing_pdf_upload, latest_job_optional, looks_like_pdf,
+            normalized_upload_title, now_utc, pending_upload_placeholder, sanitize_pdf_filename,
+            sha256_hex, upload_filename_from_url, upload_hyperlink_url,
+        },
     },
     entity::{
-        hyperlink,
-        hyperlink_artifact::{self, HyperlinkArtifactKind},
+        hyperlink, hyperlink_artifact::HyperlinkArtifactKind,
         hyperlink_processing_job::HyperlinkProcessingJobKind,
     },
     server::context::Context,
 };
 
+#[cfg(test)]
+pub(crate) use crate::app::models::upload::UPLOADS_PREFIX;
+
 const MAX_UPLOAD_SIZE_BYTES: usize = 100 * 1024 * 1024;
 const PDF_CONTENT_TYPE: &str = "application/pdf";
-const PDF_SIGNATURE: &[u8] = b"%PDF-";
-const UPLOADS_PREFIX: &str = "/uploads";
-const DEFAULT_FILENAME: &str = "document.pdf";
-const DEFAULT_TITLE: &str = "Untitled PDF";
 
 pub fn routes() -> Router<Context> {
     Router::new()
@@ -321,37 +318,6 @@ async fn parse_upload_multipart(multipart: &mut Multipart) -> Result<ParsedUploa
     Ok(parsed)
 }
 
-async fn find_existing_pdf_upload(
-    connection: &sea_orm::DatabaseConnection,
-    checksum_sha256: &str,
-    filename: &str,
-) -> Option<hyperlink::Model> {
-    let artifacts = hyperlink_artifact::Entity::find()
-        .filter(hyperlink_artifact::Column::Kind.eq(HyperlinkArtifactKind::PdfSource))
-        .filter(hyperlink_artifact::Column::ChecksumSha256.eq(checksum_sha256.to_string()))
-        .order_by_desc(hyperlink_artifact::Column::CreatedAt)
-        .order_by_desc(hyperlink_artifact::Column::Id)
-        .all(connection)
-        .await
-        .ok()?;
-
-    for artifact in artifacts {
-        let Some(link) = hyperlink::Entity::find_by_id(artifact.hyperlink_id)
-            .one(connection)
-            .await
-            .ok()
-            .flatten()
-        else {
-            continue;
-        };
-        if upload_filename_from_url(link.url.as_str()).as_deref() == Some(filename) {
-            return Some(link);
-        }
-    }
-
-    None
-}
-
 async fn enqueue_upload_processing_jobs(state: &Context, hyperlink_id: i32) -> Result<(), String> {
     let Some(queue) = state.processing_queue.as_ref() else {
         return Ok(());
@@ -399,10 +365,6 @@ async fn enqueue_upload_processing_jobs(state: &Context, hyperlink_id: i32) -> R
     Ok(())
 }
 
-fn looks_like_pdf(payload: &[u8]) -> bool {
-    payload.len() >= PDF_SIGNATURE.len() && &payload[..PDF_SIGNATURE.len()] == PDF_SIGNATURE
-}
-
 fn response_error(status: StatusCode, message: impl Into<String>) -> Response {
     let payload = ErrorResponse {
         error: message.into(),
@@ -434,113 +396,6 @@ fn to_response(
     }
 }
 
-async fn latest_job_optional(
-    connection: &sea_orm::DatabaseConnection,
-    hyperlink_id: i32,
-) -> Option<crate::entity::hyperlink_processing_job::Model> {
-    hyperlink_processing_job::latest_for_hyperlink(connection, hyperlink_id)
-        .await
-        .ok()
-        .flatten()
-}
-
-fn normalized_upload_title(raw_title: Option<&str>, filename: &str) -> String {
-    if let Some(raw_title) = raw_title {
-        let trimmed = raw_title.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
-    }
-
-    filename
-        .strip_suffix(".pdf")
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_TITLE)
-        .to_string()
-}
-
-fn sanitize_pdf_filename(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let without_query = trimmed.split(['?', '#']).next().unwrap_or(trimmed);
-    let last_component = without_query
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(without_query);
-    let mut cleaned = last_component
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ' ' | '(' | ')'))
-        .collect::<String>();
-
-    cleaned = cleaned.trim().trim_matches('.').to_string();
-    if cleaned.is_empty() {
-        cleaned = DEFAULT_FILENAME.to_string();
-    }
-
-    if !cleaned.to_ascii_lowercase().ends_with(".pdf") {
-        cleaned.push_str(".pdf");
-    }
-
-    while cleaned.contains("..") {
-        cleaned = cleaned.replace("..", ".");
-    }
-
-    cleaned
-}
-
-fn sha256_hex(payload: &[u8]) -> String {
-    let digest = Sha256::digest(payload);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        output.push(hex_char((byte >> 4) & 0x0F));
-        output.push(hex_char(byte & 0x0F));
-    }
-    output
-}
-
-fn hex_char(value: u8) -> char {
-    match value {
-        0..=9 => (b'0' + value) as char,
-        10..=15 => (b'a' + (value - 10)) as char,
-        _ => unreachable!("hex nibble must be in range 0..=15"),
-    }
-}
-
-fn upload_hyperlink_url(id: i32, filename: &str) -> String {
-    format!("{UPLOADS_PREFIX}/{id}/{filename}")
-}
-
-fn pending_upload_placeholder(filename: &str) -> String {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("{UPLOADS_PREFIX}/pending-{nonce}/{filename}")
-}
-
-fn upload_filename_from_url(url: &str) -> Option<String> {
-    let path = if url.starts_with('/') {
-        url.split(['?', '#']).next().unwrap_or(url).to_string()
-    } else {
-        let parsed = reqwest::Url::parse(url).ok()?;
-        parsed.path().to_string()
-    };
-
-    let mut parts = path.trim_start_matches('/').split('/');
-    if parts.next()? != "uploads" {
-        return None;
-    }
-    let _id = parts.next()?;
-    let filename = parts.next()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(filename.to_string())
-}
-
-fn now_utc() -> DateTime {
-    DateTimeUtc::from(std::time::SystemTime::now()).naive_utc()
-}
 #[cfg(test)]
 #[path = "../../../tests/unit/app_controllers_uploads_controller.rs"]
 mod tests;

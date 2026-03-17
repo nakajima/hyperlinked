@@ -694,7 +694,7 @@ async fn insert_queue_job(
             ],
         );
     connection
-        .execute(statement)
+        .execute_raw(statement)
         .await
         .expect("queue row should insert");
 }
@@ -706,7 +706,7 @@ async fn queue_status(connection: &sea_orm::DatabaseConnection, id: i64) -> Stri
         vec![id.into()],
     );
     let row = connection
-        .query_one(statement)
+        .query_one_raw(statement)
         .await
         .expect("queue lookup should succeed")
         .expect("queue row should exist");

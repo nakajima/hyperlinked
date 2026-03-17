@@ -1,10 +1,10 @@
 <section aria-labelledby="edit-link-heading" class="flex flex-col gap-4">
   <h2 id="edit-link-heading" class="text-2xl font-semibold leading-8 tracking-tight">Edit Link</h2>
-  <% let action = format!("/hyperlinks/{}/update", self.link.id); %>
+  <% let action = format!("/hyperlinks/{}/update", self.link_id); %>
   <% let submit_label = "Update"; %>
-  <% let title = self.link.title.as_str(); %>
-  <% let url = self.link.raw_url.as_str(); %>
+  <% let title = self.title; %>
+  <% let url = self.url; %>
   <% let is_new_record = false; %>
   <% include!("_form.stpl"); %>
-  <p><a class="text-accent no-underline hover:text-accent/80" href="/hyperlinks/<%= self.link.id %>">Back to link</a></p>
+  <p><a class="text-accent no-underline hover:text-accent/80" href="/hyperlinks/<%= self.link_id %>">Back to link</a></p>
 </section>

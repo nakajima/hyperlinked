@@ -233,7 +233,7 @@ async fn delete_removed_job_rows_deletes_legacy_kinds() {
     assert_eq!(affected, 2);
 
     let rows = connection
-        .query_all(sea_orm::Statement::from_string(
+        .query_all_raw(sea_orm::Statement::from_string(
             sea_orm::DatabaseBackend::Sqlite,
             "SELECT kind FROM hyperlink_processing_job ORDER BY id".to_string(),
         ))

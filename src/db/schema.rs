@@ -1,10 +1,9 @@
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, Schema};
 
 use crate::entity::{
-    action_tag, app_kv, artifact_gc_pending, hyperlink, hyperlink_action_tag,
-    hyperlink_artifact, hyperlink_processing_job, hyperlink_relation, hyperlink_search_doc,
-    hyperlink_tag, hyperlink_tombstone, hyperlink_topic_tag, jobs, llm_interaction, tag,
-    topic_tag,
+    action_tag, app_kv, artifact_gc_pending, hyperlink, hyperlink_action_tag, hyperlink_artifact,
+    hyperlink_processing_job, hyperlink_relation, hyperlink_search_doc, hyperlink_tag,
+    hyperlink_tombstone, hyperlink_topic_tag, jobs, llm_interaction, tag, topic_tag,
 };
 
 const MARK_DUPLICATE_ACTIVE_JOBS_FAILED_SQL: &str = r#"
@@ -33,29 +32,9 @@ const CREATE_ACTIVE_JOB_UNIQUE_INDEX_SQL: &str = r#"
     WHERE state IN ('queued', 'running')
 "#;
 
-const CREATE_ARTIFACT_JOB_KIND_UNIQUE_INDEX_SQL: &str = r#"
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_hyperlink_artifact_job_id_kind
-    ON hyperlink_artifact (job_id, kind)
-"#;
-
-const CREATE_RELATION_PAIR_UNIQUE_INDEX_SQL: &str = r#"
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_hyperlink_relation_parent_child_unique
-    ON hyperlink_relation (parent_hyperlink_id, child_hyperlink_id)
-"#;
-
-const CREATE_HYPERLINK_TAG_UNIQUE_INDEX_SQL: &str = r#"
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_hyperlink_tag_hyperlink_id_tag_id_unique
-    ON hyperlink_tag (hyperlink_id, tag_id)
-"#;
-
 const CREATE_HYPERLINK_TAG_SOURCE_INDEX_SQL: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_hyperlink_tag_hyperlink_id_source
     ON hyperlink_tag (hyperlink_id, source)
-"#;
-
-const CREATE_HYPERLINK_TOPIC_TAG_UNIQUE_INDEX_SQL: &str = r#"
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_hyperlink_topic_tag_hyperlink_id_topic_tag_id_unique
-    ON hyperlink_topic_tag (hyperlink_id, topic_tag_id)
 "#;
 
 const CREATE_HYPERLINK_TOPIC_TAG_SOURCE_INDEX_SQL: &str = r#"
@@ -68,11 +47,6 @@ const CREATE_HYPERLINK_TOPIC_TAG_RANK_INDEX_SQL: &str = r#"
     ON hyperlink_topic_tag (hyperlink_id, rank_index)
 "#;
 
-const CREATE_HYPERLINK_ACTION_TAG_UNIQUE_INDEX_SQL: &str = r#"
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_hyperlink_action_tag_hyperlink_id_action_tag_id_unique
-    ON hyperlink_action_tag (hyperlink_id, action_tag_id)
-"#;
-
 const CREATE_HYPERLINK_ACTION_TAG_SOURCE_INDEX_SQL: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_hyperlink_action_tag_hyperlink_id_source
     ON hyperlink_action_tag (hyperlink_id, source)
@@ -82,6 +56,14 @@ const CREATE_HYPERLINK_ACTION_TAG_RANK_INDEX_SQL: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_hyperlink_action_tag_hyperlink_id_rank_index
     ON hyperlink_action_tag (hyperlink_id, rank_index)
 "#;
+
+const DROP_LEGACY_ENTITY_UNIQUE_INDEXES_SQL: &[&str] = &[
+    "DROP INDEX IF EXISTS idx_hyperlink_artifact_job_id_kind",
+    "DROP INDEX IF EXISTS idx_hyperlink_relation_parent_child_unique",
+    "DROP INDEX IF EXISTS idx_hyperlink_tag_hyperlink_id_tag_id_unique",
+    "DROP INDEX IF EXISTS idx_hyperlink_topic_tag_hyperlink_id_topic_tag_id_unique",
+    "DROP INDEX IF EXISTS idx_hyperlink_action_tag_hyperlink_id_action_tag_id_unique",
+];
 
 const CREATE_SEARCH_FTS_TABLE_SQL: &str = r#"
     CREATE VIRTUAL TABLE IF NOT EXISTS hyperlink_search_fts USING fts5(
@@ -260,6 +242,8 @@ pub async fn ensure_current(connection: &DatabaseConnection) -> Result<(), Strin
 }
 
 pub async fn sync(connection: &DatabaseConnection) -> Result<(), DbErr> {
+    drop_legacy_entity_unique_indexes(connection).await?;
+
     create_entity(connection, hyperlink::Entity).await?;
     create_entity(connection, tag::Entity).await?;
     create_entity(connection, topic_tag::Entity).await?;
@@ -280,6 +264,14 @@ pub async fn sync(connection: &DatabaseConnection) -> Result<(), DbErr> {
     apply_sqlite_extras(connection).await
 }
 
+async fn drop_legacy_entity_unique_indexes(connection: &DatabaseConnection) -> Result<(), DbErr> {
+    for statement in DROP_LEGACY_ENTITY_UNIQUE_INDEXES_SQL {
+        connection.execute_unprepared(statement).await?;
+    }
+
+    Ok(())
+}
+
 async fn create_entity<E>(connection: &DatabaseConnection, entity: E) -> Result<(), DbErr>
 where
     E: EntityTrait + Copy,
@@ -289,11 +281,11 @@ where
 
     let mut create_table = schema.create_table_from_entity(entity);
     create_table.if_not_exists();
-    connection.execute(backend.build(&create_table)).await?;
+    connection.execute_raw(backend.build(&create_table)).await?;
 
     for mut create_index in schema.create_index_from_entity(entity) {
         create_index.if_not_exists();
-        connection.execute(backend.build(&create_index)).await?;
+        connection.execute_raw(backend.build(&create_index)).await?;
     }
 
     Ok(())
@@ -303,14 +295,9 @@ async fn apply_sqlite_extras(connection: &DatabaseConnection) -> Result<(), DbEr
     let statements = [
         MARK_DUPLICATE_ACTIVE_JOBS_FAILED_SQL,
         CREATE_ACTIVE_JOB_UNIQUE_INDEX_SQL,
-        CREATE_ARTIFACT_JOB_KIND_UNIQUE_INDEX_SQL,
-        CREATE_RELATION_PAIR_UNIQUE_INDEX_SQL,
-        CREATE_HYPERLINK_TAG_UNIQUE_INDEX_SQL,
         CREATE_HYPERLINK_TAG_SOURCE_INDEX_SQL,
-        CREATE_HYPERLINK_TOPIC_TAG_UNIQUE_INDEX_SQL,
         CREATE_HYPERLINK_TOPIC_TAG_SOURCE_INDEX_SQL,
         CREATE_HYPERLINK_TOPIC_TAG_RANK_INDEX_SQL,
-        CREATE_HYPERLINK_ACTION_TAG_UNIQUE_INDEX_SQL,
         CREATE_HYPERLINK_ACTION_TAG_SOURCE_INDEX_SQL,
         CREATE_HYPERLINK_ACTION_TAG_RANK_INDEX_SQL,
         CREATE_SEARCH_FTS_TABLE_SQL,

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use async_graphql::http::graphiql_source;
 use axum::{
     Json, Router,
     extract::State,
@@ -21,7 +22,6 @@ use seaography::{
         dynamic::{
             Enum, Field, FieldFuture, FieldValue, InputValue, Object, Schema, SchemaError, TypeRef,
         },
-        http::graphiql_source,
         parser::types::{DocumentOperations, OperationType},
     },
     heck::ToLowerCamelCase,
@@ -116,15 +116,23 @@ impl HyperlinkChangeType {
 
 macro_rules! register_read_only_entity {
     ($builder:ident, $module_path:ident) => {
+        let related_entity_filter =
+            seaography::RelatedEntityFilter::<$module_path::Entity>::build::<
+                $module_path::RelatedEntity,
+            >($builder.context);
         $builder.register_entity::<$module_path::Entity>(
             <$module_path::RelatedEntity as sea_orm::Iterable>::iter()
                 .map(|rel| seaography::RelationBuilder::get_relation(&rel, $builder.context))
                 .collect(),
+            &related_entity_filter,
         );
         $builder =
             $builder.register_entity_dataloader_one_to_one($module_path::Entity, tokio::spawn);
         $builder =
             $builder.register_entity_dataloader_one_to_many($module_path::Entity, tokio::spawn);
+        $builder = $builder.register_related_entity_filter::<$module_path::Entity>(
+            related_entity_filter,
+        );
     };
 }
 
@@ -228,7 +236,7 @@ fn register_hyperlinks_query_field(builder: &mut Builder, query_index: usize) {
             FieldFuture::new(async move {
                 let db = ctx.data::<DatabaseConnection>()?;
                 let pagination = ctx.args.get(&field_pagination_name);
-                let pagination = PaginationInputBuilder { context }.parse_object(pagination);
+                let pagination = PaginationInputBuilder { context }.parse_object(pagination)?;
                 let q = match ctx.args.get(FIELD_Q) {
                     Some(value) if value.is_null() => None,
                     Some(value) => {
@@ -253,22 +261,23 @@ fn register_hyperlinks_query_field(builder: &mut Builder, query_index: usize) {
                     .fetch()
                     .await?;
                     let connection = apply_memory_pagination::<hyperlink::Entity>(
+                        context,
                         Some(results.links),
                         pagination,
-                    );
+                    )?;
                     return Ok(Some(FieldValue::owned_any(connection)));
                 }
 
                 let filters = ctx.args.get(&field_filters_name);
                 let filters =
-                    seaography::get_filter_conditions::<hyperlink::Entity>(context, filters);
+                    seaography::get_filter_conditions::<hyperlink::Entity>(context, filters)?;
                 let order_by = ctx.args.get(&field_order_by_name);
                 let order_by =
-                    OrderInputBuilder { context }.parse_object::<hyperlink::Entity>(order_by);
+                    OrderInputBuilder { context }.parse_object::<hyperlink::Entity>(order_by)?;
                 let stmt = hyperlink::Entity::find().filter(filters);
                 let stmt = apply_order(stmt, order_by);
                 let connection =
-                    apply_pagination::<hyperlink::Entity>(db, stmt, pagination).await?;
+                    apply_pagination::<hyperlink::Entity, _>(context, db, stmt, pagination).await?;
                 Ok(Some(FieldValue::owned_any(connection)))
             })
         },
@@ -569,12 +578,12 @@ fn register_hyperlink_sublinks_field(builder: &mut Builder) {
 
                 let filters = ctx.args.get(&field_filters_name);
                 let filters =
-                    seaography::get_filter_conditions::<hyperlink::Entity>(context, filters);
+                    seaography::get_filter_conditions::<hyperlink::Entity>(context, filters)?;
                 let order_by = ctx.args.get(&field_order_by_name);
                 let order_by =
-                    OrderInputBuilder { context }.parse_object::<hyperlink::Entity>(order_by);
+                    OrderInputBuilder { context }.parse_object::<hyperlink::Entity>(order_by)?;
                 let pagination = ctx.args.get(&field_pagination_name);
-                let pagination = PaginationInputBuilder { context }.parse_object(pagination);
+                let pagination = PaginationInputBuilder { context }.parse_object(pagination)?;
 
                 let stmt = hyperlink::Entity::find()
                     .join(
@@ -585,7 +594,7 @@ fn register_hyperlink_sublinks_field(builder: &mut Builder) {
                     .filter(filters);
                 let stmt = apply_order(stmt, order_by);
                 let connection =
-                    apply_pagination::<hyperlink::Entity>(db, stmt, pagination).await?;
+                    apply_pagination::<hyperlink::Entity, _>(context, db, stmt, pagination).await?;
 
                 Ok(Some(FieldValue::owned_any(connection)))
             })

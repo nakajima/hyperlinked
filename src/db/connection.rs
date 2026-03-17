@@ -47,7 +47,7 @@ async fn apply_sqlite_pragmas(connection: &DatabaseConnection) -> Result<(), DbE
 
     for statement in statements {
         connection
-            .execute(Statement::from_string(backend, statement.to_string()))
+            .execute_raw(Statement::from_string(backend, statement.to_string()))
             .await?;
     }
 

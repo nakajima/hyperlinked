@@ -18,9 +18,9 @@ pub enum HyperlinkTagSource {
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    #[sea_orm(indexed)]
+    #[sea_orm(indexed, unique_key = "link_tag")]
     pub hyperlink_id: i32,
-    #[sea_orm(indexed)]
+    #[sea_orm(indexed, unique_key = "link_tag")]
     pub tag_id: i32,
     #[sea_orm(default_value = "AI", indexed)]
     pub source: HyperlinkTagSource,

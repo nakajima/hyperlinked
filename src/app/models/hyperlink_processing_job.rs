@@ -192,7 +192,7 @@ pub async fn delete_removed_job_rows(
             .collect::<Vec<_>>(),
     );
 
-    Ok(connection.execute(statement).await?.rows_affected())
+    Ok(connection.execute_raw(statement).await?.rows_affected())
 }
 
 pub fn state_name(state: HyperlinkProcessingJobState) -> &'static str {
@@ -247,7 +247,7 @@ pub async fn delete_stale_active_rows(
         vec![processing_task_job_type().into()],
     );
 
-    Ok(connection.execute(statement).await?.rows_affected())
+    Ok(connection.execute_raw(statement).await?.rows_affected())
 }
 
 fn now_utc() -> DateTime {

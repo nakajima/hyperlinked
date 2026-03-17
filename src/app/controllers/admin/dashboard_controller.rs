@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    error::Error as _,
     io::{ErrorKind, Read, Seek, Write},
     path::{Component, Path, PathBuf},
     time::{Duration, Instant},
@@ -14,11 +13,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing,
 };
-use chrono::{Duration as ChronoDuration, Utc};
-use reqwest::{
-    Url,
-    header::{HeaderName, HeaderValue},
-};
+use chrono::Utc;
+use reqwest::header::{HeaderName, HeaderValue};
 use sailfish::Template;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr,
@@ -30,13 +26,30 @@ use tokio_util::io::ReaderStream;
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 
 use crate::{
-    app::models::{
-        artifact_job::{self, ArtifactFetchMode},
-        hyperlink_artifact as hyperlink_artifact_model,
-        hyperlink_processing_job::{self as hyperlink_processing_job_model, ProcessingQueueSender},
-        hyperlink_search_doc, llm_interaction as llm_interaction_model,
-        llm_settings::{self, LlmBackendKind, LlmProvider, LlmSettings},
-        settings::{self, ArtifactCollectionSettings},
+    app::{
+        helpers::admin_dashboard::{
+            ADMIN_TAB_ARTIFACTS_PATH, ADMIN_TAB_IMPORT_EXPORT_PATH,
+            ADMIN_TAB_LLM_INTERACTIONS_PATH, ADMIN_TAB_OVERVIEW_PATH, ADMIN_TAB_QUEUE_PATH,
+            ADMIN_TAB_STORAGE_PATH, AdminTab, format_bytes, format_bytes_f64,
+            format_relative_duration, llm_interactions_href,
+        },
+        models::{
+            artifact_job::{self, ArtifactFetchMode},
+            hyperlink_artifact as hyperlink_artifact_model,
+            hyperlink_processing_job::{
+                self as hyperlink_processing_job_model, ProcessingQueueSender,
+            },
+            hyperlink_search_doc,
+            llm_discovery::{
+                ChatApiKind, build_chat_request_body, chat_endpoint_candidates,
+                extract_llm_model_ids, format_reqwest_transport_error,
+                llm_backend_kind_for_chat_api, llm_backend_kind_for_models_path,
+                llm_models_endpoints, truncate_model_discovery_body,
+            },
+            llm_interaction as llm_interaction_model,
+            llm_settings::{self, LlmBackendKind, LlmProvider, LlmSettings},
+            settings::{self, ArtifactCollectionSettings},
+        },
     },
     entity::{
         hyperlink,
@@ -80,59 +93,6 @@ const LLM_MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 const LLM_INTERACTIONS_PER_PAGE: u64 = 50;
 const DEFAULT_LLM_AUTH_HEADER_NAME: &str = "Authorization";
 const DEFAULT_LLM_AUTH_HEADER_PREFIX: &str = "Bearer";
-const ADMIN_TAB_OVERVIEW_PATH: &str = "/admin/overview";
-const ADMIN_TAB_ARTIFACTS_PATH: &str = "/admin/artifacts";
-const ADMIN_TAB_LLM_INTERACTIONS_PATH: &str = "/admin/llm-interactions";
-const ADMIN_TAB_QUEUE_PATH: &str = "/admin/queue";
-const ADMIN_TAB_IMPORT_EXPORT_PATH: &str = "/admin/import-export";
-const ADMIN_TAB_STORAGE_PATH: &str = "/admin/storage";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AdminTab {
-    Overview,
-    Artifacts,
-    LlmInteractions,
-    Queue,
-    ImportExport,
-    Storage,
-}
-
-impl AdminTab {
-    fn path(self) -> &'static str {
-        match self {
-            Self::Overview => ADMIN_TAB_OVERVIEW_PATH,
-            Self::Artifacts => ADMIN_TAB_ARTIFACTS_PATH,
-            Self::LlmInteractions => ADMIN_TAB_LLM_INTERACTIONS_PATH,
-            Self::Queue => ADMIN_TAB_QUEUE_PATH,
-            Self::ImportExport => ADMIN_TAB_IMPORT_EXPORT_PATH,
-            Self::Storage => ADMIN_TAB_STORAGE_PATH,
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Overview => "Overview",
-            Self::Artifacts => "Artifacts",
-            Self::LlmInteractions => "LLM",
-            Self::Queue => "Queue",
-            Self::ImportExport => "Import / Export",
-            Self::Storage => "Storage",
-        }
-    }
-
-    fn summary(self) -> &'static str {
-        match self {
-            Self::Overview => "Status and diagnostics for this server.",
-            Self::Artifacts => "Configure collection pipelines and run missing-artifact backfills.",
-            Self::LlmInteractions => {
-                "Configure LLM connectivity and inspect raw request and response payloads."
-            }
-            Self::Queue => "Queue lifecycle controls for worker processing.",
-            Self::ImportExport => "Create backup archives and restore from ZIP exports.",
-            Self::Storage => "Disk and artifact storage utilization by dataset and kind.",
-        }
-    }
-}
 
 pub fn routes() -> Router<Context> {
     let router = Router::new()
@@ -406,27 +366,6 @@ struct LlmModelsResponse {
 struct LlmCheckResponse {
     message: String,
     backend_kind: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChatApiKind {
-    OpenAiCompatible,
-    OllamaApi,
-}
-
-impl ChatApiKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::OpenAiCompatible => "openai_compatible",
-            Self::OllamaApi => "ollama_api",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ChatEndpointCandidate {
-    url: Url,
-    api_kind: ChatApiKind,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1643,421 +1582,6 @@ async fn record_llm_check_interaction(
     }
 }
 
-fn truncate_model_discovery_body(body: &str) -> String {
-    const MAX_LEN: usize = 240;
-    let trimmed = body.trim();
-    if trimmed.len() <= MAX_LEN {
-        return trimmed.to_string();
-    }
-
-    let mut truncated = String::with_capacity(MAX_LEN + 3);
-    for (index, ch) in trimmed.chars().enumerate() {
-        if index >= MAX_LEN {
-            break;
-        }
-        truncated.push(ch);
-    }
-    truncated.push_str("...");
-    truncated
-}
-
-fn chat_endpoint_candidates(
-    base_url: &str,
-    preferred_backend: LlmBackendKind,
-) -> Result<Vec<ChatEndpointCandidate>, String> {
-    let (allow_openai, allow_ollama) = match preferred_backend {
-        LlmBackendKind::OpenAiCompatible => (true, false),
-        LlmBackendKind::Ollama => (false, true),
-        LlmBackendKind::Unknown => {
-            return Err(
-                "llm backend kind is unknown; select or detect a backend first".to_string(),
-            );
-        }
-    };
-
-    let base_url = base_url.trim();
-    let mut parsed =
-        Url::parse(base_url).map_err(|error| format!("invalid base URL `{base_url}`: {error}"))?;
-    parsed.set_query(None);
-    parsed.set_fragment(None);
-
-    let base_path = parsed.path().trim_end_matches('/');
-    let mut candidates = Vec::new();
-    let mut seen = HashSet::<String>::new();
-
-    if allow_ollama && base_path.ends_with("/api/chat") {
-        push_chat_candidate(
-            &mut candidates,
-            &mut seen,
-            &parsed,
-            Some(base_path.to_string()),
-            ChatApiKind::OllamaApi,
-        );
-    }
-    if allow_openai && base_path.ends_with("/chat/completions") {
-        push_chat_candidate(
-            &mut candidates,
-            &mut seen,
-            &parsed,
-            Some(base_path.to_string()),
-            ChatApiKind::OpenAiCompatible,
-        );
-    }
-    if allow_openai && base_path.ends_with("/v1") {
-        push_chat_candidate(
-            &mut candidates,
-            &mut seen,
-            &parsed,
-            Some(format!("{base_path}/chat/completions")),
-            ChatApiKind::OpenAiCompatible,
-        );
-    }
-    if base_path.ends_with("/api") {
-        if allow_openai {
-            push_chat_candidate(
-                &mut candidates,
-                &mut seen,
-                &parsed,
-                replace_path_suffix(base_path, "/api", "/v1/chat/completions"),
-                ChatApiKind::OpenAiCompatible,
-            );
-        }
-        if allow_ollama {
-            push_chat_candidate(
-                &mut candidates,
-                &mut seen,
-                &parsed,
-                Some(format!("{base_path}/chat")),
-                ChatApiKind::OllamaApi,
-            );
-        }
-    }
-    if allow_openai
-        && !base_path.is_empty()
-        && base_path != "/"
-        && !base_path.ends_with("/api/chat")
-        && !base_path.ends_with("/chat/completions")
-        && !base_path.ends_with("/v1")
-        && !base_path.ends_with("/api")
-    {
-        push_chat_candidate(
-            &mut candidates,
-            &mut seen,
-            &parsed,
-            Some(format!("{base_path}/chat/completions")),
-            ChatApiKind::OpenAiCompatible,
-        );
-    }
-
-    let prioritized_fallbacks: &[(ChatApiKind, &str)] = match preferred_backend {
-        LlmBackendKind::OpenAiCompatible => &[
-            (ChatApiKind::OpenAiCompatible, "/v1/chat/completions"),
-            (ChatApiKind::OpenAiCompatible, "/chat/completions"),
-        ],
-        LlmBackendKind::Ollama => &[(ChatApiKind::OllamaApi, "/api/chat")],
-        LlmBackendKind::Unknown => &[],
-    };
-    for (api_kind, path) in prioritized_fallbacks {
-        push_chat_candidate(
-            &mut candidates,
-            &mut seen,
-            &parsed,
-            Some(path.to_string()),
-            *api_kind,
-        );
-    }
-
-    Ok(candidates)
-}
-
-fn push_chat_candidate(
-    candidates: &mut Vec<ChatEndpointCandidate>,
-    seen: &mut HashSet<String>,
-    parsed: &Url,
-    path: Option<String>,
-    api_kind: ChatApiKind,
-) {
-    let Some(path) = path else {
-        return;
-    };
-    let normalized = if path.starts_with('/') {
-        path
-    } else {
-        format!("/{path}")
-    };
-    let dedupe_key = format!("{}|{}", normalized, api_kind.as_str());
-    if !seen.insert(dedupe_key) {
-        return;
-    }
-
-    let mut url = parsed.clone();
-    url.set_path(&normalized);
-    candidates.push(ChatEndpointCandidate { url, api_kind });
-}
-
-fn build_chat_request_body(
-    api_kind: ChatApiKind,
-    model: &str,
-    system_prompt: &str,
-    user_prompt: &str,
-) -> serde_json::Value {
-    match api_kind {
-        ChatApiKind::OpenAiCompatible => serde_json::json!({
-            "model": model,
-            "temperature": 0.0,
-            "response_format": { "type": "json_object" },
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-        }),
-        ChatApiKind::OllamaApi => serde_json::json!({
-            "model": model,
-            "stream": false,
-            "format": "json",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "options": {"temperature": 0.0}
-        }),
-    }
-}
-
-fn format_reqwest_transport_error(error: &reqwest::Error) -> String {
-    let mut formatted = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        let cause_text = cause.to_string();
-        if !cause_text.is_empty() && !formatted.contains(&cause_text) {
-            formatted.push_str(" | caused by: ");
-            formatted.push_str(&cause_text);
-        }
-        source = cause.source();
-    }
-    formatted
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LlmModelsApiHint {
-    OpenAiCompatible,
-    Ollama,
-    Unknown,
-}
-
-fn llm_models_endpoints(base_url: &str) -> Result<Vec<Url>, String> {
-    let base_url = base_url.trim();
-    if base_url.is_empty() {
-        return Err("base URL is empty".to_string());
-    }
-
-    let mut parsed =
-        Url::parse(base_url).map_err(|error| format!("invalid base URL `{base_url}`: {error}"))?;
-    parsed.set_query(None);
-    parsed.set_fragment(None);
-
-    let base_path = parsed.path().trim_end_matches('/');
-    let api_hint = llm_models_api_hint(base_path);
-    let mut candidates: Vec<String> = Vec::new();
-    let mut seen_candidates = HashSet::new();
-
-    push_model_endpoint_candidate(
-        &mut candidates,
-        &mut seen_candidates,
-        replace_path_suffix(base_path, "/chat/completions", "/models"),
-    );
-    push_model_endpoint_candidate(
-        &mut candidates,
-        &mut seen_candidates,
-        replace_path_suffix(base_path, "/chat/completions", "/model/info"),
-    );
-    if base_path.ends_with("/models") {
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            Some(base_path.to_string()),
-        );
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            replace_path_suffix(base_path, "/models", "/model/info"),
-        );
-    }
-    if base_path.ends_with("/model/info") {
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            Some(base_path.to_string()),
-        );
-    }
-    if base_path.ends_with("/api/tags") {
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            replace_path_suffix(base_path, "/api/tags", "/v1/models"),
-        );
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            replace_path_suffix(base_path, "/api/tags", "/v1/model/info"),
-        );
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            Some(base_path.to_string()),
-        );
-    }
-    if base_path.ends_with("/v1") {
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            Some(format!("{base_path}/models")),
-        );
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            Some(format!("{base_path}/model/info")),
-        );
-    }
-    if base_path.ends_with("/api") {
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            replace_path_suffix(base_path, "/api", "/v1/models"),
-        );
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            replace_path_suffix(base_path, "/api", "/v1/model/info"),
-        );
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            Some(format!("{base_path}/tags")),
-        );
-    }
-    if !base_path.is_empty()
-        && base_path != "/"
-        && !base_path.ends_with("/chat/completions")
-        && !base_path.ends_with("/models")
-        && !base_path.ends_with("/model/info")
-        && !base_path.ends_with("/api/tags")
-    {
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            Some(format!("{base_path}/models")),
-        );
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            Some(format!("{base_path}/model/info")),
-        );
-    }
-
-    let prioritized_fallbacks = match api_hint {
-        LlmModelsApiHint::Ollama => [
-            "/v1/models",
-            "/v1/model/info",
-            "/api/tags",
-            "/models",
-            "/model/info",
-        ],
-        _ => [
-            "/v1/models",
-            "/v1/model/info",
-            "/models",
-            "/model/info",
-            "/api/tags",
-        ],
-    };
-    for fallback in prioritized_fallbacks {
-        push_model_endpoint_candidate(
-            &mut candidates,
-            &mut seen_candidates,
-            Some(fallback.to_string()),
-        );
-    }
-
-    let mut urls = Vec::with_capacity(candidates.len());
-    for path in candidates {
-        parsed.set_path(&path);
-        urls.push(parsed.clone());
-    }
-    Ok(urls)
-}
-
-fn llm_models_api_hint(base_path: &str) -> LlmModelsApiHint {
-    if base_path.ends_with("/api") || base_path.ends_with("/api/tags") {
-        return LlmModelsApiHint::Ollama;
-    }
-    if base_path.ends_with("/chat/completions")
-        || base_path.ends_with("/models")
-        || base_path.ends_with("/model/info")
-        || base_path.ends_with("/v1")
-        || base_path.contains("/v1/")
-    {
-        return LlmModelsApiHint::OpenAiCompatible;
-    }
-    LlmModelsApiHint::Unknown
-}
-
-fn llm_backend_kind_for_models_path(path: &str) -> LlmBackendKind {
-    let normalized = path.trim_end_matches('/');
-    if normalized.ends_with("/api/tags") || normalized.ends_with("/api/models") {
-        return LlmBackendKind::Ollama;
-    }
-    if normalized.ends_with("/v1/models")
-        || normalized.ends_with("/models")
-        || normalized.ends_with("/v1/model/info")
-        || normalized.ends_with("/model/info")
-    {
-        return LlmBackendKind::OpenAiCompatible;
-    }
-    LlmBackendKind::Unknown
-}
-
-fn llm_backend_kind_for_chat_api(api_kind: ChatApiKind) -> LlmBackendKind {
-    match api_kind {
-        ChatApiKind::OpenAiCompatible => LlmBackendKind::OpenAiCompatible,
-        ChatApiKind::OllamaApi => LlmBackendKind::Ollama,
-    }
-}
-
-fn replace_path_suffix(base_path: &str, from: &str, to: &str) -> Option<String> {
-    if !base_path.ends_with(from) {
-        return None;
-    }
-
-    let prefix = base_path.trim_end_matches(from);
-    if prefix.is_empty() {
-        Some(to.to_string())
-    } else {
-        Some(format!("{prefix}{to}"))
-    }
-}
-
-fn push_model_endpoint_candidate(
-    candidates: &mut Vec<String>,
-    seen_candidates: &mut HashSet<String>,
-    candidate: Option<String>,
-) {
-    let Some(candidate) = candidate else {
-        return;
-    };
-    if candidate.trim().is_empty() {
-        return;
-    }
-    let normalized = if candidate.starts_with('/') {
-        candidate
-    } else {
-        format!("/{candidate}")
-    };
-    if seen_candidates.insert(normalized.clone()) {
-        candidates.push(normalized);
-    }
-}
-
 pub(crate) async fn clear_queue(State(state): State<Context>, headers: HeaderMap) -> Response {
     let cleared = match set_all_queued_rows_cleared(&state.connection).await {
         Ok(cleared) => cleared,
@@ -3076,7 +2600,7 @@ async fn delete_artifacts_for_kinds(
 async fn clear_hyperlink_og_fields(connection: &DatabaseConnection) -> Result<u64, DbErr> {
     let backend = connection.get_database_backend();
     let result = connection
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             backend,
             r#"
                 UPDATE hyperlink
@@ -3389,7 +2913,7 @@ async fn load_artifact_storage_breakdown(
 ) -> Result<ArtifactStorageBreakdown, DbErr> {
     let backend = connection.get_database_backend();
     let rows = connection
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             r#"
                 SELECT
@@ -3446,7 +2970,7 @@ async fn load_artifact_storage_breakdown(
 async fn load_sqlite_disk_stats(connection: &DatabaseConnection) -> Result<SqliteDiskStats, DbErr> {
     let backend = connection.get_database_backend();
     let rows = connection
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "PRAGMA database_list".to_string(),
         ))
@@ -3615,10 +3139,10 @@ impl AdminIndexTemplate<'_> {
             chrono::DateTime::<Utc>::from_naive_utc_and_offset(interaction.created_at, Utc);
         let delta = self.rendered_at.signed_duration_since(created_at);
 
-        if delta >= ChronoDuration::zero() && delta < ChronoDuration::hours(24) {
+        if delta >= chrono::Duration::zero() && delta < chrono::Duration::hours(24) {
             return format_relative_duration(delta);
         }
-        if delta < ChronoDuration::zero() && delta > -ChronoDuration::hours(24) {
+        if delta < chrono::Duration::zero() && delta > -chrono::Duration::hours(24) {
             return format_relative_duration(delta);
         }
 
@@ -3664,37 +3188,6 @@ async fn build_llm_interactions_page(
     })
 }
 
-fn llm_interactions_href(page: u64) -> String {
-    format!("{ADMIN_TAB_LLM_INTERACTIONS_PATH}?page={}", page.max(1))
-}
-
-fn format_relative_duration(delta: ChronoDuration) -> String {
-    let future = delta < ChronoDuration::zero();
-    let seconds = delta.num_seconds().unsigned_abs();
-
-    let label = if seconds < 10 {
-        "just now".to_string()
-    } else if seconds < 60 {
-        format!("{seconds}s")
-    } else if seconds < 60 * 60 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{}h", seconds / (60 * 60))
-    };
-
-    if label == "just now" {
-        if future {
-            "in a few seconds".to_string()
-        } else {
-            label
-        }
-    } else if future {
-        format!("in {label}")
-    } else {
-        format!("{label} ago")
-    }
-}
-
 fn render_index(
     active_tab: AdminTab,
     summary: &MissingArtifactsSummary,
@@ -3733,119 +3226,12 @@ fn response_error(status: StatusCode, message: impl Into<String>) -> Response {
     views::render_error_page(status, message, ADMIN_TAB_ARTIFACTS_PATH, "Back to admin")
 }
 
-fn extract_llm_model_ids(payload: &serde_json::Value) -> Vec<String> {
-    let mut models = Vec::new();
-
-    if let Some(data) = payload.get("data") {
-        collect_llm_model_ids(&mut models, data);
-    }
-    if let Some(data) = payload.get("models") {
-        collect_llm_model_ids(&mut models, data);
-    }
-    if let Some(model_info) = payload.get("model_info") {
-        collect_litellm_model_info_ids(&mut models, model_info);
-    }
-    if let Some(model_info) = payload.get("model_info_map") {
-        collect_litellm_model_info_ids(&mut models, model_info);
-    }
-
-    if models.is_empty() {
-        collect_llm_model_ids(&mut models, payload);
-    }
-
-    let mut deduped = HashSet::new();
-    models.retain(|model| deduped.insert(model.to_ascii_lowercase()));
-    models.sort_unstable();
-    models
-}
-
-fn collect_llm_model_ids(models: &mut Vec<String>, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::String(model) => push_llm_model_id(models, model),
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_llm_model_ids(models, item);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            if let Some(id) = map.get("id").and_then(serde_json::Value::as_str) {
-                push_llm_model_id(models, id);
-            }
-            if let Some(model) = map.get("model").and_then(serde_json::Value::as_str) {
-                push_llm_model_id(models, model);
-            }
-            if let Some(name) = map.get("name").and_then(serde_json::Value::as_str) {
-                push_llm_model_id(models, name);
-            }
-            if let Some(model_name) = map.get("model_name").and_then(serde_json::Value::as_str) {
-                push_llm_model_id(models, model_name);
-            }
-            if let Some(model_info) = map.get("model_info") {
-                collect_litellm_model_info_ids(models, model_info);
-            }
-            if let Some(model_info) = map.get("model_info_map") {
-                collect_litellm_model_info_ids(models, model_info);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_litellm_model_info_ids(models: &mut Vec<String>, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (candidate_id, details) in map {
-                push_llm_model_id(models, candidate_id);
-                collect_llm_model_ids(models, details);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for item in items {
-                collect_litellm_model_info_ids(models, item);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn push_llm_model_id(models: &mut Vec<String>, value: &str) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    models.push(trimmed.to_string());
-}
-
 fn trimmed_non_empty(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
 }
 
-fn format_bytes(bytes: u64) -> String {
-    format_bytes_f64(bytes as f64)
-}
-
-fn format_bytes_f64(bytes_f64: f64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    const TB: f64 = GB * 1024.0;
-
-    if bytes_f64 < KB {
-        return format!("{}B", bytes_f64 as u64);
-    }
-    if bytes_f64 < MB {
-        return format!("{:.1}KB", bytes_f64 / KB);
-    }
-    if bytes_f64 < GB {
-        return format!("{:.1}MB", bytes_f64 / MB);
-    }
-    if bytes_f64 < TB {
-        return format!("{:.1}GB", bytes_f64 / GB);
-    }
-    format!("{:.1}TB", bytes_f64 / TB)
-}
 #[cfg(test)]
 #[path = "../../../../tests/unit/app_controllers_admin_dashboard_controller.rs"]
 mod tests;

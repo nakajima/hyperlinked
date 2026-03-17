@@ -1,8 +1,8 @@
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, ExprTrait, QueryFilter,
+    QueryOrder, QuerySelect, TransactionTrait,
     entity::prelude::{DateTime, DateTimeUtc},
     sea_query::Expr,
 };

@@ -30,7 +30,7 @@ pub fn spawn(connection: DatabaseConnection) -> tokio::task::JoinHandle<()> {
 async fn run_once(connection: &DatabaseConnection, batch_size: u64) -> Result<(), String> {
     let backend = connection.get_database_backend();
     let rows = connection
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             backend,
             r#"
             SELECT id, storage_path, attempts
@@ -69,7 +69,7 @@ async fn run_once(connection: &DatabaseConnection, batch_size: u64) -> Result<()
         match artifacts::delete_if_exists(&storage_path).await {
             Ok(_) => {
                 connection
-                    .execute(Statement::from_sql_and_values(
+                    .execute_raw(Statement::from_sql_and_values(
                         backend,
                         "DELETE FROM artifact_gc_pending WHERE id = ?".to_string(),
                         vec![Value::from(id)],
@@ -83,7 +83,7 @@ async fn run_once(connection: &DatabaseConnection, batch_size: u64) -> Result<()
                 let modifier = format!("+{backoff_secs} seconds");
 
                 connection
-                    .execute(Statement::from_sql_and_values(
+                    .execute_raw(Statement::from_sql_and_values(
                         backend,
                         r#"
                         UPDATE artifact_gc_pending

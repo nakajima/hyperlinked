@@ -1,4 +1,13 @@
 <form class="flex flex-col items-start gap-4" action="<%= action %>" method="post">
+  <% if !self.errors.is_empty() { %>
+    <div role="alert" class="w-full rounded-[0.4rem] border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">
+      <p class="font-medium">Please fix the highlighted issue.</p>
+      <% for error in self.errors { %>
+        <p class="mt-1"><%= error %></p>
+      <% } %>
+    </div>
+  <% } %>
+
   <div class="flex w-full flex-col gap-[0.4rem]">
     <label for="url" class="text-sm font-normal">URL</label>
     <input

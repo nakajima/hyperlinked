@@ -7,6 +7,9 @@
     'Noto Color Emoji';
     --font-mono: "iA Writer Mono S", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", "Courier New", monospace;
+    --color-red-50: oklch(97.1% 0.013 17.38);
+    --color-red-300: oklch(80.8% 0.114 19.571);
+    --color-red-900: oklch(39.6% 0.141 25.723);
     --color-black: #000;
     --color-white: #fff;
     --spacing: 0.25rem;
@@ -24,6 +27,7 @@
     --text-5xl: 3rem;
     --text-5xl--line-height: 1;
     --font-weight-normal: 400;
+    --font-weight-medium: 500;
     --font-weight-semibold: 600;
     --font-weight-bold: 700;
     --tracking-tight: -0.0125em;
@@ -249,6 +253,9 @@
   }
   .mx-auto {
     margin-inline: auto;
+  }
+  .mt-1 {
+    margin-top: calc(var(--spacing) * 1);
   }
   .mt-2 {
     margin-top: calc(var(--spacing) * 2);
@@ -517,6 +524,9 @@
   .border-notice-border {
     border-color: var(--color-notice-border);
   }
+  .border-red-300 {
+    border-color: var(--color-red-300);
+  }
   .border-subdued {
     border-color: var(--color-subdued);
   }
@@ -540,6 +550,9 @@
   }
   .bg-page {
     background-color: var(--color-page);
+  }
+  .bg-red-50 {
+    background-color: var(--color-red-50);
   }
   .bg-surface {
     background-color: var(--color-surface);
@@ -588,6 +601,9 @@
   }
   .px-3 {
     padding-inline: calc(var(--spacing) * 3);
+  }
+  .px-4 {
+    padding-inline: calc(var(--spacing) * 4);
   }
   .px-\[0\.2rem\] {
     padding-inline: 0.2rem;
@@ -714,6 +730,10 @@
     --tw-font-weight: var(--font-weight-bold);
     font-weight: var(--font-weight-bold);
   }
+  .font-medium {
+    --tw-font-weight: var(--font-weight-medium);
+    font-weight: var(--font-weight-medium);
+  }
   .font-normal {
     --tw-font-weight: var(--font-weight-normal);
     font-weight: var(--font-weight-normal);
@@ -765,6 +785,9 @@
   }
   .text-primary {
     color: var(--color-primary);
+  }
+  .text-red-900 {
+    color: var(--color-red-900);
   }
   .text-subdued {
     color: var(--color-subdued);

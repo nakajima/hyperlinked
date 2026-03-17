@@ -13,11 +13,13 @@ axum = { version = "0.8.8", features = ["macros", "multipart", "ws"] }
 base64 = "0.22.1"
 clap = { version = "4.5.49", features = ["derive", "env"] }
 chrono = "0.4.42"
+async-graphql = { version = "7.0.19", default-features = false, features = ["graphiql"] }
 dom_smoothie = "0.8.0"
 flate2 = { version = "1.0.35", default-features = false, features = [
   "rust_backend",
 ] }
 futures-util = "0.3.32"
+hyperlinked_macros = { path = "hyperlinked_macros" }
 html2md = "0.2"
 hayro = "0.5.0"
 image = { version = "0.25.8", default-features = false, features = [
@@ -38,12 +40,11 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_urlencoded = "0.7.1"
 sha2 = "0.10.9"
-seaography = { version = "~1.1.4", features = ["with-chrono", "with-decimal"] }
-sea-orm = { version = "1.1.19", features = [
+seaography = { version = "2.0.0-rc.8", features = ["with-chrono", "with-decimal"] }
+sea-orm = { version = "2.0.0-rc.37", features = [
   "sqlx-sqlite",
   "runtime-tokio",
   "debug-print",
-  "seaography",
   "with-chrono",
   "with-json",
 

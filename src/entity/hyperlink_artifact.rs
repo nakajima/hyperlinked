@@ -58,9 +58,9 @@ pub struct Model {
     pub id: i32,
     #[sea_orm(indexed)]
     pub hyperlink_id: i32,
-    #[sea_orm(indexed)]
+    #[sea_orm(indexed, unique_key = "job_kind")]
     pub job_id: Option<i32>,
-    #[sea_orm(indexed)]
+    #[sea_orm(indexed, unique_key = "job_kind")]
     pub kind: HyperlinkArtifactKind,
     pub payload: Vec<u8>,
     pub storage_path: Option<String>,

@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter,
-    Statement, Value,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Statement, Value,
 };
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +14,7 @@ use crate::{
     entity::{
         hyperlink,
         hyperlink_artifact::{self, HyperlinkArtifactKind},
-        hyperlink_processing_job,
+        hyperlink_processing_job, hyperlink_search_doc,
     },
 };
 
@@ -187,7 +187,7 @@ async fn queue_jobs_table_exists(connection: &DatabaseConnection) -> Result<bool
     }
 
     let row = connection
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             connection.get_database_backend(),
             "SELECT COUNT(*) AS table_count FROM sqlite_master WHERE type = 'table' AND name = 'jobs'",
             Vec::new(),
@@ -234,7 +234,7 @@ async fn active_queue_processing_job_ids(
 
     let backend = connection.get_database_backend();
     let rows = connection
-        .query_all(Statement::from_sql_and_values(backend, sql, values))
+        .query_all_raw(Statement::from_sql_and_values(backend, sql, values))
         .await?;
     let mut active_ids = HashSet::with_capacity(rows.len());
     for row in rows {
@@ -284,6 +284,17 @@ async fn fetch_hyperlink_page_slice(
     per_page: u64,
     queue_jobs_table_available: bool,
 ) -> Result<HyperlinkPageSlice, sea_orm::DbErr> {
+    if can_use_direct_hyperlink_query(parsed_query, search_terms, order) {
+        return fetch_direct_hyperlink_page_slice(
+            connection,
+            parsed_query,
+            order,
+            requested_page,
+            per_page,
+        )
+        .await;
+    }
+
     let sql_parts = build_hyperlink_sql_parts(
         parsed_query,
         search_terms,
@@ -309,7 +320,7 @@ async fn fetch_hyperlink_page_slice(
         where_sql = sql_parts.where_sql,
     );
     let count_row = connection
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             backend,
             count_sql,
             sql_parts.values.clone(),
@@ -343,7 +354,7 @@ async fn fetch_hyperlink_page_slice(
     page_values.push(i64::try_from(per_page).unwrap_or(i64::MAX).into());
     page_values.push(i64::try_from(offset).unwrap_or(i64::MAX).into());
     let page_rows = connection
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             backend,
             page_sql,
             page_values,
@@ -360,6 +371,106 @@ async fn fetch_hyperlink_page_slice(
         page,
         total_pages,
     })
+}
+
+fn can_use_direct_hyperlink_query(
+    parsed_query: &ParsedHyperlinkQuery,
+    search_terms: &[SearchTerm],
+    order: OrderToken,
+) -> bool {
+    search_terms.is_empty()
+        && matches!(parsed_query.effective_status(), StatusSelection::All)
+        && matches!(
+            order,
+            OrderToken::Newest | OrderToken::Oldest | OrderToken::MostClicked
+        )
+}
+
+async fn fetch_direct_hyperlink_page_slice(
+    connection: &DatabaseConnection,
+    parsed_query: &ParsedHyperlinkQuery,
+    order: OrderToken,
+    requested_page: u64,
+    per_page: u64,
+) -> Result<HyperlinkPageSlice, sea_orm::DbErr> {
+    let total_items = build_direct_hyperlink_query(parsed_query)
+        .count(connection)
+        .await?;
+    let total_pages = total_pages(total_items, per_page);
+    let page = requested_page.min(total_pages.max(1));
+    let offset = page_offset(page, per_page);
+
+    let hyperlink_ids =
+        apply_direct_hyperlink_order(build_direct_hyperlink_query(parsed_query), order)
+            .select_only()
+            .column(hyperlink::Column::Id)
+            .limit(per_page)
+            .offset(offset)
+            .into_tuple::<i32>()
+            .all(connection)
+            .await?;
+
+    Ok(HyperlinkPageSlice {
+        hyperlink_ids,
+        page,
+        total_pages,
+    })
+}
+
+fn build_direct_hyperlink_query(
+    parsed_query: &ParsedHyperlinkQuery,
+) -> sea_orm::Select<hyperlink::Entity> {
+    let mut query = hyperlink::Entity::find();
+
+    match parsed_query.effective_scope() {
+        ScopeSelection::RootOnly => {
+            query = query.filter(hyperlink::Column::DiscoveryDepth.eq(ROOT_DISCOVERY_DEPTH));
+        }
+        ScopeSelection::DiscoveredOnly => {
+            query = query.filter(hyperlink::Column::DiscoveryDepth.ne(ROOT_DISCOVERY_DEPTH));
+        }
+        ScopeSelection::All => {}
+    }
+
+    match parsed_query.effective_type() {
+        TypeSelection::All => {}
+        TypeSelection::PdfOnly => {
+            query =
+                query.filter(hyperlink::Column::SourceType.eq(hyperlink::HyperlinkSourceType::Pdf));
+        }
+        TypeSelection::NonPdfOnly => {
+            query =
+                query.filter(hyperlink::Column::SourceType.ne(hyperlink::HyperlinkSourceType::Pdf));
+        }
+    }
+
+    if matches!(
+        parsed_query.effective_clicks(),
+        ClickSelection::UnclickedOnly
+    ) {
+        query = query.filter(hyperlink::Column::ClicksCount.eq(0));
+    }
+
+    query
+}
+
+fn apply_direct_hyperlink_order(
+    query: sea_orm::Select<hyperlink::Entity>,
+    order: OrderToken,
+) -> sea_orm::Select<hyperlink::Entity> {
+    match order {
+        OrderToken::Newest => query
+            .order_by_desc(hyperlink::Column::CreatedAt)
+            .order_by_desc(hyperlink::Column::Id),
+        OrderToken::Oldest => query
+            .order_by_asc(hyperlink::Column::CreatedAt)
+            .order_by_asc(hyperlink::Column::Id),
+        OrderToken::MostClicked => query
+            .order_by_desc(hyperlink::Column::ClicksCount)
+            .order_by_desc(hyperlink::Column::CreatedAt)
+            .order_by_desc(hyperlink::Column::Id),
+        _ => query,
+    }
 }
 
 fn build_hyperlink_sql_parts(
@@ -835,42 +946,19 @@ async fn load_search_documents(
         return Ok(HashMap::new());
     }
 
-    let placeholders = std::iter::repeat_n("?", hyperlink_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        r#"
-        SELECT hyperlink_id, title, url, readable_text
-        FROM hyperlink_search_doc
-        WHERE hyperlink_id IN ({placeholders})
-        "#
-    );
-
-    let values = hyperlink_ids
-        .iter()
-        .copied()
-        .map(Value::from)
-        .collect::<Vec<_>>();
-    let rows = connection
-        .query_all(Statement::from_sql_and_values(
-            connection.get_database_backend(),
-            sql,
-            values,
-        ))
+    let rows = hyperlink_search_doc::Entity::find()
+        .filter(hyperlink_search_doc::Column::HyperlinkId.is_in(hyperlink_ids.to_vec()))
+        .all(connection)
         .await?;
 
     let mut docs = HashMap::with_capacity(rows.len());
     for row in rows {
-        let hyperlink_id: i32 = row.try_get("", "hyperlink_id")?;
-        let title: String = row.try_get("", "title")?;
-        let url: String = row.try_get("", "url")?;
-        let readable_text: String = row.try_get("", "readable_text")?;
         docs.insert(
-            hyperlink_id,
+            row.hyperlink_id,
             SearchDocumentRow {
-                title,
-                url,
-                readable_text,
+                title: row.title,
+                url: row.url,
+                readable_text: row.readable_text,
             },
         );
     }
