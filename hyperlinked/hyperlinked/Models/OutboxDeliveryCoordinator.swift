@@ -30,9 +30,11 @@ final class OutboxDeliveryCoordinator {
             result.attempted += 1
             do {
                 let created: Hyperlink
+                let localPDFSourceURL: URL?
                 switch item.resolvedPayloadKind {
                 case .url:
                     created = try await client.createHyperlink(title: item.title, url: item.url)
+                    localPDFSourceURL = nil
                 case .upload:
                     guard item.resolvedUploadType == .pdf else {
                         throw APIClientError.decodingFailed("unsupported queued upload type")
@@ -41,14 +43,32 @@ final class OutboxDeliveryCoordinator {
                           let filename = item.uploadFilename else {
                         throw APIClientError.decodingFailed("queued upload file metadata is missing")
                     }
+                    let fileURL = URL(fileURLWithPath: path)
                     created = try await client.uploadPDF(
                         title: item.title,
-                        fileURL: URL(fileURLWithPath: path),
+                        fileURL: fileURL,
                         filename: filename
                     )
+                    localPDFSourceURL = fileURL
                 }
                 if let hyperlinkStore {
                     try? hyperlinkStore.upsert(hyperlink: created)
+                }
+                if let localPDFSourceURL,
+                   let offlineStore = try? HyperlinkOfflineStore.openShared() {
+                    do {
+                        try offlineStore.markPDFPending(hyperlinkID: created.id)
+                        try offlineStore.copyPDF(from: localPDFSourceURL, hyperlinkID: created.id)
+                    } catch {
+                        try? offlineStore.markPDFFailed(hyperlinkID: created.id, message: error.localizedDescription)
+                    }
+                }
+                Task {
+                    await HyperlinkOfflineSnapshotManager.shared.saveSnapshot(
+                        for: created,
+                        client: client,
+                        includePDF: false
+                    )
                 }
                 try store.markDelivered(id: item.id)
                 if item.resolvedPayloadKind == .upload {

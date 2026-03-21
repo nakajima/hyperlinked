@@ -53,9 +53,11 @@ final class HyperlinkStore {
     func replaceAll(hyperlinks: [Hyperlink]) throws {
         let fetchedIDs = Set(hyperlinks.map(\.id))
         var didDeleteExistingRows = false
+        var idsToDelete: [Int] = []
 
         try dbQueue.write { db in
             if fetchedIDs.isEmpty {
+                idsToDelete = try Int.fetchAll(db, sql: "SELECT id FROM \(DB.hyperlinkTableName)")
                 didDeleteExistingRows = (try Hyperlink.deleteAll(db)) > 0
                 return
             }
@@ -68,7 +70,7 @@ final class HyperlinkStore {
                 db,
                 sql: "SELECT id FROM \(DB.hyperlinkTableName)"
             )
-            let idsToDelete = persistedIDs.filter { !fetchedIDs.contains($0) }
+            idsToDelete = persistedIDs.filter { !fetchedIDs.contains($0) }
             guard !idsToDelete.isEmpty else {
                 return
             }
@@ -77,6 +79,10 @@ final class HyperlinkStore {
                 _ = try Hyperlink.deleteOne(db, key: id)
             }
             didDeleteExistingRows = true
+        }
+
+        if !idsToDelete.isEmpty {
+            try? HyperlinkOfflineStore.openShared().deleteSnapshots(for: idsToDelete)
         }
 
         guard !hyperlinks.isEmpty || didDeleteExistingRows else {
@@ -90,6 +96,7 @@ final class HyperlinkStore {
             return
         }
 
+        var deletedIDs: [Int] = []
         try dbQueue.write { db in
             for change in updatedBatch.changes {
                 switch change.changeType {
@@ -100,8 +107,12 @@ final class HyperlinkStore {
                     try hyperlink.upsert(db)
                 case .deleted:
                     _ = try Hyperlink.deleteOne(db, key: change.id)
+                    deletedIDs.append(change.id)
                 }
             }
+        }
+        if !deletedIDs.isEmpty {
+            try? HyperlinkOfflineStore.openShared().deleteSnapshots(for: deletedIDs)
         }
         timelineReloader.reloadHyperlinksWidgetTimeline()
     }
@@ -110,7 +121,17 @@ final class HyperlinkStore {
         try dbQueue.write { db in
             _ = try Hyperlink.deleteAll(db)
         }
+        try? HyperlinkOfflineStore.openShared().clearAll()
         timelineReloader.reloadHyperlinksWidgetTimeline()
+    }
+
+    func fetchAll() throws -> [Hyperlink] {
+        try dbQueue.read { db in
+            try Hyperlink
+                .all()
+                .order(Hyperlink.Columns.createdAt.desc, Hyperlink.Columns.id.desc)
+                .fetchAll(db)
+        }
     }
 }
 

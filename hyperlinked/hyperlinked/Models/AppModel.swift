@@ -15,6 +15,8 @@ final class AppModel: ObservableObject {
     private let defaults: UserDefaults
     private let sharedDefaults: UserDefaults?
     private let credentialsStore: ServerCredentialsStore
+    private var offlineBackfillTask: Task<Void, Never>?
+    private var offlineBackfillServerKey: String?
 
     init(
         defaults: UserDefaults = .standard,
@@ -78,7 +80,11 @@ final class AppModel: ObservableObject {
         let nextKey = Self.serverCredentialKey(for: normalizedURL)
 
         if previous != normalized {
+            offlineBackfillTask?.cancel()
+            offlineBackfillTask = nil
+            offlineBackfillServerKey = nil
             try? HyperlinkStore.openShared().clearAll()
+            try? HyperlinkOfflineStore.openShared().clearAll()
         }
         if previousKey != nextKey, let previousKey {
             _ = credentialsStore.deleteCredentials(for: previousKey)
@@ -139,6 +145,41 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func startOfflineBackfillIfNeeded(force: Bool = false) {
+        guard let client = apiClient,
+              let selectedServerURL else {
+            return
+        }
+
+        let serverKey = selectedServerURL.absoluteString
+        if !force, offlineBackfillTask != nil, offlineBackfillServerKey == serverKey {
+            return
+        }
+
+        offlineBackfillTask?.cancel()
+        offlineBackfillServerKey = serverKey
+        offlineBackfillTask = Task {
+            defer {
+                Task { @MainActor in
+                    if self.offlineBackfillServerKey == serverKey {
+                        self.offlineBackfillTask = nil
+                    }
+                }
+            }
+
+            guard let store = try? HyperlinkStore.openShared(),
+                  let hyperlinks = try? store.fetchAll(),
+                  !hyperlinks.isEmpty else {
+                return
+            }
+
+            await HyperlinkOfflineSnapshotManager.shared.backfillMissingSnapshots(
+                hyperlinks: hyperlinks,
+                client: client
+            )
+        }
+    }
+
     func clearDiagnosticsLog() {
         Task {
             let snapshot = await AppDiagnosticsLog.shared.clearLog()
@@ -147,7 +188,11 @@ final class AppModel: ObservableObject {
     }
 
     func resetServerSelection() {
+        offlineBackfillTask?.cancel()
+        offlineBackfillTask = nil
+        offlineBackfillServerKey = nil
         try? HyperlinkStore.openShared().clearAll()
+        try? HyperlinkOfflineStore.openShared().clearAll()
         if let selectedServerURL {
             _ = credentialsStore.deleteCredentials(for: Self.serverCredentialKey(for: selectedServerURL))
         }

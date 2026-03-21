@@ -123,6 +123,31 @@ struct hyperlinkedTests {
     }
 
     @Test
+    func detectsPDFHyperlinksFromURL() {
+        let hyperlink = Hyperlink(
+            id: 9,
+            title: "Paper",
+            url: "https://example.com/files/paper.pdf",
+            rawURL: "https://example.com/files/paper.pdf?download=1",
+            ogDescription: nil,
+            isURLValid: true,
+            discoveryDepth: 0,
+            clicksCount: 0,
+            lastClickedAt: nil,
+            processingState: "ready",
+            createdAt: "2026-03-05T00:00:00Z",
+            updatedAt: "2026-03-05T00:00:00Z",
+            thumbnailURL: nil,
+            thumbnailDarkURL: nil,
+            screenshotURL: nil,
+            screenshotDarkURL: nil,
+            discoveredVia: []
+        )
+
+        #expect(hyperlink.looksLikePDF)
+    }
+
+    @Test
     func serverCredentialKeyUsesNormalizedServerURL() {
         let url = URL(string: "HTTP://Example.com:8765/hyperlinks?q=1#frag")!
         #expect(AppModel.serverCredentialKey(for: url) == "http://example.com:8765")
@@ -218,6 +243,46 @@ struct hyperlinkedTests {
         }
         #expect(persistedCount == 0)
         #expect(reloader.reloadCount == 1)
+    }
+
+    @Test
+    func offlineSnapshotStorePersistsReadabilityStatus() throws {
+        let dbQueue = try DatabaseQueue(path: ":memory:")
+        try dbQueue.write { db in
+            try db.create(table: DB.hyperlinkOfflineSnapshotTableName) { t in
+                t.column("hyperlink_id", .integer).primaryKey()
+                t.column("readability_state", .text).notNull().defaults(to: "missing")
+                t.column("readability_path", .text)
+                t.column("readability_error", .text)
+                t.column("readability_saved_at", .text)
+                t.column("pdf_state", .text).notNull().defaults(to: "missing")
+                t.column("pdf_path", .text)
+                t.column("pdf_error", .text)
+                t.column("pdf_saved_at", .text)
+            }
+        }
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = HyperlinkOfflineStore(dbQueue: dbQueue, fileManager: .default)
+
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        let markdownURL = tempDirectory.appendingPathComponent("readability.md")
+        try "# Example".write(to: markdownURL, atomically: true, encoding: .utf8)
+
+        try store.upsert(
+            HyperlinkOfflineSnapshot(
+                hyperlinkID: 12,
+                readabilityState: .available,
+                readabilityPath: markdownURL.path,
+                readabilityError: nil,
+                readabilitySavedAt: "2026-03-20T00:00:00Z"
+            )
+        )
+
+        let snapshot = try store.snapshot(for: 12)
+        #expect(snapshot.resolvedReadabilityState == .available)
+        #expect(snapshot.readabilityFileURL?.path == markdownURL.path)
     }
 
     private func makeStoreForWidgetReloadTesting() throws -> (HyperlinkStore, WidgetTimelineReloaderSpy, DatabaseQueue) {

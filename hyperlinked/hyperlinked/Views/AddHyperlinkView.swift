@@ -133,6 +133,13 @@ struct AddHyperlinkView: View {
                     url: trimmedURL
                 )
                 onCreated(created)
+                Task {
+                    await HyperlinkOfflineSnapshotManager.shared.saveSnapshot(
+                        for: created,
+                        client: client,
+                        includePDF: false
+                    )
+                }
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription
@@ -165,11 +172,27 @@ struct AddHyperlinkView: View {
                 guard let uploadFilePath = queuedItem.uploadFilePath else {
                     throw APIClientError.decodingFailed("queued upload file path is missing")
                 }
+                let queuedFileURL = URL(fileURLWithPath: uploadFilePath)
                 let created = try await client.uploadPDF(
                     title: queuedItem.title,
-                    fileURL: URL(fileURLWithPath: uploadFilePath),
+                    fileURL: queuedFileURL,
                     filename: queuedItem.uploadFilename ?? filename
                 )
+                if let offlineStore = try? HyperlinkOfflineStore.openShared() {
+                    do {
+                        try offlineStore.markPDFPending(hyperlinkID: created.id)
+                        try offlineStore.copyPDF(from: queuedFileURL, hyperlinkID: created.id)
+                    } catch {
+                        try? offlineStore.markPDFFailed(hyperlinkID: created.id, message: error.localizedDescription)
+                    }
+                }
+                Task {
+                    await HyperlinkOfflineSnapshotManager.shared.saveSnapshot(
+                        for: created,
+                        client: client,
+                        includePDF: false
+                    )
+                }
                 try store.markDelivered(id: queuedItem.id)
                 store.removeUploadFileIfPresent(path: queuedItem.uploadFilePath)
                 onCreated(created)

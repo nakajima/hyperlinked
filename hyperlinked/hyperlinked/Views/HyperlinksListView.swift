@@ -294,6 +294,7 @@ struct HyperlinksListView: View {
             await retryPendingOutbox(using: client)
             let fetched = try await client.listHyperlinks()
             replaceCachedHyperlinks(hyperlinks: fetched)
+            appModel.startOfflineBackfillIfNeeded(force: true)
             latestServerUpdatedAt = newestUpdatedAt(in: fetched) ?? latestServerUpdatedAt
             errorMessage = nil
         } catch is CancellationError {
@@ -319,6 +320,7 @@ struct HyperlinksListView: View {
             do {
                 let batch = try await client.fetchUpdatedHyperlinks(updatedAt: cursor)
                 applyUpdatedHyperlinks(batch)
+                appModel.startOfflineBackfillIfNeeded(force: true)
                 latestServerUpdatedAt = batch.serverUpdatedAt
             } catch is CancellationError {
                 return

@@ -21,6 +21,7 @@ public struct DB {
     nonisolated static let databaseFilename = "db.sqlite"
     nonisolated static let outboxTableName = "share_outbox_items"
     nonisolated static let hyperlinkTableName = "hyperlink_records"
+    nonisolated static let hyperlinkOfflineSnapshotTableName = "hyperlink_offline_snapshots"
 
     nonisolated static var path: URL {
         do {
@@ -316,6 +317,20 @@ public struct DB {
                 columns: ["last_shown_in_widget", "created_at", "id"],
                 ifNotExists: true
             )
+        }
+
+        migrator.registerMigration("create_hyperlink_offline_snapshots_v1") { db in
+            try db.create(table: hyperlinkOfflineSnapshotTableName, ifNotExists: true) { t in
+                t.column("hyperlink_id", .integer).primaryKey()
+                t.column("readability_state", .text).notNull().defaults(to: "missing")
+                t.column("readability_path", .text)
+                t.column("readability_error", .text)
+                t.column("readability_saved_at", .text)
+                t.column("pdf_state", .text).notNull().defaults(to: "missing")
+                t.column("pdf_path", .text)
+                t.column("pdf_error", .text)
+                t.column("pdf_saved_at", .text)
+            }
         }
 
         try migrator.migrate(queue)

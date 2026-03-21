@@ -20,6 +20,7 @@ struct hyperlinkedApp: App {
                 .databaseContext(DB.databaseContext())
                 .task {
                     appModel.refreshDiagnostics()
+                    appModel.startOfflineBackfillIfNeeded()
                 }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -27,6 +28,7 @@ struct hyperlinkedApp: App {
                 return
             }
             appModel.refreshDiagnostics()
+            appModel.startOfflineBackfillIfNeeded(force: true)
         }
     }
 }

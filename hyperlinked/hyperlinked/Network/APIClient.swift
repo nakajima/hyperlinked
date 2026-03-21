@@ -206,6 +206,24 @@ struct APIClient {
             .appendingPathComponent("inline")
     }
 
+    func fetchArtifactData(hyperlinkID: Int, kind: String) async throws -> Data {
+        var request = URLRequest(url: artifactInlineURL(hyperlinkID: hyperlinkID, kind: kind))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 20
+        if let authorizationHeaderValue {
+            request.setValue(authorizationHeaderValue, forHTTPHeaderField: "Authorization")
+        }
+        return try await send(request)
+    }
+
+    func fetchArtifactText(hyperlinkID: Int, kind: String) async throws -> String {
+        let data = try await fetchArtifactData(hyperlinkID: hyperlinkID, kind: kind)
+        guard let string = String(data: data, encoding: .utf8), !string.isEmpty else {
+            throw APIClientError.decodingFailed("Artifact \(kind) for hyperlink \(hyperlinkID) was empty.")
+        }
+        return string
+    }
+
     private func executeQuery<Query: GraphQLQuery>(_ query: Query) async throws -> Query.Data {
         try await withCheckedThrowingContinuation { continuation in
             _ = apollo.fetch(
