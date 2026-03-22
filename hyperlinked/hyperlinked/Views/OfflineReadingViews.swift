@@ -1,6 +1,8 @@
 import PDFKit
 import SwiftUI
+#if !targetEnvironment(macCatalyst)
 import Textual
+#endif
 
 struct ReadabilityReaderView: View {
     @EnvironmentObject private var appModel: AppModel
@@ -105,11 +107,15 @@ private enum ReadabilityMarkdownRendererMode {
     case plainText
 
     static func preferred(for markdown: String) -> Self {
+        #if targetEnvironment(macCatalyst)
+        return .plainText
+        #else
         guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .plainText
         }
 
         return (try? AttributedString(markdown: markdown)) != nil ? .textual : .plainText
+        #endif
     }
 }
 
@@ -136,6 +142,9 @@ private struct ReadabilityMarkdownContentView: View {
 
     @ViewBuilder
     private var textualContent: some View {
+        #if targetEnvironment(macCatalyst)
+        plainTextContent
+        #else
         let content = StructuredText(markdown: markdown, baseURL: articleBaseURL)
             .font(.body)
             .foregroundStyle(.primary)
@@ -151,6 +160,7 @@ private struct ReadabilityMarkdownContentView: View {
         } else {
             content
         }
+        #endif
     }
 
     private var plainTextContent: some View {
@@ -225,6 +235,7 @@ private enum HyperlinkURLMatcher {
     }
 }
 
+#if !targetEnvironment(macCatalyst)
 private struct ReadabilityCodeBlockStyle: StructuredText.CodeBlockStyle {
     func makeBody(configuration: Configuration) -> some View {
         Overflow {
@@ -245,6 +256,7 @@ private struct ReadabilityCodeBlockStyle: StructuredText.CodeBlockStyle {
         .textual.blockSpacing(.fontScaled(top: 0.8, bottom: 0.15))
     }
 }
+#endif
 
 struct PDFReaderView: View {
     let fileURL: URL?

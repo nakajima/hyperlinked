@@ -10,7 +10,7 @@
 		A63EC02A2F4D991F00C9F2E1 /* Add.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A63EC0202F4D991F00C9F2E1 /* Add.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A63EC0322F4D9B8900C9F2E1 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A63EC0312F4D9B8900C9F2E1 /* GRDB */; };
 		A63EC0352F4D9BA700C9F2E1 /* GRDBQuery in Frameworks */ = {isa = PBXBuildFile; productRef = A63EC0342F4D9BA700C9F2E1 /* GRDBQuery */; };
-		A659C5042F6E599900E37016 /* Textual in Frameworks */ = {isa = PBXBuildFile; productRef = A659C5032F6E599900E37016 /* Textual */; };
+		A659C5042F6E599900E37016 /* Textual in Frameworks */ = {isa = PBXBuildFile; platformFilter = ios; productRef = A659C5032F6E599900E37016 /* Textual */; };
 		A6D100012F4F000100C9F2E1 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A63EC0312F4D9B8900C9F2E1 /* GRDB */; };
 		A6FE79992F4F92C30021B6C3 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A6FE79982F4F92C30021B6C3 /* WidgetKit.framework */; };
 		A6FE799B2F4F92C30021B6C3 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A6FE799A2F4F92C30021B6C3 /* SwiftUI.framework */; };
@@ -1096,6 +1096,7 @@
 		A659C5032F6E599900E37016 /* Textual */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A659C5022F6E599900E37016 /* XCRemoteSwiftPackageReference "textual" */;
+			platformFilter = ios;
 			productName = Textual;
 		};
 		B0A100022F60000100A1A1A1 /* Apollo */ = {
