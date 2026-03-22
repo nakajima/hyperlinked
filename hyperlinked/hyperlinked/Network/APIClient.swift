@@ -34,6 +34,7 @@ struct APIClient {
     let authorizationHeaderValue: String?
 
     private let apollo: ApolloClient
+    private let logger = AppEventLogger(component: "APIClient")
 
     init(
         baseURL: URL,
@@ -66,11 +67,14 @@ struct APIClient {
     }
 
     func testConnection() async throws {
+        logger.log("api_test_connection_started", details: ["server": baseURL.absoluteString])
         let request = try makeRequest(path: "/hyperlinks.json", method: "GET")
         _ = try await send(request)
+        logger.log("api_test_connection_succeeded", details: ["server": baseURL.absoluteString])
     }
 
     func listHyperlinks() async throws -> [Hyperlink] {
+        logger.log("api_list_hyperlinks_started", details: ["server": baseURL.absoluteString])
         let pageSize = 200
         let maxPages = 50
         var page = 0
@@ -100,6 +104,14 @@ struct APIClient {
             page += 1
         }
 
+        logger.log(
+            "api_list_hyperlinks_succeeded",
+            details: [
+                "server": baseURL.absoluteString,
+                "hyperlink_count": String(hyperlinks.count),
+                "pages_loaded": String(page + 1),
+            ]
+        )
         return hyperlinks
     }
 
@@ -107,6 +119,10 @@ struct APIClient {
         let normalizedUpdatedAt = updatedAt
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedUpdatedAt.isEmpty else {
+            logger.log(
+                "api_fetch_updated_hyperlinks_rejected",
+                details: ["reason": "empty_updated_at"]
+            )
             throw APIClientError.decodingFailed("updatedAt must not be empty.")
         }
 
@@ -121,6 +137,14 @@ struct APIClient {
             )
         }
 
+        logger.log(
+            "api_fetch_updated_hyperlinks_succeeded",
+            details: [
+                "cursor": normalizedUpdatedAt,
+                "change_count": String(changes.count),
+                "server_updated_at": data.updatedHyperlinks.serverUpdatedAt,
+            ]
+        )
         return UpdatedHyperlinksBatch(
             serverUpdatedAt: data.updatedHyperlinks.serverUpdatedAt,
             changes: changes
@@ -139,6 +163,10 @@ struct APIClient {
     }
 
     func createHyperlink(title: String, url: String) async throws -> Hyperlink {
+        logger.log(
+            "api_create_hyperlink_started",
+            details: ["server": baseURL.absoluteString, "url": url]
+        )
         let input = HyperlinkInput(title: title, url: url)
         let body = try JSONEncoder().encode(input)
         var request = try makeRequest(path: "/hyperlinks.json", method: "POST")
@@ -148,15 +176,28 @@ struct APIClient {
         do {
             let created = try JSONDecoder().decode(Hyperlink.self, from: data)
             if let enriched = try? await fetchHyperlink(id: created.id) {
+                logger.log(
+                    "api_create_hyperlink_succeeded",
+                    details: ["hyperlink_id": String(created.id), "enriched": "true"]
+                )
                 return enriched
             }
+            logger.log(
+                "api_create_hyperlink_succeeded",
+                details: ["hyperlink_id": String(created.id), "enriched": "false"]
+            )
             return created
         } catch {
+            logger.logError("api_create_hyperlink_decode_failed", error: error)
             throw APIClientError.decodingFailed(error.localizedDescription)
         }
     }
 
     func uploadPDF(title: String, fileURL: URL, filename: String) async throws -> Hyperlink {
+        logger.log(
+            "api_upload_pdf_started",
+            details: ["server": baseURL.absoluteString, "filename": filename]
+        )
         let didStartScopedAccess = fileURL.startAccessingSecurityScopedResource()
         defer {
             if didStartScopedAccess {
@@ -181,10 +222,19 @@ struct APIClient {
         do {
             let created = try JSONDecoder().decode(Hyperlink.self, from: data)
             if let enriched = try? await fetchHyperlink(id: created.id) {
+                logger.log(
+                    "api_upload_pdf_succeeded",
+                    details: ["hyperlink_id": String(created.id), "enriched": "true", "filename": filename]
+                )
                 return enriched
             }
+            logger.log(
+                "api_upload_pdf_succeeded",
+                details: ["hyperlink_id": String(created.id), "enriched": "false", "filename": filename]
+            )
             return created
         } catch {
+            logger.logError("api_upload_pdf_decode_failed", error: error, details: ["filename": filename])
             throw APIClientError.decodingFailed(error.localizedDescription)
         }
     }
@@ -195,6 +245,7 @@ struct APIClient {
             method: "POST"
         )
         _ = try await send(request)
+        logger.log("api_report_hyperlink_click_succeeded", details: ["hyperlink_id": String(hyperlinkID)])
     }
 
     func artifactInlineURL(hyperlinkID: Int, kind: String) -> URL {
@@ -326,17 +377,44 @@ struct APIClient {
     }
 
     private func send(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw APIClientError.invalidResponse
-        }
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                logger.log(
+                    "api_request_failed",
+                    details: [
+                        "path": request.url?.path ?? "unknown",
+                        "reason": "invalid_response",
+                    ]
+                )
+                throw APIClientError.invalidResponse
+            }
 
-        guard (200...299).contains(http.statusCode) else {
-            let message = parseErrorMessage(data: data)
-            throw APIClientError.unexpectedStatus(code: http.statusCode, message: message)
-        }
+            guard (200...299).contains(http.statusCode) else {
+                let message = parseErrorMessage(data: data)
+                logger.log(
+                    "api_request_failed",
+                    details: [
+                        "path": request.url?.path ?? "unknown",
+                        "status_code": String(http.statusCode),
+                        "message": message,
+                    ]
+                )
+                throw APIClientError.unexpectedStatus(code: http.statusCode, message: message)
+            }
 
-        return data
+            return data
+        } catch {
+            logger.logError(
+                "api_request_threw",
+                error: error,
+                details: [
+                    "path": request.url?.path ?? "unknown",
+                    "method": request.httpMethod ?? "unknown",
+                ]
+            )
+            throw error
+        }
     }
 
     private func parseErrorMessage(data: Data) -> String {

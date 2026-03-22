@@ -12,6 +12,7 @@ import SwiftUI
 struct hyperlinkedApp: App {
     @StateObject private var appModel = AppModel()
     @Environment(\.scenePhase) private var scenePhase
+    private let logger = AppEventLogger(component: "hyperlinkedApp")
 
     var body: some Scene {
         WindowGroup {
@@ -19,11 +20,13 @@ struct hyperlinkedApp: App {
                 .environmentObject(appModel)
                 .databaseContext(DB.databaseContext())
                 .task {
+                    logger.log("app_launch_task_started")
                     appModel.refreshDiagnostics()
                     appModel.startOfflineBackfillIfNeeded()
                 }
         }
         .onChange(of: scenePhase) { _, newPhase in
+            logger.log("scene_phase_changed", details: ["phase": String(describing: newPhase)])
             guard newPhase == .active else {
                 return
             }

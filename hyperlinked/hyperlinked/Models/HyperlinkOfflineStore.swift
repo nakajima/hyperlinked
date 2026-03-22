@@ -320,6 +320,7 @@ final class HyperlinkOfflineStore {
 
 actor HyperlinkOfflineSnapshotManager {
     static let shared = HyperlinkOfflineSnapshotManager()
+    private let logger = AppEventLogger(component: "HyperlinkOfflineSnapshotManager")
 
     func needsBackfill(for hyperlink: Hyperlink) -> Bool {
         guard let store = try? HyperlinkOfflineStore.openShared(),
@@ -333,8 +334,10 @@ actor HyperlinkOfflineSnapshotManager {
     }
 
     func backfillMissingSnapshots(hyperlinks: [Hyperlink], client: APIClient) async {
+        logger.log("offline_snapshot_backfill_started", details: ["hyperlink_count": String(hyperlinks.count)])
         for hyperlink in hyperlinks {
             guard !Task.isCancelled else {
+                logger.log("offline_snapshot_backfill_cancelled")
                 return
             }
             guard needsBackfill(for: hyperlink) else {
@@ -347,6 +350,7 @@ actor HyperlinkOfflineSnapshotManager {
                 localPDFSourceURL: nil
             )
         }
+        logger.log("offline_snapshot_backfill_completed", details: ["hyperlink_count": String(hyperlinks.count)])
     }
 
     func saveSnapshot(
@@ -356,18 +360,34 @@ actor HyperlinkOfflineSnapshotManager {
         localPDFSourceURL: URL? = nil
     ) async {
         guard let store = try? HyperlinkOfflineStore.openShared() else {
+            logger.log(
+                "offline_snapshot_save_skipped",
+                details: ["hyperlink_id": String(hyperlink.id), "reason": "store_open_failed"]
+            )
             return
         }
+
+        logger.log(
+            "offline_snapshot_save_started",
+            details: [
+                "hyperlink_id": String(hyperlink.id),
+                "include_pdf": includePDF ? "true" : "false",
+                "has_local_pdf_source": localPDFSourceURL == nil ? "false" : "true",
+            ]
+        )
 
         do {
             try store.markReadabilityPending(hyperlinkID: hyperlink.id)
             let markdown = try await client.fetchArtifactText(hyperlinkID: hyperlink.id, kind: "readable_text")
             try store.saveReadability(markdown: markdown, hyperlinkID: hyperlink.id)
+            logger.log("offline_readability_save_succeeded", details: ["hyperlink_id": String(hyperlink.id)])
         } catch {
             try? store.markReadabilityFailed(hyperlinkID: hyperlink.id, message: error.localizedDescription)
+            logger.logError("offline_readability_save_failed", error: error, details: ["hyperlink_id": String(hyperlink.id)])
         }
 
         guard includePDF else {
+            logger.log("offline_snapshot_save_completed", details: ["hyperlink_id": String(hyperlink.id), "included_pdf": "false"])
             return
         }
 
@@ -379,9 +399,12 @@ actor HyperlinkOfflineSnapshotManager {
                 let data = try await client.fetchArtifactData(hyperlinkID: hyperlink.id, kind: "pdf_source")
                 try store.savePDF(data: data, hyperlinkID: hyperlink.id)
             }
+            logger.log("offline_pdf_save_succeeded", details: ["hyperlink_id": String(hyperlink.id)])
         } catch {
             try? store.markPDFFailed(hyperlinkID: hyperlink.id, message: error.localizedDescription)
+            logger.logError("offline_pdf_save_failed", error: error, details: ["hyperlink_id": String(hyperlink.id)])
         }
+        logger.log("offline_snapshot_save_completed", details: ["hyperlink_id": String(hyperlink.id), "included_pdf": "true"])
     }
 }
 

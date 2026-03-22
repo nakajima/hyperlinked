@@ -4,6 +4,7 @@ import UIKit
 struct ServerSettingsView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.dismiss) private var dismiss
+    private let logger = AppEventLogger(component: "ServerSettingsView")
 
     let pendingUploadsCount: Int
     let onChangeServer: () -> Void
@@ -131,6 +132,7 @@ struct ServerSettingsView: View {
                     }
 
                     Button("Refresh Diagnostics") {
+                        logger.log("server_settings_refresh_diagnostics_requested")
                         appModel.refreshDiagnostics()
                         diagnosticsStatusMessage = "Diagnostics refreshed."
                     }
@@ -197,6 +199,10 @@ struct ServerSettingsView: View {
             }
             .navigationTitle("Server Settings")
             .task {
+                logger.log(
+                    "server_settings_view_appeared",
+                    details: ["selected_server": appModel.selectedServerURL?.absoluteString ?? "none"]
+                )
                 loadAuthFromModel()
                 appModel.refreshDiagnostics()
             }
@@ -238,15 +244,21 @@ struct ServerSettingsView: View {
     private func saveAuthentication() async {
         guard let selectedServerURL = appModel.selectedServerURL else {
             authStatusMessage = "No server selected."
+            logger.log("save_authentication_rejected", details: ["reason": "no_server_selected"])
             return
         }
         let credentials = resolvedBasicCredentials()
         if authMode == .basic && credentials == nil {
             authStatusMessage = "Username and password are required for Basic Auth."
+            logger.log("save_authentication_rejected", details: ["reason": "missing_basic_credentials"])
             return
         }
 
         isSavingAuth = true
+        logger.log(
+            "save_authentication_started",
+            details: ["server": selectedServerURL.absoluteString, "auth_mode": authMode.rawValue]
+        )
         defer { isSavingAuth = false }
 
         do {
@@ -262,6 +274,10 @@ struct ServerSettingsView: View {
             authStatusMessage = saved
                 ? "Authentication settings saved."
                 : "Failed to save authentication settings."
+            logger.log(
+                saved ? "save_authentication_succeeded" : "save_authentication_failed",
+                details: ["server": selectedServerURL.absoluteString, "auth_mode": authMode.rawValue]
+            )
         } catch {
             if case APIClientError.unexpectedStatus(let code, _) = error, code == 401 {
                 authStatusMessage = authMode == .basic
@@ -270,6 +286,11 @@ struct ServerSettingsView: View {
             } else {
                 authStatusMessage = error.localizedDescription
             }
+            logger.logError(
+                "save_authentication_failed",
+                error: error,
+                details: ["server": selectedServerURL.absoluteString, "auth_mode": authMode.rawValue]
+            )
         }
     }
 
@@ -279,6 +300,7 @@ struct ServerSettingsView: View {
         basicUsername = ""
         basicPassword = ""
         authStatusMessage = "Saved credentials removed."
+        logger.log("saved_credentials_removed")
     }
 
     private func formattedDate(_ date: Date?) -> String {
@@ -291,10 +313,12 @@ struct ServerSettingsView: View {
     private func copyLatestDiagnosticEntry() {
         guard let latest = appModel.widgetRotationDiagnostics.latestLogEntry, !latest.isEmpty else {
             diagnosticsStatusMessage = "No diagnostic entries available."
+            logger.log("copy_latest_diagnostic_entry_skipped", details: ["reason": "no_entries_available"])
             return
         }
 
         UIPasteboard.general.string = latest
         diagnosticsStatusMessage = "Latest diagnostic entry copied."
+        logger.log("latest_diagnostic_entry_copied")
     }
 }

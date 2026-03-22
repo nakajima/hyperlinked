@@ -10,6 +10,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.openURL) private var openURL
+    private let logger = AppEventLogger(component: "ContentView")
 
     var body: some View {
         Group {
@@ -19,22 +20,61 @@ struct ContentView: View {
                 HyperlinksListView()
             }
         }
+        .task(id: appModel.shouldShowServerSetup) {
+            logger.log(
+                "content_route_resolved",
+                details: [
+                    "destination": (appModel.shouldShowServerSetup || appModel.selectedServerURL == nil)
+                        ? "server_setup"
+                        : "hyperlinks_list",
+                    "selected_server": appModel.selectedServerURL?.absoluteString ?? "none",
+                ]
+            )
+        }
         .onOpenURL(perform: handleIncomingURL)
     }
 
     private func handleIncomingURL(_ url: URL) {
         guard let payload = WidgetDeepLink.parseVisitPayload(incomingURL: url) else {
+            logger.log(
+                "incoming_url_ignored",
+                details: ["url": url.absoluteString, "reason": "unrecognized_deep_link"]
+            )
             return
         }
+        logger.log(
+            "incoming_url_opened",
+            details: [
+                "url": url.absoluteString,
+                "target_url": payload.targetURL.absoluteString,
+                "hyperlink_id": payload.hyperlinkID.map(String.init) ?? "none",
+            ]
+        )
         openURL(payload.targetURL)
 
         guard let hyperlinkID = payload.hyperlinkID,
               let client = appModel.apiClient else {
+            logger.log(
+                "hyperlink_click_report_skipped",
+                details: [
+                    "reason": payload.hyperlinkID == nil ? "missing_hyperlink_id" : "missing_api_client",
+                    "target_url": payload.targetURL.absoluteString,
+                ]
+            )
             return
         }
 
         Task {
-            try? await client.reportHyperlinkClick(hyperlinkID: hyperlinkID)
+            do {
+                try await client.reportHyperlinkClick(hyperlinkID: hyperlinkID)
+                logger.log("hyperlink_click_reported", details: ["hyperlink_id": String(hyperlinkID)])
+            } catch {
+                logger.logError(
+                    "hyperlink_click_report_failed",
+                    error: error,
+                    details: ["hyperlink_id": String(hyperlinkID)]
+                )
+            }
         }
     }
 }

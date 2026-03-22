@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct AddHyperlinkView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.dismiss) private var dismiss
+    private let logger = AppEventLogger(component: "AddHyperlinkView")
 
     let onCreated: (Hyperlink) -> Void
 
@@ -76,6 +77,9 @@ struct AddHyperlinkView: View {
                 }
             }
             .navigationTitle("Add Hyperlink")
+            .task {
+                logger.log("add_hyperlink_view_appeared")
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") {
@@ -99,12 +103,21 @@ struct AddHyperlinkView: View {
                 switch result {
                 case .success(let urls):
                     guard let selected = urls.first else {
+                        logger.log(
+                            "pdf_importer_finished",
+                            details: ["result": "no_selection"]
+                        )
                         return
                     }
                     selectedPDFURL = selected
                     selectedPDFFilename = selected.lastPathComponent
+                    logger.log(
+                        "pdf_selected",
+                        details: ["filename": selected.lastPathComponent]
+                    )
                 case .failure(let error):
                     errorMessage = error.localizedDescription
+                    logger.logError("pdf_import_failed", error: error)
                 }
             }
         }
@@ -113,10 +126,15 @@ struct AddHyperlinkView: View {
     private func save() async {
         guard let client = appModel.apiClient else {
             errorMessage = "No server selected."
+            logger.log("add_hyperlink_save_rejected", details: ["reason": "missing_api_client"])
             return
         }
 
         isSaving = true
+        logger.log(
+            "add_hyperlink_save_started",
+            details: ["input_mode": inputMode.rawValue]
+        )
         defer { isSaving = false }
 
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -125,6 +143,7 @@ struct AddHyperlinkView: View {
             let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedURL.isEmpty else {
                 errorMessage = "URL is required."
+                logger.log("add_link_rejected", details: ["reason": "missing_url"])
                 return
             }
             do {
@@ -133,6 +152,10 @@ struct AddHyperlinkView: View {
                     url: trimmedURL
                 )
                 onCreated(created)
+                logger.log(
+                    "add_link_succeeded",
+                    details: ["hyperlink_id": String(created.id), "url": trimmedURL]
+                )
                 Task {
                     await HyperlinkOfflineSnapshotManager.shared.saveSnapshot(
                         for: created,
@@ -143,14 +166,17 @@ struct AddHyperlinkView: View {
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription
+                logger.logError("add_link_failed", error: error, details: ["url": trimmedURL])
             }
         case .pdf:
             guard let selectedPDFURL else {
                 errorMessage = "Choose a PDF first."
+                logger.log("add_pdf_rejected", details: ["reason": "missing_pdf_selection"])
                 return
             }
             guard let store = try? ShareOutboxStore.openShared() else {
                 errorMessage = "Could not access offline upload queue."
+                logger.log("add_pdf_failed", details: ["reason": "outbox_store_open_failed"])
                 return
             }
 
@@ -163,8 +189,13 @@ struct AddHyperlinkView: View {
                     title: trimmedTitle,
                     uploadType: .pdf
                 )
+                logger.log(
+                    "pdf_upload_enqueued",
+                    details: ["queue_item_id": queuedItem.id, "filename": filename]
+                )
             } catch {
                 errorMessage = "Could not queue this PDF for upload."
+                logger.logError("pdf_upload_enqueue_failed", error: error, details: ["filename": filename])
                 return
             }
 
@@ -196,9 +227,22 @@ struct AddHyperlinkView: View {
                 try store.markDelivered(id: queuedItem.id)
                 store.removeUploadFileIfPresent(path: queuedItem.uploadFilePath)
                 onCreated(created)
+                logger.log(
+                    "pdf_upload_succeeded",
+                    details: [
+                        "queue_item_id": queuedItem.id,
+                        "hyperlink_id": String(created.id),
+                        "filename": filename,
+                    ]
+                )
                 dismiss()
             } catch {
                 try? store.markAttemptFailed(id: queuedItem.id, errorMessage: error.localizedDescription)
+                logger.logError(
+                    "pdf_upload_failed",
+                    error: error,
+                    details: ["queue_item_id": queuedItem.id, "filename": filename]
+                )
                 dismiss()
             }
         }

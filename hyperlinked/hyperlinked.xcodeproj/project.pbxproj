@@ -10,6 +10,7 @@
 		A63EC02A2F4D991F00C9F2E1 /* Add.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A63EC0202F4D991F00C9F2E1 /* Add.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A63EC0322F4D9B8900C9F2E1 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A63EC0312F4D9B8900C9F2E1 /* GRDB */; };
 		A63EC0352F4D9BA700C9F2E1 /* GRDBQuery in Frameworks */ = {isa = PBXBuildFile; productRef = A63EC0342F4D9BA700C9F2E1 /* GRDBQuery */; };
+		A659C5042F6E599900E37016 /* Textual in Frameworks */ = {isa = PBXBuildFile; productRef = A659C5032F6E599900E37016 /* Textual */; };
 		A6D100012F4F000100C9F2E1 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A63EC0312F4D9B8900C9F2E1 /* GRDB */; };
 		A6FE79992F4F92C30021B6C3 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A6FE79982F4F92C30021B6C3 /* WidgetKit.framework */; };
 		A6FE799B2F4F92C30021B6C3 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A6FE799A2F4F92C30021B6C3 /* SwiftUI.framework */; };
@@ -134,6 +135,7 @@
 				B0A100012F60000100A1A1A1 /* Apollo in Frameworks */,
 				A63EC0352F4D9BA700C9F2E1 /* GRDBQuery in Frameworks */,
 				A63EC0322F4D9B8900C9F2E1 /* GRDB in Frameworks */,
+				A659C5042F6E599900E37016 /* Textual in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -232,6 +234,7 @@
 				B0A100042F60000100A1A1A1 /* ApolloAPI */,
 				A63EC0312F4D9B8900C9F2E1 /* GRDB */,
 				A63EC0342F4D9BA700C9F2E1 /* GRDBQuery */,
+				A659C5032F6E599900E37016 /* Textual */,
 			);
 			productName = hyperlinked;
 			productReference = A63EBF912F4CDD9700C9F2E1 /* hyperlinked.app */;
@@ -370,6 +373,7 @@
 				B0A100052F60000100A1A1A1 /* XCRemoteSwiftPackageReference "apollo-ios" */,
 				A63EC0302F4D9B8900C9F2E1 /* XCRemoteSwiftPackageReference "GRDB" */,
 				A63EC0332F4D9BA700C9F2E1 /* XCRemoteSwiftPackageReference "GRDBQuery" */,
+				A659C5022F6E599900E37016 /* XCRemoteSwiftPackageReference "textual" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A63EBF922F4CDD9700C9F2E1 /* Products */;
@@ -1060,6 +1064,14 @@
 				minimumVersion = 0.11.0;
 			};
 		};
+		A659C5022F6E599900E37016 /* XCRemoteSwiftPackageReference "textual" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/gonzalezreal/textual";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.3.1;
+			};
+		};
 		B0A100052F60000100A1A1A1 /* XCRemoteSwiftPackageReference "apollo-ios" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/apollographql/apollo-ios.git";
@@ -1080,6 +1092,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A63EC0332F4D9BA700C9F2E1 /* XCRemoteSwiftPackageReference "GRDBQuery" */;
 			productName = GRDBQuery;
+		};
+		A659C5032F6E599900E37016 /* Textual */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A659C5022F6E599900E37016 /* XCRemoteSwiftPackageReference "textual" */;
+			productName = Textual;
 		};
 		B0A100022F60000100A1A1A1 /* Apollo */ = {
 			isa = XCSwiftPackageProductDependency;

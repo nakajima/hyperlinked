@@ -6,6 +6,7 @@ import GRDBQuery
 struct HyperlinksListView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.colorScheme) private var colorScheme
+    private let diagnosticsLogger = AppEventLogger(component: "HyperlinksListView")
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "fm.folder.hyperlinked",
         category: "hyperlink-cache"
@@ -146,6 +147,10 @@ struct HyperlinksListView: View {
         }
         .task(id: appModel.selectedServerURL?.absoluteString) {
             latestServerUpdatedAt = nil
+            diagnosticsLogger.log(
+                "hyperlinks_list_server_context_changed",
+                details: ["selected_server": appModel.selectedServerURL?.absoluteString ?? "none"]
+            )
             await loadHyperlinks()
         }
         .task(id: appModel.selectedServerURL?.absoluteString) {
@@ -155,6 +160,7 @@ struct HyperlinksListView: View {
             await refreshUpdatedHyperlinksLoop()
         }
         .refreshable {
+            diagnosticsLogger.log("hyperlinks_list_refresh_requested")
             await loadHyperlinks()
             appModel.refreshDiagnostics()
         }
@@ -162,6 +168,13 @@ struct HyperlinksListView: View {
             // Search is local over cached records.
         }
         .onChange(of: queryText) {
+            diagnosticsLogger.log(
+                "hyperlinks_query_changed",
+                details: [
+                    "query_length": String(trimmedQueryText.count),
+                    "has_free_text": hasFreeText ? "true" : "false",
+                ]
+            )
             if !hasFreeText, orderOverride == .relevance {
                 orderOverrideRawValue = ""
             }
@@ -172,6 +185,7 @@ struct HyperlinksListView: View {
         .onReceive(
             NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)
         ) { _ in
+            diagnosticsLogger.log("hyperlinks_list_will_enter_foreground")
             appModel.refreshDiagnostics()
             Task {
                 await loadHyperlinks()
@@ -284,10 +298,21 @@ struct HyperlinksListView: View {
     private func loadHyperlinks() async {
         guard let client = appModel.apiClient else {
             errorMessage = "No server selected."
+            diagnosticsLogger.log(
+                "load_hyperlinks_skipped",
+                details: ["reason": "missing_api_client"]
+            )
             return
         }
 
         isLoading = true
+        diagnosticsLogger.log(
+            "load_hyperlinks_started",
+            details: [
+                "selected_server": appModel.selectedServerURL?.absoluteString ?? "none",
+                "pending_outbox_count": String(pendingOutboxItems.count),
+            ]
+        )
         defer { isLoading = false }
 
         do {
@@ -297,12 +322,22 @@ struct HyperlinksListView: View {
             appModel.startOfflineBackfillIfNeeded(force: true)
             latestServerUpdatedAt = newestUpdatedAt(in: fetched) ?? latestServerUpdatedAt
             errorMessage = nil
+            diagnosticsLogger.log(
+                "load_hyperlinks_succeeded",
+                details: [
+                    "fetched_count": String(fetched.count),
+                    "latest_server_updated_at": latestServerUpdatedAt ?? "none",
+                ]
+            )
         } catch is CancellationError {
+            diagnosticsLogger.log("load_hyperlinks_cancelled", details: ["reason": "task_cancelled"])
             return
         } catch let urlError as URLError where urlError.code == .cancelled {
+            diagnosticsLogger.log("load_hyperlinks_cancelled", details: ["reason": "url_session_cancelled"])
             return
         } catch {
             errorMessage = error.localizedDescription
+            diagnosticsLogger.logError("load_hyperlinks_failed", error: error)
         }
     }
 
@@ -322,11 +357,26 @@ struct HyperlinksListView: View {
                 applyUpdatedHyperlinks(batch)
                 appModel.startOfflineBackfillIfNeeded(force: true)
                 latestServerUpdatedAt = batch.serverUpdatedAt
+                diagnosticsLogger.log(
+                    "updated_hyperlinks_refresh_succeeded",
+                    details: [
+                        "cursor": cursor,
+                        "change_count": String(batch.changes.count),
+                        "server_updated_at": batch.serverUpdatedAt,
+                    ]
+                )
             } catch is CancellationError {
+                diagnosticsLogger.log("updated_hyperlinks_refresh_cancelled")
                 return
             } catch let urlError as URLError where urlError.code == .cancelled {
+                diagnosticsLogger.log("updated_hyperlinks_refresh_cancelled", details: ["reason": "url_session_cancelled"])
                 return
             } catch {
+                diagnosticsLogger.logError(
+                    "updated_hyperlinks_refresh_failed",
+                    error: error,
+                    details: ["cursor": cursor]
+                )
                 Self.logger.debug(
                     "Failed to refresh updated hyperlinks: \(error.localizedDescription, privacy: .public)"
                 )
@@ -348,10 +398,24 @@ struct HyperlinksListView: View {
 
     private func retryPendingOutbox(using client: APIClient) async {
         guard let store = try? ShareOutboxStore.openShared() else {
+            diagnosticsLogger.log(
+                "pending_outbox_retry_skipped",
+                details: ["reason": "store_open_failed"]
+            )
             return
         }
         let coordinator = OutboxDeliveryCoordinator(store: store, client: client)
-        _ = await coordinator.drainDueItems(limit: 20)
+        let result = await coordinator.drainDueItems(limit: 20)
+        if result.attempted > 0 || result.failed > 0 {
+            diagnosticsLogger.log(
+                "pending_outbox_retry_completed",
+                details: [
+                    "attempted": String(result.attempted),
+                    "delivered": String(result.delivered),
+                    "failed": String(result.failed),
+                ]
+            )
+        }
     }
 
     private func replaceCachedHyperlinks(hyperlinks: [Hyperlink]) {
@@ -359,6 +423,11 @@ struct HyperlinksListView: View {
             let store = try HyperlinkStore.openShared()
             try store.replaceAll(hyperlinks: hyperlinks)
         } catch {
+            diagnosticsLogger.logError(
+                "replace_cached_hyperlinks_failed",
+                error: error,
+                details: ["hyperlink_count": String(hyperlinks.count)]
+            )
             Self.logger.debug(
                 "Failed to replace cached hyperlinks: \(error.localizedDescription, privacy: .public)"
             )
@@ -367,6 +436,10 @@ struct HyperlinksListView: View {
 
     private func persistHyperlinks(hyperlinks: [Hyperlink]) {
         guard !hyperlinks.isEmpty else {
+            diagnosticsLogger.log(
+                "persist_hyperlinks_skipped",
+                details: ["reason": "empty_batch"]
+            )
             return
         }
 
@@ -374,12 +447,21 @@ struct HyperlinksListView: View {
             let store = try HyperlinkStore.openShared()
             try store.upsert(hyperlinks: hyperlinks)
         } catch {
+            diagnosticsLogger.logError(
+                "persist_hyperlinks_failed",
+                error: error,
+                details: ["hyperlink_count": String(hyperlinks.count)]
+            )
             Self.logger.debug("Failed to persist hyperlinks: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     private func applyUpdatedHyperlinks(_ batch: UpdatedHyperlinksBatch) {
         guard !batch.changes.isEmpty else {
+            diagnosticsLogger.log(
+                "apply_updated_hyperlinks_skipped",
+                details: ["reason": "empty_changes"]
+            )
             return
         }
 
@@ -387,6 +469,11 @@ struct HyperlinksListView: View {
             let store = try HyperlinkStore.openShared()
             try store.apply(updatedBatch: batch)
         } catch {
+            diagnosticsLogger.logError(
+                "apply_updated_hyperlinks_failed",
+                error: error,
+                details: ["change_count": String(batch.changes.count)]
+            )
             Self.logger.debug(
                 "Failed to apply updated hyperlinks: \(error.localizedDescription, privacy: .public)"
             )

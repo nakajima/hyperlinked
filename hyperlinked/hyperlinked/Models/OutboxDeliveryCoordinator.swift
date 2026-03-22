@@ -9,6 +9,7 @@ struct OutboxDrainResult {
 final class OutboxDeliveryCoordinator {
     private let store: ShareOutboxStore
     private let client: APIClient
+    private let logger = AppEventLogger(component: "OutboxDeliveryCoordinator")
 
     init(store: ShareOutboxStore, client: APIClient) {
         self.store = store
@@ -23,11 +24,24 @@ final class OutboxDeliveryCoordinator {
         do {
             dueItems = try store.dueItems(limit: limit)
         } catch {
+            logger.logError("outbox_due_items_lookup_failed", error: error, details: ["limit": String(limit)])
             return result
+        }
+
+        if !dueItems.isEmpty {
+            logger.log("outbox_drain_started", details: ["due_item_count": String(dueItems.count)])
         }
 
         for item in dueItems {
             result.attempted += 1
+            logger.log(
+                "outbox_item_delivery_started",
+                details: [
+                    "item_id": item.id,
+                    "payload_kind": item.payloadKind,
+                    "attempt_count": String(item.attemptCount),
+                ]
+            )
             do {
                 let created: Hyperlink
                 let localPDFSourceURL: URL?
@@ -75,10 +89,26 @@ final class OutboxDeliveryCoordinator {
                     store.removeUploadFileIfPresent(path: item.uploadFilePath)
                 }
                 result.delivered += 1
+                logger.log(
+                    "outbox_item_delivery_succeeded",
+                    details: ["item_id": item.id, "delivered_count": String(result.delivered)]
+                )
             } catch {
                 try? store.markAttemptFailed(id: item.id, errorMessage: error.localizedDescription)
                 result.failed += 1
+                logger.logError("outbox_item_delivery_failed", error: error, details: ["item_id": item.id])
             }
+        }
+
+        if result.attempted > 0 {
+            logger.log(
+                "outbox_drain_completed",
+                details: [
+                    "attempted": String(result.attempted),
+                    "delivered": String(result.delivered),
+                    "failed": String(result.failed),
+                ]
+            )
         }
 
         return result

@@ -6,6 +6,8 @@ final class BonjourDiscoveryService: NSObject, ObservableObject {
     @Published private(set) var isSearching = false
     @Published private(set) var errorMessage: String?
 
+    private let logger = AppEventLogger(component: "BonjourDiscoveryService")
+
     private let browser = NetServiceBrowser()
     private var activeServices: [String: NetService] = [:]
     private var resolvedServers: [String: DiscoveredServer] = [:]
@@ -24,6 +26,10 @@ final class BonjourDiscoveryService: NSObject, ObservableObject {
     }
 
     func startDiscovery() {
+        logger.log(
+            "bonjour_discovery_started",
+            details: ["service_type": serviceType, "domain": domain]
+        )
         stopDiscovery()
         onMain {
             self.errorMessage = nil
@@ -33,6 +39,13 @@ final class BonjourDiscoveryService: NSObject, ObservableObject {
     }
 
     func stopDiscovery() {
+        logger.log(
+            "bonjour_discovery_stopped",
+            details: [
+                "active_services": String(activeServices.count),
+                "resolved_servers": String(resolvedServers.count),
+            ]
+        )
         browser.stop()
         for service in activeServices.values {
             service.stop()
@@ -82,6 +95,10 @@ extension BonjourDiscoveryService: NetServiceBrowserDelegate {
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
         let rawCode = errorDict[NetService.errorCode]?.intValue ?? -1
+        logger.log(
+            "bonjour_discovery_failed",
+            details: ["error_code": String(rawCode)]
+        )
         onMain {
             self.errorMessage = "Discovery failed (\(rawCode)). Check local network permissions."
             self.isSearching = false
@@ -100,6 +117,10 @@ extension BonjourDiscoveryService: NetServiceBrowserDelegate {
         moreComing: Bool
     ) {
         let key = serviceKey(service)
+        logger.log(
+            "bonjour_service_found",
+            details: ["service_name": service.name, "service_key": key]
+        )
         activeServices[key] = service
         service.delegate = self
         service.resolve(withTimeout: 5)
@@ -115,6 +136,10 @@ extension BonjourDiscoveryService: NetServiceBrowserDelegate {
         moreComing: Bool
     ) {
         let key = serviceKey(service)
+        logger.log(
+            "bonjour_service_removed",
+            details: ["service_name": service.name, "service_key": key]
+        )
         activeServices[key]?.stop()
         activeServices[key]?.delegate = nil
         activeServices.removeValue(forKey: key)
@@ -129,11 +154,19 @@ extension BonjourDiscoveryService: NetServiceBrowserDelegate {
 extension BonjourDiscoveryService: NetServiceDelegate {
     func netServiceDidResolveAddress(_ sender: NetService) {
         guard let hostName = sender.hostName else {
+            logger.log(
+                "bonjour_service_resolution_skipped",
+                details: ["service_name": sender.name, "reason": "missing_host_name"]
+            )
             return
         }
 
         let host = hostName.trimmingCharacters(in: CharacterSet(charactersIn: "."))
         guard !host.isEmpty, sender.port > 0 else {
+            logger.log(
+                "bonjour_service_resolution_skipped",
+                details: ["service_name": sender.name, "reason": "invalid_host_or_port"]
+            )
             return
         }
 
@@ -144,11 +177,27 @@ extension BonjourDiscoveryService: NetServiceDelegate {
             host: host,
             port: sender.port
         )
+        logger.log(
+            "bonjour_service_resolved",
+            details: [
+                "service_name": sender.name,
+                "host": host,
+                "port": String(sender.port),
+            ]
+        )
         updateServers()
     }
 
     func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
         let key = serviceKey(sender)
+        logger.log(
+            "bonjour_service_resolution_failed",
+            details: [
+                "service_name": sender.name,
+                "service_key": key,
+                "error_code": String(errorDict[NetService.errorCode]?.intValue ?? -1),
+            ]
+        )
         activeServices.removeValue(forKey: key)
         resolvedServers.removeValue(forKey: key)
         updateServers()

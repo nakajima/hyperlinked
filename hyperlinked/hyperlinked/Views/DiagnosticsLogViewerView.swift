@@ -3,6 +3,7 @@ import UIKit
 
 struct DiagnosticsLogViewerView: View {
     @EnvironmentObject private var appModel: AppModel
+    private let logger = AppEventLogger(component: "DiagnosticsLogViewerView")
 
     @State private var logText = ""
     @State private var isLoading = false
@@ -72,16 +73,23 @@ struct DiagnosticsLogViewerView: View {
     @MainActor
     private func refresh() async {
         isLoading = true
+        logger.log("diagnostics_log_view_refresh_started")
         let text = await AppDiagnosticsLog.shared.readLogText()
         logText = text
         isLoading = false
+        logger.log(
+            "diagnostics_log_view_refresh_completed",
+            details: ["character_count": String(text.count), "is_empty": text.isEmpty ? "true" : "false"]
+        )
         appModel.refreshDiagnostics()
     }
 
     @MainActor
     private func clearLog() async {
+        logger.log("diagnostics_log_view_clear_requested")
         _ = await AppDiagnosticsLog.shared.clearLog()
         statusMessage = "Log cleared."
+        logger.log("diagnostics_log_view_cleared")
         await refresh()
     }
 }

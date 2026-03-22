@@ -3,6 +3,7 @@ import SwiftUI
 struct ServerSetupView: View {
     @EnvironmentObject private var appModel: AppModel
     @StateObject private var discovery = BonjourDiscoveryService()
+    private let logger = AppEventLogger(component: "ServerSetupView")
     @State private var manualServerInput = ""
     @State private var authMode: ServerAuthMode = .none
     @State private var basicUsername = ""
@@ -25,8 +26,16 @@ struct ServerSetupView: View {
                             Button {
                                 guard let url = server.baseURL else {
                                     statusMessage = "Could not build a server URL for \(server.name)."
+                                    logger.log(
+                                        "discovered_server_selection_failed",
+                                        details: ["server_name": server.name, "reason": "invalid_base_url"]
+                                    )
                                     return
                                 }
+                                logger.log(
+                                    "discovered_server_selected",
+                                    details: ["server_name": server.name, "server": url.absoluteString]
+                                )
                                 Task {
                                     await connect(to: url)
                                 }
@@ -97,12 +106,17 @@ struct ServerSetupView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Refresh") {
+                        logger.log("server_discovery_refresh_requested")
                         discovery.startDiscovery()
                     }
                     .disabled(isConnecting)
                 }
             }
             .task {
+                logger.log(
+                    "server_setup_view_appeared",
+                    details: ["selected_server": appModel.selectedServerURL?.absoluteString ?? "none"]
+                )
                 discovery.startDiscovery()
                 if let selectedServer = appModel.selectedServerURL {
                     manualServerInput = selectedServer.absoluteString
@@ -117,6 +131,7 @@ struct ServerSetupView: View {
                 }
             }
             .onDisappear {
+                logger.log("server_setup_view_disappeared")
                 discovery.stopDiscovery()
             }
         }
@@ -125,9 +140,14 @@ struct ServerSetupView: View {
     private func connectManually() async {
         guard let normalized = AppModel.normalizedServerURL(from: manualServerInput) else {
             statusMessage = "Enter a valid server URL, for example http://192.168.1.24:8765."
+            logger.log(
+                "manual_server_connect_rejected",
+                details: ["reason": "invalid_url", "input": manualServerInput]
+            )
             return
         }
 
+        logger.log("manual_server_connect_requested", details: ["server": normalized.absoluteString])
         await connect(to: normalized)
     }
 
@@ -135,10 +155,22 @@ struct ServerSetupView: View {
         let credentials = resolvedBasicCredentials()
         if authMode == .basic && credentials == nil {
             statusMessage = "Username and password are required for Basic Auth."
+            logger.log(
+                "server_connect_rejected",
+                details: ["server": baseURL.absoluteString, "reason": "missing_basic_credentials"]
+            )
             return
         }
 
         isConnecting = true
+        logger.log(
+            "server_connect_started",
+            details: [
+                "server": baseURL.absoluteString,
+                "auth_mode": authMode.rawValue,
+                "credentials_present": credentials == nil ? "false" : "true",
+            ]
+        )
         defer { isConnecting = false }
 
         do {
@@ -154,9 +186,14 @@ struct ServerSetupView: View {
             )
             guard saved else {
                 statusMessage = "Failed to save server authentication settings."
+                logger.log(
+                    "server_connect_failed",
+                    details: ["server": baseURL.absoluteString, "reason": "save_server_connection_failed"]
+                )
                 return
             }
             statusMessage = "Connected to \(baseURL.absoluteString)."
+            logger.log("server_connect_succeeded", details: ["server": baseURL.absoluteString])
         } catch {
             if case APIClientError.unexpectedStatus(let code, _) = error, code == 401 {
                 statusMessage = authMode == .basic
@@ -165,6 +202,11 @@ struct ServerSetupView: View {
             } else {
                 statusMessage = error.localizedDescription
             }
+            logger.logError(
+                "server_connect_failed",
+                error: error,
+                details: ["server": baseURL.absoluteString, "auth_mode": authMode.rawValue]
+            )
         }
     }
 
