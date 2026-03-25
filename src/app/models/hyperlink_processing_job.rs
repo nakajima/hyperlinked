@@ -14,7 +14,6 @@ use crate::entity::hyperlink_processing_job::{
 
 pub type ProcessingQueueSender = crate::queue::ProcessingQueue;
 const ACTIVE_JOB_UNIQUE_INDEX_NAME: &str = "idx_hyperlink_processing_job_active_unique";
-const LEGACY_REMOVED_JOB_KINDS: &[&str] = &["tag_classification", "tag_reclassify"];
 
 pub async fn enqueue_for_hyperlink(
     connection: &DatabaseConnection,
@@ -173,26 +172,6 @@ pub async fn recent_for_hyperlink(
         .limit(limit)
         .all(connection)
         .await
-}
-
-pub async fn delete_removed_job_rows(
-    connection: &DatabaseConnection,
-) -> Result<u64, sea_orm::DbErr> {
-    let placeholders = LEGACY_REMOVED_JOB_KINDS
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(", ");
-    let statement = Statement::from_sql_and_values(
-        DbBackend::Sqlite,
-        format!("DELETE FROM hyperlink_processing_job WHERE kind IN ({placeholders})"),
-        LEGACY_REMOVED_JOB_KINDS
-            .iter()
-            .map(|kind| (*kind).into())
-            .collect::<Vec<_>>(),
-    );
-
-    Ok(connection.execute_raw(statement).await?.rows_affected())
 }
 
 pub fn state_name(state: HyperlinkProcessingJobState) -> &'static str {

@@ -40,25 +40,3 @@ async fn save_normalizes_and_round_trips() {
     assert_eq!(loaded, saved);
 }
 
-#[tokio::test]
-async fn load_reads_legacy_tag_settings_when_new_keys_are_missing() {
-    let connection = test_support::new_memory_connection().await;
-    kv_store::set(
-        &connection,
-        LEGACY_KEY_BASE_URL,
-        "https://legacy.example.com/v1",
-    )
-    .await
-    .expect("legacy base URL should save");
-    kv_store::set(&connection, LEGACY_KEY_MODEL, "legacy-model")
-        .await
-        .expect("legacy model should save");
-    kv_store::set(&connection, LEGACY_KEY_BACKEND_KIND, "ollama")
-        .await
-        .expect("legacy backend should save");
-
-    let loaded = load(&connection).await.expect("settings should load");
-    assert_eq!(loaded.base_url, "https://legacy.example.com/v1");
-    assert_eq!(loaded.model, "legacy-model");
-    assert_eq!(loaded.backend_kind, LlmBackendKind::Ollama);
-}

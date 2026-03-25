@@ -44,18 +44,12 @@ pub struct Model {
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
-    #[sea_orm(has_many = "super::hyperlink_action_tag::Entity")]
-    HyperlinkActionTag,
     #[sea_orm(has_many = "super::hyperlink_artifact::Entity")]
     HyperlinkArtifact,
     #[sea_orm(has_many = "super::hyperlink_processing_job::Entity")]
     HyperlinkProcessingJob,
     #[sea_orm(has_one = "super::hyperlink_search_doc::Entity")]
     HyperlinkSearchDoc,
-    #[sea_orm(has_many = "super::hyperlink_tag::Entity")]
-    HyperlinkTag,
-    #[sea_orm(has_many = "super::hyperlink_topic_tag::Entity")]
-    HyperlinkTopicTag,
     #[sea_orm(has_many = "super::llm_interaction::Entity")]
     LlmInteraction,
 }
@@ -72,27 +66,9 @@ impl Related<super::hyperlink_artifact::Entity> for Entity {
     }
 }
 
-impl Related<super::hyperlink_action_tag::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::HyperlinkActionTag.def()
-    }
-}
-
 impl Related<super::hyperlink_search_doc::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::HyperlinkSearchDoc.def()
-    }
-}
-
-impl Related<super::hyperlink_tag::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::HyperlinkTag.def()
-    }
-}
-
-impl Related<super::hyperlink_topic_tag::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::HyperlinkTopicTag.def()
     }
 }
 

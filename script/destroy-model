@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+APP_MODELS_MOD = ROOT / "src/app/models/mod.rs"
+ENTITY_MOD = ROOT / "src/entity/mod.rs"
+ENTITY_PRELUDE = ROOT / "src/entity/prelude.rs"
+DB_SCHEMA = ROOT / "src/db/schema.rs"
+MIGRATION_DIR = ROOT / "migration/src"
+
+
+def usage() -> int:
+    print(
+        "Usage: script/destroy-model Name\n"
+        "Example: script/destroy-model Bookmark"
+    )
+    return 1
+
+
+def camel_to_snake(value: str) -> str:
+    s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", value)
+    s2 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1)
+    return s2.replace("-", "_").lower()
+
+
+def parse_args(argv: list[str]) -> tuple[str, str]:
+    if len(argv) != 2:
+        raise ValueError("expected exactly one model name")
+
+    raw_name = argv[1].strip()
+    if not re.fullmatch(r"[A-Z][A-Za-z0-9]*", raw_name):
+        raise ValueError("model name must be CamelCase, like Bookmark or ReadingListItem")
+
+    module_name = camel_to_snake(raw_name)
+    return raw_name, module_name
+
+
+def remove_exact_line(path: Path, line: str) -> bool:
+    content = path.read_text()
+    lines = content.splitlines()
+    if line not in lines:
+        return False
+
+    lines = [current for current in lines if current != line]
+    path.write_text("\n".join(lines) + "\n")
+    return True
+
+
+def remove_use_item(path: Path, item: str) -> bool:
+    content = path.read_text()
+    match = re.search(r"use crate::entity::\{(?P<body>.*?)\};", content, re.S)
+    if not match:
+        raise ValueError(f"could not find crate::entity use block in {path.relative_to(ROOT)}")
+
+    existing_items = [part.strip() for part in match.group("body").replace("\n", " ").split(",")]
+    existing_items = [part for part in existing_items if part]
+    if item not in existing_items:
+        return False
+
+    existing_items = [current for current in existing_items if current != item]
+    replacement = "use crate::entity::{\n    " + ", ".join(existing_items) + ",\n};"
+    updated = content[: match.start()] + replacement + content[match.end() :]
+    path.write_text(updated)
+    return True
+
+
+def remove_create_entity_call(path: Path, entity_module: str) -> bool:
+    content = path.read_text()
+    line = f"    create_entity(connection, {entity_module}::Entity).await?;\n"
+    if line not in content:
+        return False
+
+    path.write_text(content.replace(line, "", 1))
+    return True
+
+
+def remove_matching_migrations(module_name: str) -> list[Path]:
+    pattern = f"*_create_{module_name}.rs"
+    matches = sorted(MIGRATION_DIR.glob(pattern))
+    for path in matches:
+        path.unlink()
+    return matches
+
+
+def main(argv: list[str]) -> int:
+    try:
+        model_name, module_name = parse_args(argv)
+
+        entity_path = ROOT / f"src/entity/{module_name}.rs"
+        app_model_path = ROOT / f"src/app/models/{module_name}.rs"
+        test_path = ROOT / f"tests/unit/app_models_{module_name}.rs"
+
+        removed_files: list[Path] = []
+        for path in [entity_path, app_model_path, test_path]:
+            if path.exists():
+                path.unlink()
+                removed_files.append(path)
+
+        removed_files.extend(remove_matching_migrations(module_name))
+
+        updated_paths: list[Path] = []
+        if remove_exact_line(ENTITY_MOD, f"pub mod {module_name};"):
+            updated_paths.append(ENTITY_MOD)
+        if remove_exact_line(APP_MODELS_MOD, f"pub mod {module_name};"):
+            updated_paths.append(APP_MODELS_MOD)
+        if remove_exact_line(
+            ENTITY_PRELUDE,
+            f"pub use super::{module_name}::Entity as {model_name};",
+        ):
+            updated_paths.append(ENTITY_PRELUDE)
+        if remove_use_item(DB_SCHEMA, module_name):
+            updated_paths.append(DB_SCHEMA)
+        if remove_create_entity_call(DB_SCHEMA, module_name):
+            updated_paths.append(DB_SCHEMA)
+
+        if not removed_files and not updated_paths:
+            raise ValueError(f"found nothing to remove for model '{model_name}'")
+
+        print("Removed:")
+        for path in removed_files:
+            print(f"  {path.relative_to(ROOT)}")
+
+        unique_updated_paths: list[Path] = []
+        seen: set[Path] = set()
+        for path in updated_paths:
+            if path not in seen:
+                seen.add(path)
+                unique_updated_paths.append(path)
+
+        print("Updated:")
+        for path in unique_updated_paths:
+            print(f"  {path.relative_to(ROOT)}")
+        return 0
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return usage()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

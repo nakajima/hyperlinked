@@ -49,15 +49,6 @@ pub async fn start(
             tracing::warn!(error = %err, "failed to delete stale queued/running processing jobs");
         }
     }
-    match crate::app::models::hyperlink_processing_job::delete_removed_job_rows(&connection).await {
-        Ok(repaired) if repaired > 0 => {
-            tracing::info!(repaired, "deleted legacy removed processing jobs");
-        }
-        Ok(_) => {}
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to delete legacy removed processing jobs");
-        }
-    }
     let processing_queue = crate::queue::ProcessingQueue::connect(connection.clone()).await?;
     processing_queue.spawn_worker(connection.clone()).await?;
     let _artifact_gc_worker = crate::storage::gc::spawn(connection.clone());

@@ -3,17 +3,11 @@ use sea_orm::{DatabaseConnection, DbErr};
 use crate::app::models::kv_store;
 
 const KEY_BASE_URL: &str = "settings.llm.base_url";
-const LEGACY_KEY_BASE_URL: &str = "settings.tags.base_url";
 const KEY_API_KEY: &str = "settings.llm.api_key";
-const LEGACY_KEY_API_KEY: &str = "settings.tags.api_key";
 const KEY_MODEL: &str = "settings.llm.model";
-const LEGACY_KEY_MODEL: &str = "settings.tags.model";
 const KEY_AUTH_HEADER_NAME: &str = "settings.llm.auth_header_name";
-const LEGACY_KEY_AUTH_HEADER_NAME: &str = "settings.tags.auth_header_name";
 const KEY_AUTH_HEADER_PREFIX: &str = "settings.llm.auth_header_prefix";
-const LEGACY_KEY_AUTH_HEADER_PREFIX: &str = "settings.tags.auth_header_prefix";
 const KEY_BACKEND_KIND: &str = "settings.llm.backend_kind";
-const LEGACY_KEY_BACKEND_KIND: &str = "settings.tags.backend_kind";
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MODEL: &str = "gpt-4.1-mini";
@@ -105,31 +99,21 @@ pub async fn load(connection: &DatabaseConnection) -> Result<LlmSettings, DbErr>
 
     Ok(LlmSettings {
         provider: LlmProvider::OpenAiCompatible,
-        base_url: load_with_legacy_fallback(connection, KEY_BASE_URL, LEGACY_KEY_BASE_URL)
+        base_url: kv_store::get(connection, KEY_BASE_URL)
             .await?
             .unwrap_or_else(|| defaults.base_url.clone()),
-        api_key: load_with_legacy_fallback(connection, KEY_API_KEY, LEGACY_KEY_API_KEY).await?,
-        model: load_with_legacy_fallback(connection, KEY_MODEL, LEGACY_KEY_MODEL)
+        api_key: kv_store::get(connection, KEY_API_KEY).await?,
+        model: kv_store::get(connection, KEY_MODEL)
             .await?
             .unwrap_or_else(|| defaults.model.clone()),
-        auth_header_name: load_with_legacy_fallback(
-            connection,
-            KEY_AUTH_HEADER_NAME,
-            LEGACY_KEY_AUTH_HEADER_NAME,
-        )
-        .await?
-        .or(defaults.auth_header_name.clone()),
-        auth_header_prefix: load_with_legacy_fallback(
-            connection,
-            KEY_AUTH_HEADER_PREFIX,
-            LEGACY_KEY_AUTH_HEADER_PREFIX,
-        )
-        .await?
-        .or(defaults.auth_header_prefix.clone()),
+        auth_header_name: kv_store::get(connection, KEY_AUTH_HEADER_NAME)
+            .await?
+            .or(defaults.auth_header_name.clone()),
+        auth_header_prefix: kv_store::get(connection, KEY_AUTH_HEADER_PREFIX)
+            .await?
+            .or(defaults.auth_header_prefix.clone()),
         backend_kind: LlmBackendKind::from_storage(
-            load_with_legacy_fallback(connection, KEY_BACKEND_KIND, LEGACY_KEY_BACKEND_KIND)
-                .await?
-                .as_deref(),
+            kv_store::get(connection, KEY_BACKEND_KIND).await?.as_deref(),
         ),
     }
     .normalized())
@@ -168,20 +152,6 @@ pub async fn save(
     }
 
     Ok(settings)
-}
-
-async fn load_with_legacy_fallback(
-    connection: &DatabaseConnection,
-    key: &str,
-    legacy_key: &str,
-) -> Result<Option<String>, DbErr> {
-    if let Some(value) = kv_store::get(connection, key).await? {
-        return Ok(parse_non_empty(Some(value)));
-    }
-
-    Ok(parse_non_empty(
-        kv_store::get(connection, legacy_key).await?,
-    ))
 }
 
 fn parse_non_empty(value: Option<String>) -> Option<String> {
