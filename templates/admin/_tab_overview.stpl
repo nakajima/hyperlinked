@@ -1,4 +1,35 @@
-      <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+      <section class="admin-section" aria-labelledby="overview-glance-heading">
+        <h3 id="overview-glance-heading" class="text-lg font-semibold leading-7 tracking-tight">At a glance</h3>
+        <dl class="admin-metrics admin-metrics--overview">
+          <div class="admin-metric admin-metric--hero" data-admin-overview-links>
+            <dt class="admin-metric-label">Links</dt>
+            <dd class="admin-metric-value admin-metric-value--hero" data-admin-overview-links-value><%= self.stats.total_hyperlinks %></dd>
+            <dd class="admin-metric-detail"><%= self.stats.root_hyperlinks %> saved · <%= self.stats.discovered_hyperlinks %> discovered</dd>
+          </div>
+          <div class="admin-metric admin-metric--hero" data-admin-overview-queue>
+            <dt class="admin-metric-label">Queue pending</dt>
+            <dd class="admin-metric-value admin-metric-value--hero" data-admin-overview-queue-value><%= self.queue_pending.pending %></dd>
+            <dd class="admin-metric-detail"><%= self.queue_pending.queued %> queued · <%= self.queue_pending.processing %> processing</dd>
+          </div>
+          <div class="admin-metric admin-metric--hero" data-admin-overview-artifacts>
+            <dt class="admin-metric-label">Artifacts</dt>
+            <dd class="admin-metric-value admin-metric-value--hero" data-admin-overview-artifacts-value><%= self.stats.total_artifacts %></dd>
+            <dd class="admin-metric-detail"><%= self.stats.saved_artifacts_count %> saved-link · <%= self.stats.discovered_artifacts_count %> discovered-link</dd>
+          </div>
+          <div class="admin-metric admin-metric--hero" data-admin-overview-storage>
+            <dt class="admin-metric-label">Storage</dt>
+            <dd class="admin-metric-value admin-metric-value--hero" data-admin-overview-storage-value><%= self.format_u64_bytes(self.total_storage_bytes()) %></dd>
+            <dd class="admin-metric-detail">DB <%= self.format_u64_bytes(self.stats.db_size_total_bytes) %> · artifacts <%= self.format_u64_bytes(self.total_artifact_storage_bytes()) %></dd>
+          </div>
+          <div class="admin-metric admin-metric--hero" data-admin-overview-mathpix>
+            <dt class="admin-metric-label">Mathpix this month</dt>
+            <dd class="admin-metric-value admin-metric-value--hero" data-admin-overview-mathpix-value><%= self.format_usd_estimate(self.mathpix_usage.month.estimated_cost_usd) %></dd>
+            <dd class="admin-metric-detail"><%= self.mathpix_usage.month.total_requests %> requests</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="admin-section">
         <h3 class="text-lg font-semibold leading-7 tracking-tight">Runtime status</h3>
         <p class="text-sm text-tertiary" data-admin-version>Version <code class="font-mono text-[0.9em]"><%= self.app_version %></code></p>
         <p class="text-sm text-tertiary" data-admin-mathpix>
@@ -148,8 +179,8 @@
         </section>
       <% } %>
 
-      <details class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
-        <summary class="cursor-pointer text-lg font-semibold leading-7 tracking-tight">Diagnostics and examples</summary>
+      <section class="admin-section">
+        <h3 class="text-lg font-semibold leading-7 tracking-tight">Diagnostics and examples</h3>
 
         <section class="flex flex-col gap-[0.4rem]">
           <h4 class="text-base font-semibold leading-6">Dataset stats</h4>
@@ -185,4 +216,4 @@
           <p class="rounded-[0.4rem] border border-invalid bg-form-control px-3 py-[0.65rem] text-sm leading-5 text-alert" role="alert">Alert example: Something went wrong.</p>
           <p class="rounded-[0.4rem] border border-dev-alert-border bg-dev-alert-bg px-3 py-[0.65rem] text-sm leading-5 text-dev-alert" role="alert">Dev alert example: Restart failed.</p>
         </section>
-      </details>
+      </section>

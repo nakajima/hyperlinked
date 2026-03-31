@@ -5,12 +5,10 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-APP_MODELS_MOD = ROOT / "src/app/models/mod.rs"
 ENTITY_MOD = ROOT / "src/entity/mod.rs"
 ENTITY_PRELUDE = ROOT / "src/entity/prelude.rs"
 DB_SCHEMA = ROOT / "src/db/schema.rs"
@@ -22,7 +20,6 @@ class Field:
     raw_type: str
     rust_type: str
     sea_orm_attrs: list[str]
-    nullable: bool
 
 
 TYPE_MAP: dict[str, tuple[str, list[str]]] = {
@@ -53,10 +50,6 @@ def camel_to_snake(value: str) -> str:
     s1 = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", value)
     s2 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s1)
     return s2.replace("-", "_").lower()
-
-
-def snake_to_camel(value: str) -> str:
-    return "".join(part.capitalize() for part in value.split("_"))
 
 
 def parse_args(argv: list[str]) -> tuple[str, str, list[Field]]:
@@ -93,7 +86,9 @@ def parse_args(argv: list[str]) -> tuple[str, str, list[Field]]:
         base_type = raw_type[:-1] if nullable else raw_type
         if base_type not in TYPE_MAP:
             supported = ", ".join(sorted(TYPE_MAP))
-            raise ValueError(f"unsupported type '{raw_type}'. Supported types: {supported}, plus optional ? suffix")
+            raise ValueError(
+                f"unsupported type '{raw_type}'. Supported types: {supported}, plus optional ? suffix"
+            )
 
         rust_type, attrs = TYPE_MAP[base_type]
         final_type = f"Option<{rust_type}>" if nullable else rust_type
@@ -103,7 +98,6 @@ def parse_args(argv: list[str]) -> tuple[str, str, list[Field]]:
                 raw_type=raw_type,
                 rust_type=final_type,
                 sea_orm_attrs=list(attrs),
-                nullable=nullable,
             )
         )
 
@@ -115,7 +109,7 @@ def ensure_file_absent(path: Path) -> None:
         raise ValueError(f"refusing to overwrite existing file: {path.relative_to(ROOT)}")
 
 
-def insert_sorted_line(path: Path, line: str, anchor_prefix: str = "pub mod ") -> None:
+def insert_sorted_line(path: Path, line: str, anchor_prefix: str) -> None:
     content = path.read_text()
     lines = content.splitlines()
     if line in lines:
@@ -165,7 +159,7 @@ def insert_create_entity_call(path: Path, entity_module: str) -> None:
     path.write_text(updated)
 
 
-def entity_module_content(model_name: str, table_name: str, fields: list[Field]) -> str:
+def entity_module_content(table_name: str, fields: list[Field]) -> str:
     field_lines = []
     for field in fields:
         attrs = field.sea_orm_attrs[:]
@@ -197,243 +191,31 @@ impl ActiveModelBehavior for ActiveModel {{}}
 '''
 
 
-def app_model_content(model_name: str, module_name: str, fields: list[Field]) -> str:
-    new_model_name = f"New{model_name}"
-    new_model_fields = "\n".join(f"    pub {field.name}: {field.rust_type}," for field in fields)
-    set_lines = "\n".join(f"        {field.name}: Set(input.{field.name})," for field in fields)
-
-    return f'''use sea_orm::{{
-    ActiveModelTrait,
-    ActiveValue::Set,
-    DatabaseConnection, DbErr, EntityTrait,
-    entity::prelude::{{DateTime, DateTimeUtc}},
-}};
-
-use crate::entity::{module_name};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct {new_model_name} {{
-{new_model_fields}
-}}
-
-pub async fn insert(
-    connection: &DatabaseConnection,
-    input: {new_model_name},
-) -> Result<{module_name}::Model, DbErr> {{
-    let now = now_utc();
-    {module_name}::ActiveModel {{
-{set_lines}
-        created_at: Set(now),
-        updated_at: Set(now),
-        ..Default::default()
-    }}
-    .insert(connection)
-    .await
-}}
-
-pub async fn find_by_id(
-    connection: &DatabaseConnection,
-    id: i32,
-) -> Result<Option<{module_name}::Model>, DbErr> {{
-    {module_name}::Entity::find_by_id(id).one(connection).await
-}}
-
-fn now_utc() -> DateTime {{
-    DateTimeUtc::from(std::time::SystemTime::now()).naive_utc()
-}}
-#[cfg(test)]
-#[path = "../../../tests/unit/app_models_{module_name}.rs"]
-mod tests;
-'''
-
-
-def test_content(model_name: str, module_name: str, fields: list[Field]) -> str:
-    new_model_name = f"New{model_name}"
-    value_lines = "\n".join(
-        f"            {field.name}: {sample_value(field)}," for field in fields
-    )
-    assert_lines = "\n".join(
-        f"    assert_eq!(saved.{field.name}, {assert_value(field)});" for field in fields
-    )
-
-    return f'''use super::*;
-use crate::test_support;
-
-#[tokio::test]
-async fn insert_and_find_by_id_round_trip() {{
-    let connection = test_support::new_memory_connection().await;
-    test_support::initialize_hyperlinks_schema(&connection).await;
-
-    let saved = insert(
-        &connection,
-        {new_model_name} {{
-{value_lines}
-        }},
-    )
-    .await
-    .expect("model should save");
-
-    let loaded = find_by_id(&connection, saved.id)
-        .await
-        .expect("model should load")
-        .expect("model should exist");
-
-    assert_eq!(loaded.id, saved.id);
-{assert_lines}
-}}
-'''
-
-
-def sample_value(field: Field) -> str:
-    if field.rust_type == "String":
-        return f'"sample_{field.name}".to_string()'
-    if field.rust_type == "Option<String>":
-        return f'Some("sample_{field.name}".to_string())'
-    if field.rust_type == "i32":
-        return "123"
-    if field.rust_type == "Option<i32>":
-        return "Some(123)"
-    if field.rust_type == "i64":
-        return "123"
-    if field.rust_type == "Option<i64>":
-        return "Some(123)"
-    if field.rust_type == "bool":
-        return "true"
-    if field.rust_type == "Option<bool>":
-        return "Some(true)"
-    if field.rust_type == "DateTime":
-        return "DateTimeUtc::from(std::time::SystemTime::UNIX_EPOCH).naive_utc()"
-    if field.rust_type == "Option<DateTime>":
-        return "Some(DateTimeUtc::from(std::time::SystemTime::UNIX_EPOCH).naive_utc())"
-    if field.rust_type == "Json":
-        return 'serde_json::json!({"ok": true})'
-    if field.rust_type == "Option<Json>":
-        return 'Some(serde_json::json!({"ok": true}))'
-    if field.rust_type == "f32":
-        return "1.5"
-    if field.rust_type == "Option<f32>":
-        return "Some(1.5)"
-    if field.rust_type == "f64":
-        return "1.5"
-    if field.rust_type == "Option<f64>":
-        return "Some(1.5)"
-    raise ValueError(f"no sample value for {field.rust_type}")
-
-
-def assert_value(field: Field) -> str:
-    return sample_value(field)
-
-
-def migration_content(model_name: str, table_name: str, fields: list[Field], migration_name: str) -> str:
-    iden_name = model_name
-    column_lines = []
-    for field in fields:
-        column_lines.append(f"                    .col({migration_column_builder(field, iden_name)})")
-
-    columns_block = "\n".join(column_lines)
-    return f'''use sea_orm_migration::{{prelude::*, schema::*}};
-
-#[derive(DeriveMigrationName)]
-pub struct Migration;
-
-#[async_trait::async_trait]
-impl MigrationTrait for Migration {{
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {{
-        manager
-            .create_table(
-                Table::create()
-                    .table({iden_name}::Table)
-                    .if_not_exists()
-                    .col(pk_auto({iden_name}::Id))
-{columns_block}
-                    .col(date_time({iden_name}::CreatedAt))
-                    .col(date_time({iden_name}::UpdatedAt))
-                    .to_owned(),
-            )
-            .await
-    }}
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {{
-        manager
-            .drop_table(Table::drop().table({iden_name}::Table).to_owned())
-            .await
-    }}
-}}
-
-#[derive(DeriveIden)]
-enum {iden_name} {{
-    Table,
-    Id,
-{migration_idens(fields)}    CreatedAt,
-    UpdatedAt,
-}}
-'''
-
-
-def migration_idens(fields: list[Field]) -> str:
-    return "".join(f"    {snake_to_camel(field.name)},\n" for field in fields)
-
-
-def migration_column_builder(field: Field, iden_name: str) -> str:
-    column_id = f"{iden_name}::{snake_to_camel(field.name)}"
-    nullable_suffix = ".null()" if field.nullable else ""
-    base = field.raw_type[:-1] if field.nullable else field.raw_type
-
-    if base in {"string", "text"}:
-        fn = "text" if base == "text" else "string"
-        return f"{fn}({column_id}){nullable_suffix}"
-    if base in {"int", "integer"}:
-        return f"integer({column_id}){nullable_suffix}"
-    if base in {"bigint", "i64"}:
-        return f"big_integer({column_id}){nullable_suffix}"
-    if base in {"bool", "boolean"}:
-        return f"boolean({column_id}){nullable_suffix}"
-    if base == "datetime":
-        return f"date_time({column_id}){nullable_suffix}"
-    if base == "float":
-        return f"float({column_id}){nullable_suffix}"
-    if base == "double":
-        return f"double({column_id}){nullable_suffix}"
-    if base == "json":
-        return f"json({column_id}){nullable_suffix}"
-    raise ValueError(f"unsupported migration type: {field.raw_type}")
-
-
 def main(argv: list[str]) -> int:
     try:
         model_name, table_name, fields = parse_args(argv)
         module_name = camel_to_snake(model_name)
 
         entity_path = ROOT / f"src/entity/{module_name}.rs"
-        app_model_path = ROOT / f"src/app/models/{module_name}.rs"
-        test_path = ROOT / f"tests/unit/app_models_{module_name}.rs"
-
         ensure_file_absent(entity_path)
-        ensure_file_absent(app_model_path)
-        ensure_file_absent(test_path)
 
-        timestamp = datetime.now().strftime("m%Y%m%d_%H%M%S")
-        migration_name = f"{timestamp}_create_{table_name}.rs"
-        migration_path = ROOT / "migration/src" / migration_name
-        ensure_file_absent(migration_path)
+        entity_path.write_text(entity_module_content(table_name, fields))
 
-        entity_path.write_text(entity_module_content(model_name, table_name, fields))
-        app_model_path.write_text(app_model_content(model_name, module_name, fields))
-        test_path.write_text(test_content(model_name, module_name, fields))
-        migration_path.write_text(migration_content(model_name, table_name, fields, migration_name))
-
-        insert_sorted_line(ENTITY_MOD, f"pub mod {module_name};")
-        insert_sorted_line(APP_MODELS_MOD, f"pub mod {module_name};")
-        insert_sorted_line(ENTITY_PRELUDE, f"pub use super::{module_name}::Entity as {model_name};", anchor_prefix="pub use super::")
+        insert_sorted_line(ENTITY_MOD, f"pub mod {module_name};", anchor_prefix="pub mod ")
+        insert_sorted_line(
+            ENTITY_PRELUDE,
+            f"pub use super::{module_name}::Entity as {model_name};",
+            anchor_prefix="pub use super::",
+        )
         insert_sorted_use_item(DB_SCHEMA, module_name)
         insert_create_entity_call(DB_SCHEMA, module_name)
 
         print("Created:")
-        for path in [entity_path, app_model_path, test_path, migration_path]:
-            print(f"  {path.relative_to(ROOT)}")
+        print(f"  {entity_path.relative_to(ROOT)}")
         print("Updated:")
-        for path in [ENTITY_MOD, ENTITY_PRELUDE, APP_MODELS_MOD, DB_SCHEMA]:
+        for path in [ENTITY_MOD, ENTITY_PRELUDE, DB_SCHEMA]:
             print(f"  {path.relative_to(ROOT)}")
+        print("Note: schema is entity-first; no app model, test, or migration was generated.")
         return 0
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)

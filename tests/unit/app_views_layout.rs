@@ -45,12 +45,12 @@ fn omits_admin_warning_badge_when_not_requested() {
 }
 
 #[test]
-fn admin_nav_points_to_admin_artifacts_without_queue_badge_placeholder() {
+fn admin_nav_points_to_admin_root_without_queue_badge_placeholder() {
     let mut flash = Flash::default();
     let html = page_with_flags("Title", "<p>Body</p>", &mut flash, None, false, None)
         .expect("layout should render")
         .0;
-    assert!(html.contains("href=\"/admin/artifacts\""));
+    assert!(html.contains("href=\"/admin\""));
     assert!(!html.contains("href=\"/admin/jobs\""));
     assert!(!html.contains("data-queue-pending-badge"));
 }

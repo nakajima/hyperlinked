@@ -141,12 +141,12 @@ async fn jobs_dashboard_renders_worker_concurrency_when_queue_is_available() {
     let body = page.text();
 
     assert!(body.contains("Worker concurrency"));
-    let marker = "Worker concurrency:</span>";
+    let marker = "Worker concurrency</dt>";
     let marker_index = body.find(marker).expect("concurrency marker should exist");
-    let worker_section = &body[marker_index..];
+    let worker_section: String = body[marker_index..].chars().take(200).collect();
     assert!(
-        worker_section.contains(&format!("<span>{expected_concurrency}</span>")),
-        "expected worker concurrency value {expected_concurrency} in page body"
+        worker_section.contains(&expected_concurrency.to_string()),
+        "expected worker concurrency value {expected_concurrency} near worker concurrency marker in page body"
     );
 }
 
@@ -610,13 +610,13 @@ async fn fetch_pending_queue_counts_includes_only_processing_task_queued_and_pro
 }
 
 #[tokio::test]
-async fn jobs_dashboard_layout_uses_admin_link_without_queue_badge_placeholder() {
+async fn jobs_dashboard_layout_uses_admin_root_link_without_queue_badge_placeholder() {
     let (server, _) = new_server("").await;
 
     let page = server.get("/admin/jobs").await;
     page.assert_status_ok();
     let body = page.text();
 
-    assert!(body.contains("href=\"/admin/artifacts\""));
+    assert!(body.contains("href=\"/admin\""));
     assert!(!body.contains("data-queue-pending-badge"));
 }

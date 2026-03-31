@@ -10,7 +10,7 @@
 
   <nav class="header-nav-links basis-full flex flex-col gap-1 text-sm sm:basis-auto sm:flex-row sm:flex-wrap sm:justify-end sm:gap-4">
     <a href="/hyperlinks/new" class="inline-flex min-h-11 items-center text-accent no-underline hover:text-accent/80">Add</a>
-    <a href="/admin/artifacts" class="inline-flex min-h-11 flex-row items-center gap-1 text-accent no-underline hover:text-accent/80">
+    <a href="/admin" class="inline-flex min-h-11 flex-row items-center gap-1 text-accent no-underline hover:text-accent/80">
       <span>Admin</span>
       <% if self.show_admin_warning_badge { %>
         <span

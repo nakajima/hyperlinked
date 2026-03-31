@@ -837,9 +837,21 @@ async fn admin_page_shows_missing_artifact_summary() {
     assert!(import_export_body.contains("data-admin-import-submit"));
     assert!(import_export_body.contains("data-admin-import-status"));
 
+    let admin_root = server.get("/admin").await;
+    admin_root.assert_status_ok();
+    let admin_root_body = admin_root.text();
+    assert!(admin_root_body.contains("At a glance"));
+    assert!(admin_root_body.contains("data-admin-version"));
+
     let overview = server.get("/admin/overview").await;
     overview.assert_status_ok();
     let overview_body = overview.text();
+    assert!(overview_body.contains("At a glance"));
+    assert!(overview_body.contains("data-admin-overview-links-value>2<"));
+    assert!(overview_body.contains("data-admin-overview-queue-value>0<"));
+    assert!(overview_body.contains("data-admin-overview-artifacts-value>1<"));
+    assert!(overview_body.contains("data-admin-overview-storage-value"));
+    assert!(overview_body.contains("data-admin-overview-mathpix-value"));
     assert!(overview_body.contains("data-admin-version"));
     assert!(overview_body.contains(APP_VERSION));
     assert!(!overview_body.contains("Process all artifacts"));
@@ -863,6 +875,11 @@ async fn queue_tab_shows_pending_counts_from_processing_task_rows() {
     assert!(body.contains("href=\"/admin/jobs?status=queued\""));
     assert!(body.contains("href=\"/admin/jobs?status=processing\""));
     assert!(body.contains("href=\"/admin/jobs\""));
+
+    let overview = server.get("/admin/overview").await;
+    overview.assert_status_ok();
+    let overview_body = overview.text();
+    assert!(overview_body.contains("data-admin-overview-queue-value>2<"));
 }
 
 #[tokio::test]

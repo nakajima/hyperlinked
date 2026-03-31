@@ -6,49 +6,51 @@
     <p class="text-sm"><a class="text-accent no-underline hover:text-accent/80" href="/jobs">Open raw lilqueue dashboard</a></p>
   </article>
 
-  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+  <section class="admin-section">
     <h3 class="text-lg font-semibold leading-7 tracking-tight">Queue summary</h3>
-    <div class="flex flex-row flex-wrap gap-[0.4rem] text-sm">
-      <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
-        <span class="text-tertiary">Pending:</span>
-        <span><%= self.stats.queued + self.stats.processing %></span>
+    <dl class="admin-metrics admin-metrics--summary">
+      <div class="admin-metric">
+        <dt class="admin-metric-label">Pending</dt>
+        <dd class="admin-metric-value"><%= self.stats.queued + self.stats.processing %></dd>
       </div>
-      <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
-        <span class="text-tertiary">Queued:</span>
-        <span><%= self.stats.queued %></span>
+      <div class="admin-metric">
+        <dt class="admin-metric-label">Queued</dt>
+        <dd class="admin-metric-value"><%= self.stats.queued %></dd>
       </div>
-      <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
-        <span class="text-tertiary">Processing:</span>
-        <span><%= self.stats.processing %></span>
+      <div class="admin-metric">
+        <dt class="admin-metric-label">Processing</dt>
+        <dd class="admin-metric-value"><%= self.stats.processing %></dd>
       </div>
-      <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
-        <span class="text-tertiary">Completed:</span>
-        <span><%= self.stats.completed %></span>
+      <div class="admin-metric">
+        <dt class="admin-metric-label">Completed</dt>
+        <dd class="admin-metric-value"><%= self.stats.completed %></dd>
       </div>
-      <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
-        <span class="text-tertiary">Failed:</span>
-        <span><%= self.stats.failed %></span>
+      <div class="admin-metric">
+        <dt class="admin-metric-label">Failed</dt>
+        <dd class="admin-metric-value"><%= self.stats.failed %></dd>
       </div>
-      <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
-        <span class="text-tertiary">Cleared:</span>
-        <span><%= self.stats.cleared %></span>
+      <div class="admin-metric">
+        <dt class="admin-metric-label">Cleared</dt>
+        <dd class="admin-metric-value"><%= self.stats.cleared %></dd>
       </div>
-      <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
-        <span class="text-tertiary">Total:</span>
-        <span><%= self.stats.total %></span>
+      <div class="admin-metric">
+        <dt class="admin-metric-label">Total</dt>
+        <dd class="admin-metric-value"><%= self.stats.total %></dd>
       </div>
-      <div class="rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-1">
-        <span class="text-tertiary">Worker concurrency:</span>
-        <% if let Some(worker_concurrency) = self.worker_concurrency { %>
-          <span><%= worker_concurrency %></span>
-        <% } else { %>
-          <span>N/A</span>
-        <% } %>
+      <div class="admin-metric">
+        <dt class="admin-metric-label">Worker concurrency</dt>
+        <dd class="admin-metric-value">
+          <% if let Some(worker_concurrency) = self.worker_concurrency { %>
+            <%= worker_concurrency %>
+          <% } else { %>
+            N/A
+          <% } %>
+        </dd>
       </div>
-    </div>
+    </dl>
   </section>
 
-  <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+  <section class="admin-section">
     <h3 class="text-lg font-semibold leading-7 tracking-tight">Filters and actions</h3>
     <form method="get" action="/admin/jobs" class="flex flex-row flex-wrap items-center gap-[0.4rem]">
       <label for="jobs-status-filter" class="text-sm text-tertiary">Status</label>
@@ -86,12 +88,12 @@
   </section>
 
   <% if self.rows.is_empty() { %>
-    <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+    <section class="admin-section">
       <h3 class="text-lg font-semibold leading-7 tracking-tight">Queue rows</h3>
       <p class="text-sm">No matching ProcessingTask queue rows.</p>
     </section>
   <% } else { %>
-    <section class="flex flex-col gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-3">
+    <section class="admin-section">
       <h3 class="text-lg font-semibold leading-7 tracking-tight">Queue rows</h3>
       <form method="post" action="/admin/jobs/clear-selected" class="flex flex-col gap-3" data-confirm="Clear selected queue rows?">
         <div class="flex flex-row flex-wrap items-center gap-[0.4rem]">

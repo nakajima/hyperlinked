@@ -379,7 +379,7 @@ struct BuiltBackupZip {
 }
 
 async fn index(State(state): State<Context>, headers: HeaderMap) -> Response {
-    render_admin_tab(AdminTab::Artifacts, &state, &headers, None).await
+    render_admin_tab(AdminTab::Overview, &state, &headers, None).await
 }
 
 async fn index_overview(State(state): State<Context>, headers: HeaderMap) -> Response {
@@ -3086,6 +3086,17 @@ impl AdminIndexTemplate<'_> {
         }
         let average_bytes = total_bytes.max(0) as f64 / count as f64;
         format_bytes_f64(average_bytes)
+    }
+
+    fn total_artifact_storage_bytes(&self) -> u64 {
+        (self.stats.saved_artifacts_size_bytes.max(0) as u64)
+            .saturating_add(self.stats.discovered_artifacts_size_bytes.max(0) as u64)
+    }
+
+    fn total_storage_bytes(&self) -> u64 {
+        self.stats
+            .db_size_total_bytes
+            .saturating_add(self.total_artifact_storage_bytes())
     }
 
     fn format_usd_estimate(&self, value: f64) -> String {
