@@ -1,0 +1,94 @@
+<section class="flex flex-col gap-4" aria-labelledby="feeds-heading">
+  <article class="flex flex-col gap-[0.4rem]">
+    <h2 id="feeds-heading" class="text-2xl font-semibold leading-8 tracking-tight">Feeds</h2>
+    <p class="text-sm text-tertiary">Subscribe to RSS and Atom feeds to automatically import new links.</p>
+  </article>
+
+  <section class="admin-section">
+    <h3 class="text-lg font-semibold leading-7 tracking-tight">Add feed</h3>
+    <form action="/admin/feeds/create" method="post" class="flex flex-col gap-3 sm:flex-row sm:items-end sm:gap-[0.6rem]">
+      <div class="flex flex-1 flex-col gap-1">
+        <label for="feed-url" class="text-sm text-tertiary">Feed URL</label>
+        <input
+          type="url"
+          name="url"
+          id="feed-url"
+          required
+          placeholder="https://example.com/feed.xml"
+          class="h-10 rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] text-sm text-primary placeholder:text-tertiary/60 focus:border-accent focus:outline-none"
+        />
+      </div>
+      <label class="inline-flex items-center gap-2 text-sm text-tertiary">
+        <input type="checkbox" name="backfill" class="accent-accent" />
+        <span>Import existing items</span>
+      </label>
+      <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50">Add feed</button>
+    </form>
+  </section>
+
+  <% if self.feeds.is_empty() { %>
+    <section class="admin-section">
+      <p class="text-sm text-tertiary">No feeds subscribed yet.</p>
+    </section>
+  <% } else { %>
+    <section class="admin-section">
+      <h3 class="text-lg font-semibold leading-7 tracking-tight">Subscribed feeds</h3>
+      <div class="flex flex-col gap-3">
+        <% for row in &self.feeds { %>
+          <article class="flex flex-col gap-2 rounded-[0.4rem] border border-form-control-border bg-form-control p-3">
+            <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <div class="flex flex-col gap-[0.15rem]">
+                <h4 class="text-sm font-semibold leading-5">
+                  <%= row.feed.title %>
+                  <% if !row.feed.active { %>
+                    <span class="ml-1 rounded-[0.25rem] border border-form-control-border px-[0.3rem] py-[0.15rem] text-[0.65rem] text-tertiary">Paused</span>
+                  <% } %>
+                </h4>
+                <a href="<%= row.feed.url %>" class="text-xs text-accent no-underline hover:text-accent/80" target="_blank" rel="noopener"><%= row.feed.url %></a>
+              </div>
+            </div>
+
+            <dl class="flex flex-row flex-wrap gap-x-4 gap-y-1 text-xs text-tertiary">
+              <div class="flex items-center gap-1">
+                <dt>Links:</dt>
+                <dd><%= row.hyperlink_count %></dd>
+              </div>
+              <div class="flex items-center gap-1">
+                <dt>Last synced:</dt>
+                <dd><%= self.format_optional_datetime(&row.feed.last_fetched_at) %></dd>
+              </div>
+              <div class="flex items-center gap-1">
+                <dt>Added:</dt>
+                <dd><%= self.format_datetime(&row.feed.created_at) %></dd>
+              </div>
+              <% if let Some(ref site_url) = row.feed.site_url { %>
+                <div class="flex items-center gap-1">
+                  <dt>Site:</dt>
+                  <dd><a href="<%= site_url %>" class="text-accent no-underline hover:text-accent/80" target="_blank" rel="noopener"><%= site_url %></a></dd>
+                </div>
+              <% } %>
+            </dl>
+
+            <div class="flex flex-row flex-wrap items-center gap-[0.4rem]">
+              <form action="/admin/feeds/<%= row.feed.id %>/sync" method="post">
+                <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-sm text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50">Sync now</button>
+              </form>
+              <form action="/admin/feeds/<%= row.feed.id %>/toggle" method="post">
+                <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-form-control-border bg-form-control px-[0.65rem] py-2 text-sm text-accent transition-colors hover:border-accent/60 hover:bg-tertiary/30 active:bg-tertiary/50">
+                  <% if row.feed.active { %>Pause<% } else { %>Resume<% } %>
+                </button>
+              </form>
+              <form
+                action="/admin/feeds/<%= row.feed.id %>/delete"
+                method="post"
+                data-confirm="Delete this feed? Imported links will be kept."
+              >
+                <button type="submit" class="inline-flex min-h-10 items-center justify-center rounded-[0.4rem] border border-invalid/60 bg-form-control px-[0.65rem] py-2 text-sm text-alert transition-colors hover:border-invalid hover:bg-tertiary/30 active:bg-tertiary/50">Delete</button>
+              </form>
+            </div>
+          </article>
+        <% } %>
+      </div>
+    </section>
+  <% } %>
+</section>

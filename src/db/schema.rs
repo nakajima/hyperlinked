@@ -1,7 +1,8 @@
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, Schema};
 
 use crate::entity::{
-    app_kv, artifact_gc_pending, hyperlink, hyperlink_artifact, hyperlink_processing_job, hyperlink_relation, hyperlink_search_doc, hyperlink_tombstone, jobs, llm_interaction,
+    app_kv, artifact_gc_pending, hyperlink, hyperlink_artifact, hyperlink_processing_job,
+    hyperlink_relation, hyperlink_search_doc, hyperlink_tombstone, jobs, llm_interaction, rss_feed,
 };
 
 const MARK_DUPLICATE_ACTIVE_JOBS_FAILED_SQL: &str = r#"
@@ -205,6 +206,14 @@ const CREATE_ARTIFACT_GC_TRIGGER_SQL: &str = r#"
     END
 "#;
 
+const ADD_HYPERLINK_RSS_FEED_ID_SQL: &str = r#"
+    ALTER TABLE hyperlink ADD COLUMN rss_feed_id integer REFERENCES rss_feed(id) ON DELETE SET NULL
+"#;
+
+const CREATE_HYPERLINK_RSS_FEED_ID_INDEX_SQL: &str = r#"
+    CREATE INDEX IF NOT EXISTS idx_hyperlink_rss_feed_id ON hyperlink (rss_feed_id)
+"#;
+
 pub async fn ensure_current(connection: &DatabaseConnection) -> Result<(), String> {
     sync(connection)
         .await
@@ -214,6 +223,7 @@ pub async fn ensure_current(connection: &DatabaseConnection) -> Result<(), Strin
 pub async fn sync(connection: &DatabaseConnection) -> Result<(), DbErr> {
     drop_legacy_entity_unique_indexes(connection).await?;
 
+    create_entity(connection, rss_feed::Entity).await?;
     create_entity(connection, hyperlink::Entity).await?;
     create_entity(connection, hyperlink_processing_job::Entity).await?;
     create_entity(connection, hyperlink_artifact::Entity).await?;
@@ -225,7 +235,27 @@ pub async fn sync(connection: &DatabaseConnection) -> Result<(), DbErr> {
     create_entity(connection, artifact_gc_pending::Entity).await?;
     create_entity(connection, jobs::Entity).await?;
 
+    add_column_if_missing(connection, ADD_HYPERLINK_RSS_FEED_ID_SQL).await?;
+    connection
+        .execute_unprepared(CREATE_HYPERLINK_RSS_FEED_ID_INDEX_SQL)
+        .await?;
+
     apply_sqlite_extras(connection).await
+}
+
+async fn add_column_if_missing(
+    connection: &DatabaseConnection,
+    alter_sql: &str,
+) -> Result<(), DbErr> {
+    match connection.execute_unprepared(alter_sql).await {
+        Ok(_) => Ok(()),
+        Err(DbErr::Exec(sea_orm::RuntimeErr::SqlxError(err)))
+            if err.to_string().contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 async fn drop_legacy_entity_unique_indexes(connection: &DatabaseConnection) -> Result<(), DbErr> {

@@ -25,6 +25,24 @@ fn converts_readability_html_to_markdown() {
 }
 
 #[test]
+fn rejects_frameset_documents_before_dom_smoothie_panics() {
+    let html = concat!(
+        "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01 Frameset//EN\" ",
+        "\"http://www.w3.org/TR/html4/frameset.dtd\">",
+        "<html><head><title></title></head>",
+        "<frameset rows=\"100%, *\">",
+        "<frame src=\"https://example.com/frame\" name=\"mainwindow\">",
+        "</frameset>",
+        "<noframes><body><p>fallback</p></body></noframes>",
+        "</html>"
+    );
+
+    let error = extract_from_html(html).expect_err("frameset documents should be rejected");
+    assert_eq!(error.0, "readability_parse");
+    assert!(error.1.contains("frameset"));
+}
+
+#[test]
 fn normalizes_pdf_markdown_page_breaks() {
     let normalized = normalize_pdf_markdown("Page one\u{000C}Page two");
     assert_eq!(normalized, "Page one\n\n---\n\nPage two");

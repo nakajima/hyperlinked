@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use reqwest::Url;
 use serde::Serialize;
 
 use crate::{
@@ -207,6 +208,32 @@ pub(crate) fn normalize_link_title_for_display(title: &str, url: &str, raw_url: 
         normalized
     } else {
         cleaned
+    }
+}
+
+pub(crate) fn display_url_host(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let Some(parsed) = Url::parse(trimmed).ok() else {
+        return trimmed.to_string();
+    };
+    let Some(host) = parsed.host_str() else {
+        return trimmed.to_string();
+    };
+
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+
+    match (parsed.scheme(), parsed.port()) {
+        ("http", Some(80)) | ("https", Some(443)) | (_, None) => host,
+        (_, Some(port)) => format!("{host}:{port}"),
     }
 }
 

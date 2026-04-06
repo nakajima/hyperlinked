@@ -186,4 +186,3 @@ async fn delete_stale_active_rows_only_removes_orphaned_active_rows() {
         .expect("completed row should exist");
     assert_eq!(completed_row.state, HyperlinkProcessingJobState::Succeeded);
 }
-

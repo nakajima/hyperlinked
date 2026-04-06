@@ -35,6 +35,7 @@
           class="hidden rounded-[0.25rem] bg-badge px-[0.2rem] py-1 text-[0.5rem] leading-[0.5rem] text-black"
         >0</span>
       </a>
+      <a href="/admin/feeds" class="<%= self.admin_tab_link_class("/admin/feeds") %>"<% if self.admin_tab_is_active("/admin/feeds") { %> aria-current="page"<% } %>>Feeds</a>
       <a href="/admin/import-export" class="<%= self.admin_tab_link_class("/admin/import-export") %>"<% if self.admin_tab_is_active("/admin/import-export") { %> aria-current="page"<% } %>>Import / Export</a>
       <a href="/admin/storage" class="<%= self.admin_tab_link_class("/admin/storage") %>"<% if self.admin_tab_is_active("/admin/storage") { %> aria-current="page"<% } %>>Storage</a>
     </nav>

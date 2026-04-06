@@ -12,6 +12,7 @@ pub mod llm_discovery;
 pub mod llm_interaction;
 pub mod llm_settings;
 pub mod model_trait;
+pub mod rss_feed;
 pub mod settings;
 pub mod upload;
 pub mod url_canonicalize;

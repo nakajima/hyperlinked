@@ -3,7 +3,11 @@ use dom_smoothie::Readability;
 use reqwest::{StatusCode, header::HeaderValue};
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
-use std::time::Instant;
+use std::{
+    any::Any,
+    panic::{AssertUnwindSafe, catch_unwind},
+    time::Instant,
+};
 
 use crate::{
     app::models::{
@@ -519,18 +523,35 @@ async fn persist_readability_error(
 }
 
 fn extract_from_html(html: &str) -> Result<(Vec<u8>, Vec<u8>), (String, String)> {
+    if looks_like_frameset_document(html) {
+        return Err((
+            "readability_parse".to_string(),
+            "frameset documents are not supported by readability extraction".to_string(),
+        ));
+    }
+
     let mut readability = Readability::new(html, None, None).map_err(|error| {
         (
             "readability_init".to_string(),
             format!("failed to initialize dom_smoothie: {error}"),
         )
     })?;
-    let article = readability.parse().map_err(|error| {
-        (
-            "readability_parse".to_string(),
-            format!("dom_smoothie parse failed: {error}"),
-        )
-    })?;
+    let article = catch_unwind(AssertUnwindSafe(|| readability.parse()))
+        .map_err(|panic_payload| {
+            (
+                "readability_parse".to_string(),
+                format!(
+                    "dom_smoothie panicked while parsing HTML: {}",
+                    panic_message(&panic_payload)
+                ),
+            )
+        })?
+        .map_err(|error| {
+            (
+                "readability_parse".to_string(),
+                format!("dom_smoothie parse failed: {error}"),
+            )
+        })?;
 
     let content_html = article.content.to_string();
     let markdown = convert_html_to_markdown(&content_html);
@@ -800,6 +821,20 @@ fn is_html_content_type(content_type: &str) -> bool {
 
 fn convert_html_to_markdown(content_html: &str) -> String {
     html2md::parse_html(content_html)
+}
+
+fn looks_like_frameset_document(html: &str) -> bool {
+    html.to_ascii_lowercase().contains("<frameset")
+}
+
+fn panic_message(panic_payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = panic_payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = panic_payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "non-string panic payload".to_string()
 }
 
 fn normalize_pdf_markdown(text: &str) -> String {

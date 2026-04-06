@@ -39,4 +39,3 @@ async fn save_normalizes_and_round_trips() {
     let loaded = load(&connection).await.expect("settings should load");
     assert_eq!(loaded, saved);
 }
-

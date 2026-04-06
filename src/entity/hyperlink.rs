@@ -38,6 +38,8 @@ pub struct Model {
     #[sea_orm(default_value = "unknown")]
     pub source_type: HyperlinkSourceType,
     #[sea_orm(indexed)]
+    pub rss_feed_id: Option<i32>,
+    #[sea_orm(indexed)]
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
@@ -52,6 +54,14 @@ pub enum Relation {
     HyperlinkSearchDoc,
     #[sea_orm(has_many = "super::llm_interaction::Entity")]
     LlmInteraction,
+    #[sea_orm(
+        belongs_to = "super::rss_feed::Entity",
+        from = "Column::RssFeedId",
+        to = "super::rss_feed::Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    RssFeed,
 }
 
 impl Related<super::hyperlink_processing_job::Entity> for Entity {
@@ -75,6 +85,12 @@ impl Related<super::hyperlink_search_doc::Entity> for Entity {
 impl Related<super::llm_interaction::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::LlmInteraction.def()
+    }
+}
+
+impl Related<super::rss_feed::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::RssFeed.def()
     }
 }
 

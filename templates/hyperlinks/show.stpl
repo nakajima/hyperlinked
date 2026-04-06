@@ -173,6 +173,7 @@
           <% let link = discovered; %>
           <% let latest_job = self.discovered_latest_jobs.get(&link.id); %>
           <% let match_snippet: Option<&str> = None; %>
+          <% let compact_cards = false; %>
           <% include!("_index_card.stpl"); %>
         <% } %>
       </ul>

@@ -380,7 +380,12 @@ async fn html_pages_render() {
     assert!(index_body.contains("data-filter-key=\"order\""));
     assert!(index_body.contains("data-discovered-filter"));
     assert!(!index_body.contains("id=\"scope-filter\""));
-    assert!(index_body.contains("class=\"flex flex-row items-start gap-2 min-w-0 sm:gap-4\""));
+    assert!(index_body.contains("class=\"grid grid-cols-1 gap-3 lg:grid-cols-2\""));
+    assert!(
+        index_body.contains("class=\"flex h-full flex-row items-start gap-2 min-w-0 sm:gap-4\"")
+    );
+    assert!(index_body.contains(">example.com</a>"));
+    assert!(!index_body.contains(">https://example.com</a>"));
     assert!(index_body.contains(&format!("/hyperlinks/{}\">Details", created.id)));
     assert!(!index_body.contains("/hyperlinks/1/visit"));
 
@@ -409,6 +414,26 @@ async fn html_pages_render() {
         edit.text()
             .contains(&format!("/hyperlinks/{}/update", created.id))
     );
+}
+
+#[tokio::test]
+async fn index_card_shows_host_instead_of_full_url() {
+    let server = new_server().await;
+    create_json_hyperlink(
+        &server,
+        "Example",
+        "https://www.example.com/articles/rust?x=1",
+    )
+    .await;
+
+    let index = server.get("/hyperlinks").await;
+    index.assert_status_ok();
+    let body = index.text();
+
+    assert!(body.contains("href=\"https://www.example.com/articles/rust?x=1\""));
+    assert!(body.contains(">example.com</a>"));
+    assert!(!body.contains(">www.example.com</a>"));
+    assert!(!body.contains(">https://www.example.com/articles/rust?x=1</a>"));
 }
 
 #[tokio::test]

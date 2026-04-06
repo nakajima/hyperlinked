@@ -113,7 +113,9 @@ pub async fn load(connection: &DatabaseConnection) -> Result<LlmSettings, DbErr>
             .await?
             .or(defaults.auth_header_prefix.clone()),
         backend_kind: LlmBackendKind::from_storage(
-            kv_store::get(connection, KEY_BACKEND_KIND).await?.as_deref(),
+            kv_store::get(connection, KEY_BACKEND_KIND)
+                .await?
+                .as_deref(),
         ),
     }
     .normalized())

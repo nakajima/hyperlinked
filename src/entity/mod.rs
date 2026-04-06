@@ -13,3 +13,4 @@ pub mod hyperlink_tombstone;
 pub mod job_events;
 pub mod jobs;
 pub mod llm_interaction;
+pub mod rss_feed;

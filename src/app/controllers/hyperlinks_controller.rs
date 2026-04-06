@@ -30,8 +30,9 @@ pub(crate) mod result;
 use crate::app::helpers::hyperlinks::{
     IndexStatus, OgSummary, artifact_delete_path, artifact_download_path, artifact_fetch_path,
     artifact_inline_path, artifact_kind_label, artifact_kind_slug, artifact_pdf_preview_path,
-    format_size_bytes, hyperlinks_index_href, index_status, normalize_link_title_for_display,
-    processing_state_name, render_relative_time, required_show_artifact_kinds, show_artifact_kinds,
+    display_url_host, format_size_bytes, hyperlinks_index_href, index_status,
+    normalize_link_title_for_display, processing_state_name, render_relative_time,
+    required_show_artifact_kinds, show_artifact_kinds,
 };
 
 const SHOW_TIMELINE_LIMIT: u64 = 10;
@@ -240,6 +241,10 @@ impl<'a> HyperlinksIndexTemplate<'a> {
         )
     }
 
+    fn link_display_host(&self, link: &hyperlink::Model) -> String {
+        display_url_host(link.url.as_str())
+    }
+
     fn thumbnail_inline_path(&self, hyperlink_id: i32) -> Option<String> {
         self.thumbnail_artifacts
             .contains_key(&hyperlink_id)
@@ -345,6 +350,10 @@ impl<'a> HyperlinksShowTemplate<'a> {
             link.url.as_str(),
             link.raw_url.as_str(),
         )
+    }
+
+    fn link_display_host(&self, link: &hyperlink::Model) -> String {
+        display_url_host(link.url.as_str())
     }
 
     fn processing_state(&self) -> &'static str {

@@ -1,6 +1,6 @@
 [package]
 name = "hyperlinked"
-version = "0.2.11"
+version = "0.2.12"
 edition = "2024"
 
 [[bin]]
@@ -60,6 +60,7 @@ tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 tracing-tree = "0.4.0"
 webp = "0.3.1"
+feed-rs = "2.3.1"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

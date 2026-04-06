@@ -52,6 +52,10 @@ pub async fn start(
     let processing_queue = crate::queue::ProcessingQueue::connect(connection.clone()).await?;
     processing_queue.spawn_worker(connection.clone()).await?;
     let _artifact_gc_worker = crate::storage::gc::spawn(connection.clone());
+    let _feed_poller = crate::app::services::feed_poller::spawn(
+        connection.clone(),
+        Some(processing_queue.clone()),
+    );
 
     let jobs_dashboard = lilqueue::dashboard::router_with_control(
         processing_queue.dashboard_db(),

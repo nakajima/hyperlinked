@@ -103,10 +103,11 @@
       <p class="leading-6">No hyperlinks yet.</p>
     <% } %>
   <% } else { %>
-    <ul class="flex flex-col gap-3">
+    <ul class="grid grid-cols-1 gap-3 lg:grid-cols-2">
       <% for link in self.links { %>
         <% let latest_job = self.latest_jobs.get(&link.id); %>
         <% let match_snippet = self.match_snippets.get(&link.id).map(|snippet| snippet.as_str()); %>
+        <% let compact_cards = true; %>
         <% include!("_index_card.stpl"); %>
       <% } %>
     </ul>

@@ -1,7 +1,38 @@
 <% let status = self.index_status(latest_job); %>
-<li>
-  <article class="flex flex-row items-start gap-2 min-w-0 sm:gap-4">
+<% let title_heading_classes = if compact_cards {
+  "min-w-0 text-base leading-5 lg:text-sm lg:leading-4"
+} else {
+  "min-w-0 text-base leading-5"
+}; %>
+<% let title_link_classes = if compact_cards {
+  "block min-w-0 break-words no-underline hover:text-primary active:translate-y-[1px] lg:overflow-hidden lg:[display:-webkit-box] lg:[-webkit-box-orient:vertical] lg:[-webkit-line-clamp:2]"
+} else {
+  "block min-w-0 break-words no-underline hover:text-primary active:translate-y-[1px]"
+}; %>
+<% let snippet_classes = if compact_cards {
+  "border-l border-subdued px-2 py-2 text-sm leading-5 lg:text-xs lg:leading-4"
+} else {
+  "border-l border-subdued px-2 py-2 text-sm leading-5"
+}; %>
+<% let host_row_classes = if compact_cards {
+  "flex w-full min-w-0 flex-row items-center gap-[0.4rem] text-sm leading-none lg:text-xs"
+} else {
+  "flex w-full min-w-0 flex-row items-start gap-[0.4rem] text-sm leading-none"
+}; %>
+<% let host_link_classes = if compact_cards {
+  "block min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-tertiary no-underline hover:text-primary"
+} else {
+  "min-w-0 break-all text-tertiary no-underline hover:text-primary"
+}; %>
+<% let meta_row_classes = if compact_cards {
+  "flex flex-row flex-wrap items-center gap-[0.4rem] text-sm leading-none text-tertiary lg:text-xs"
+} else {
+  "flex flex-row flex-wrap items-center gap-[0.4rem] text-sm leading-none text-tertiary"
+}; %>
+<li class="min-w-0">
+  <article class="flex h-full flex-row items-start gap-2 min-w-0 sm:gap-4">
     <% let display_title = self.link_display_title(link); %>
+    <% let display_host = self.link_display_host(link); %>
     <% let is_pdf = self.link_is_pdf(link); %>
     <% if let Some(thumbnail_path) = self.thumbnail_inline_path(link.id) { %>
       <a href="/hyperlinks/<%= link.id %>" class="block h-16 w-16 shrink-0 overflow-hidden rounded" style="aspect-ratio: 1 / 1;">
@@ -17,22 +48,22 @@
     <% } %>
 
     <div class="flex flex-col gap-2 min-w-0">
-      <h3 class="text-base min-w-0 leading-none">
-        <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= link.id %>" class="block break-all no-underline hover:text-primary active:translate-y-[1px]"><%= display_title.as_str() %></a>
+      <h3 class="<%= title_heading_classes %>">
+        <a href="<%= link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= link.id %>" class="<%= title_link_classes %>"><%= display_title.as_str() %></a>
       </h3>
 
       <% if let Some(snippet) = match_snippet { %>
-        <blockquote class="border-l border-subdued px-2 py-2 text-sm leading-5"><%- snippet %></blockquote>
+        <blockquote class="<%= snippet_classes %>"><%- snippet %></blockquote>
       <% } %>
 
-      <p class="flex w-full min-w-0 flex-row flex-wrap items-start gap-[0.4rem] text-sm leading-none">
-        <a class="min-w-0 break-all text-tertiary no-underline hover:text-primary" href="<%= link.url %>" data-hyperlink-id="<%= link.id %>"><%= link.url %></a>
+      <p class="<%= host_row_classes %>">
+        <a class="<%= host_link_classes %>" href="<%= link.url %>" data-hyperlink-id="<%= link.id %>" title="<%= link.url %>"><%= display_host.as_str() %></a>
         <% if is_pdf { %>
           <span class="inline-flex whitespace-nowrap bg-badge px-[0.2rem] py-[0.2rem] text-[0.5rem] leading-[0.5rem] text-center text-black">PDF</span>
         <% } %>
       </p>
       
-      <div class="flex flex-row flex-wrap items-center gap-[0.4rem] text-sm leading-none text-tertiary">
+      <div class="<%= meta_row_classes %>">
         <span>
           <%- render_relative_time(&link.created_at) %>
         </span>
