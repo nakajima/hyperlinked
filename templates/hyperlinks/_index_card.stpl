@@ -58,7 +58,7 @@
 
       <p class="<%= host_row_classes %>">
         <a class="<%= host_link_classes %>" href="<%= link.url %>" data-hyperlink-id="<%= link.id %>" title="<%= link.url %>"><%= display_host.as_str() %></a>
-        <% if is_pdf { %>
+        <% if !compact_cards && is_pdf { %>
           <span class="inline-flex whitespace-nowrap bg-badge px-[0.2rem] py-[0.2rem] text-[0.5rem] leading-[0.5rem] text-center text-black">PDF</span>
         <% } %>
       </p>
@@ -66,6 +66,9 @@
       <div class="<%= meta_row_classes %>">
         <% if compact_cards && link.rss_feed_id.is_some() { %>
           <span class="inline-flex whitespace-nowrap bg-badge px-[0.2rem] py-[0.2rem] text-[0.5rem] leading-[0.5rem] text-center text-black">RSS</span>
+        <% } %>
+        <% if compact_cards && is_pdf { %>
+          <span class="inline-flex whitespace-nowrap bg-badge px-[0.2rem] py-[0.2rem] text-[0.5rem] leading-[0.5rem] text-center text-black">PDF</span>
         <% } %>
         <span>
           <%- render_relative_time(&link.created_at) %>
