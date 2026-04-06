@@ -1622,6 +1622,27 @@ async fn index_renders_pdf_badge_for_pdf_source_type_without_pdf_suffix() {
 }
 
 #[tokio::test]
+async fn index_renders_rss_badge_for_feed_imported_links() {
+    let server = new_server_with_seed(Some(
+            r#"
+                INSERT INTO rss_feed (id, url, title, site_url, active, poll_interval_secs, last_fetched_at, created_at, updated_at)
+                VALUES
+                    (1, 'https://example.com/feed.xml', 'Example Feed', 'https://example.com', 1, 1800, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, rss_feed_id, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES
+                    (1, 'Feed Post', 'https://example.com/posts/1', 'https://example.com/posts/1', 'html', 1, 0, 0, NULL, '2026-02-19 00:00:01', '2026-02-19 00:00:01');
+            "#,
+        ))
+        .await;
+
+    let html = server.get("/hyperlinks").await;
+    html.assert_status_ok();
+    let body = html.text();
+    assert!(body.contains("Feed Post"));
+    assert!(body.contains("RSS</span>"));
+}
+
+#[tokio::test]
 async fn index_uses_dark_thumbnail_artifacts_without_frontend_pdf_filter() {
     let server = new_server_with_seed(Some(
             r#"

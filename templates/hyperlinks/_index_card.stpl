@@ -64,6 +64,9 @@
       </p>
       
       <div class="<%= meta_row_classes %>">
+        <% if compact_cards && link.rss_feed_id.is_some() { %>
+          <span class="inline-flex whitespace-nowrap bg-badge px-[0.2rem] py-[0.2rem] text-[0.5rem] leading-[0.5rem] text-center text-black">RSS</span>
+        <% } %>
         <span>
           <%- render_relative_time(&link.created_at) %>
         </span>
