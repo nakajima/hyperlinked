@@ -206,6 +206,10 @@ const CREATE_ARTIFACT_GC_TRIGGER_SQL: &str = r#"
     END
 "#;
 
+const ADD_HYPERLINK_SUMMARY_SQL: &str = r#"
+    ALTER TABLE hyperlink ADD COLUMN summary text
+"#;
+
 const ADD_HYPERLINK_RSS_FEED_ID_SQL: &str = r#"
     ALTER TABLE hyperlink ADD COLUMN rss_feed_id integer REFERENCES rss_feed(id) ON DELETE SET NULL
 "#;
@@ -235,6 +239,7 @@ pub async fn sync(connection: &DatabaseConnection) -> Result<(), DbErr> {
     create_entity(connection, artifact_gc_pending::Entity).await?;
     create_entity(connection, jobs::Entity).await?;
 
+    add_column_if_missing(connection, ADD_HYPERLINK_SUMMARY_SQL).await?;
     add_column_if_missing(connection, ADD_HYPERLINK_RSS_FEED_ID_SQL).await?;
     connection
         .execute_unprepared(CREATE_HYPERLINK_RSS_FEED_ID_INDEX_SQL)

@@ -499,6 +499,8 @@ struct HyperlinksListView: View {
             let host = URL(string: hyperlink.url)?.host?.lowercased() ?? ""
             let haystacks = [
                 hyperlink.title.lowercased(),
+                hyperlink.summary?.lowercased() ?? "",
+                hyperlink.ogDescription?.lowercased() ?? "",
                 hyperlink.url.lowercased(),
                 hyperlink.rawURL.lowercased(),
                 host,
@@ -553,6 +555,8 @@ struct HyperlinksListView: View {
 
     private func relevanceScore(hyperlink: Hyperlink, tokens: [String]) -> Int {
         let title = hyperlink.title.lowercased()
+        let summary = hyperlink.summary?.lowercased() ?? ""
+        let ogDescription = hyperlink.ogDescription?.lowercased() ?? ""
         let url = hyperlink.url.lowercased()
         let rawURL = hyperlink.rawURL.lowercased()
         let host = URL(string: hyperlink.url)?.host?.lowercased() ?? ""
@@ -561,6 +565,12 @@ struct HyperlinksListView: View {
         for token in tokens {
             if title.contains(token) {
                 score += 6
+            }
+            if summary.contains(token) {
+                score += 5
+            }
+            if ogDescription.contains(token) {
+                score += 3
             }
             if host.contains(token) {
                 score += 4
@@ -701,6 +711,15 @@ private struct HyperlinkListRowContent: View {
     let hyperlink: Hyperlink
     let colorScheme: ColorScheme
 
+    private var pdfSummary: String? {
+        guard hyperlink.looksLikePDF else {
+            return nil
+        }
+
+        let trimmed = hyperlink.summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             HyperlinkThumbnailView(hyperlink: hyperlink, colorScheme: colorScheme)
@@ -709,17 +728,24 @@ private struct HyperlinkListRowContent: View {
                 Text(hyperlink.title)
                     .font(.headline)
                     .lineLimit(2)
-                Text(hyperlink.url)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-										.lineLimit(1)
-							
-							if let description = hyperlink.ogDescription {
-								Text(description)
-									.foregroundStyle(.secondary)
-									.font(.caption)
-									.lineLimit(2)
-							}
+                if let pdfSummary {
+                    Text(pdfSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                } else {
+                    Text(hyperlink.url)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                if pdfSummary == nil, let description = hyperlink.ogDescription {
+                    Text(description)
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                        .lineLimit(2)
+                }
 
                 HStack(spacing: 12) {
                     if let parent = hyperlink.discoveredVia.first {

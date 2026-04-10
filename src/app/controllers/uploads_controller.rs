@@ -53,6 +53,7 @@ struct HyperlinkResponse {
     title: String,
     url: String,
     raw_url: String,
+    summary: Option<String>,
     source_type: String,
     clicks_count: i32,
     last_clicked_at: Option<String>,
@@ -385,6 +386,7 @@ fn to_response(
         title: link.title.clone(),
         url: link.url.clone(),
         raw_url: link.raw_url.clone(),
+        summary: link.summary.clone(),
         source_type: match link.source_type {
             hyperlink::HyperlinkSourceType::Unknown => "unknown".to_string(),
             hyperlink::HyperlinkSourceType::Html => "html".to_string(),

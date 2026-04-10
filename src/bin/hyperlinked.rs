@@ -1,5 +1,6 @@
 use chrono::{DateTime as ChronoDateTime, NaiveDate, Utc};
 use clap::{ArgAction, Parser, Subcommand};
+use hyperlinked::entity::hyperlink_processing_job::HyperlinkProcessingJobKind;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -93,6 +94,7 @@ enum Commands {
         dry_run: bool,
     },
     ReprocessAllSnapshots,
+    ReprocessAllReadability,
     ExportGraphqlSchema {
         #[arg(
             long,
@@ -188,6 +190,7 @@ async fn run() -> Result<i32, String> {
             run_cleanup_malformed_sublinks(dry_run).await
         }
         Commands::ReprocessAllSnapshots => run_reprocess_all_snapshots().await,
+        Commands::ReprocessAllReadability => run_reprocess_all_readability().await,
         Commands::ExportGraphqlSchema { out } => run_export_graphql_schema(out).await,
     }
 }
@@ -506,10 +509,35 @@ async fn run_cleanup_malformed_sublinks(dry_run: bool) -> Result<i32, String> {
 }
 
 async fn run_reprocess_all_snapshots() -> Result<i32, String> {
+    run_reprocess_all_for_job_kind(
+        HyperlinkProcessingJobKind::Snapshot,
+        "snapshot",
+        "failed to load active snapshot jobs",
+        "failed to enqueue snapshot job",
+    )
+    .await
+}
+
+async fn run_reprocess_all_readability() -> Result<i32, String> {
+    run_reprocess_all_for_job_kind(
+        HyperlinkProcessingJobKind::Readability,
+        "readability",
+        "failed to load active readability jobs",
+        "failed to enqueue readability job",
+    )
+    .await
+}
+
+async fn run_reprocess_all_for_job_kind(
+    kind: HyperlinkProcessingJobKind,
+    label: &str,
+    active_jobs_error: &str,
+    enqueue_error_prefix: &str,
+) -> Result<i32, String> {
     use hyperlinked::app::models::artifact_job::{self, ArtifactFetchMode};
     use hyperlinked::entity::{
         hyperlink,
-        hyperlink_processing_job::{self, HyperlinkProcessingJobKind, HyperlinkProcessingJobState},
+        hyperlink_processing_job::{self, HyperlinkProcessingJobState},
     };
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 
@@ -528,15 +556,15 @@ async fn run_reprocess_all_snapshots() -> Result<i32, String> {
 
     let total_hyperlinks = hyperlink_ids.len();
     if total_hyperlinks == 0 {
-        println!("snapshot reprocess: total_links=0 queued=0 skipped_active=0");
+        println!("{label} reprocess: total_links=0 queued=0 skipped_active=0");
         return Ok(0);
     }
 
-    let active_snapshot_hyperlink_ids = hyperlink_processing_job::Entity::find()
+    let active_hyperlink_ids = hyperlink_processing_job::Entity::find()
         .select_only()
         .column(hyperlink_processing_job::Column::HyperlinkId)
         .filter(hyperlink_processing_job::Column::HyperlinkId.is_in(hyperlink_ids.clone()))
-        .filter(hyperlink_processing_job::Column::Kind.eq(HyperlinkProcessingJobKind::Snapshot))
+        .filter(hyperlink_processing_job::Column::Kind.eq(kind.clone()))
         .filter(hyperlink_processing_job::Column::State.is_in([
             HyperlinkProcessingJobState::Queued,
             HyperlinkProcessingJobState::Running,
@@ -544,14 +572,14 @@ async fn run_reprocess_all_snapshots() -> Result<i32, String> {
         .into_tuple::<i32>()
         .all(&connection)
         .await
-        .map_err(|err| format!("failed to load active snapshot jobs: {err}"))?
+        .map_err(|err| format!("{active_jobs_error}: {err}"))?
         .into_iter()
         .collect::<HashSet<_>>();
 
     let mut queued = 0usize;
     let mut skipped_active = 0usize;
     for hyperlink_id in hyperlink_ids {
-        if active_snapshot_hyperlink_ids.contains(&hyperlink_id) {
+        if active_hyperlink_ids.contains(&hyperlink_id) {
             skipped_active += 1;
             continue;
         }
@@ -559,21 +587,19 @@ async fn run_reprocess_all_snapshots() -> Result<i32, String> {
         let result = artifact_job::resolve_and_enqueue_for_job_kind(
             &connection,
             hyperlink_id,
-            HyperlinkProcessingJobKind::Snapshot,
+            kind.clone(),
             ArtifactFetchMode::RefetchTarget,
             Some(&processing_queue),
         )
         .await
-        .map_err(|err| {
-            format!("failed to enqueue snapshot job for hyperlink {hyperlink_id}: {err}")
-        })?;
+        .map_err(|err| format!("{enqueue_error_prefix} for hyperlink {hyperlink_id}: {err}"))?;
         if result.was_enqueued() {
             queued += 1;
         }
     }
 
     println!(
-        "snapshot reprocess: total_links={total_hyperlinks} queued={queued} skipped_active={skipped_active}"
+        "{label} reprocess: total_links={total_hyperlinks} queued={queued} skipped_active={skipped_active}"
     );
 
     Ok(0)

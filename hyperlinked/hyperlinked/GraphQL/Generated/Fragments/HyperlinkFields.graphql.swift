@@ -6,7 +6,7 @@
 extension HyperlinkedAPI {
   struct HyperlinkFields: HyperlinkedAPI.SelectionSet, Fragment {
     static var fragmentDefinition: StaticString {
-      #"fragment HyperlinkFields on Hyperlink { __typename id title url rawUrl ogDescription discoveryDepth clicksCount lastClickedAt createdAt updatedAt thumbnailUrl thumbnailDarkUrl screenshotUrl screenshotDarkUrl discoveredVia { __typename id title url rawUrl } }"#
+      #"fragment HyperlinkFields on Hyperlink { __typename id title url rawUrl summary ogDescription discoveryDepth clicksCount lastClickedAt createdAt updatedAt thumbnailUrl thumbnailDarkUrl screenshotUrl screenshotDarkUrl discoveredVia { __typename id title url rawUrl } }"#
     }
 
     let __data: DataDict
@@ -19,6 +19,7 @@ extension HyperlinkedAPI {
       .field("title", String.self),
       .field("url", String.self),
       .field("rawUrl", String.self),
+      .field("summary", String?.self),
       .field("ogDescription", String?.self),
       .field("discoveryDepth", Int.self),
       .field("clicksCount", Int.self),
@@ -39,6 +40,7 @@ extension HyperlinkedAPI {
     var title: String { __data["title"] }
     var url: String { __data["url"] }
     var rawUrl: String { __data["rawUrl"] }
+    var summary: String? { __data["summary"] }
     var ogDescription: String? { __data["ogDescription"] }
     var discoveryDepth: Int { __data["discoveryDepth"] }
     var clicksCount: Int { __data["clicksCount"] }

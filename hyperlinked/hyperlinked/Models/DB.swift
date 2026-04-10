@@ -243,6 +243,7 @@ public struct DB {
                 t.column("title", .text).notNull()
                 t.column("url", .text).notNull()
                 t.column("raw_url", .text).notNull()
+                t.column("summary", .text)
                 t.column("og_description", .text)
                 t.column("is_url_valid", .boolean)
                 t.column("discovery_depth", .integer)
@@ -316,6 +317,23 @@ public struct DB {
                 on: hyperlinkTableName,
                 columns: ["last_shown_in_widget", "created_at", "id"],
                 ifNotExists: true
+            )
+        }
+
+        migrator.registerMigration("add_hyperlink_records_summary_v1") { db in
+            guard try tableExists(hyperlinkTableName, in: db) else {
+                return
+            }
+
+            guard try !columnExists("summary", in: hyperlinkTableName, db: db) else {
+                return
+            }
+
+            try db.execute(
+                sql: """
+                    ALTER TABLE \(hyperlinkTableName)
+                    ADD COLUMN summary TEXT
+                """
             )
         }
 

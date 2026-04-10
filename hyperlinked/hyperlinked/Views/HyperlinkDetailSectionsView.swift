@@ -58,6 +58,16 @@ struct HyperlinkDetailSectionsView: View {
 
         Section("Link") {
             LabeledContent("Title", value: hyperlink.title)
+            if let summary = hyperlink.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !summary.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Summary")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(summary)
+                        .font(.body)
+                }
+            }
             LabeledContent("Canonical URL", value: hyperlink.url)
             LabeledContent("Submitted URL", value: hyperlink.rawURL)
         }
@@ -74,3 +84,40 @@ struct HyperlinkDetailSectionsView: View {
         }
     }
 }
+
+#if DEBUG
+struct HyperlinkDetailSectionsView_Previews: PreviewProvider {
+    static var previews: some View {
+        NavigationStack {
+            List {
+                HyperlinkDetailSectionsView(
+                    hyperlink: Hyperlink(
+                        id: 1,
+                        title: "From LLMs to LLM-based Agents for Software Engineering",
+                        url: "/uploads/1/2408.02479v2.pdf",
+                        rawURL: "/uploads/1/2408.02479v2.pdf",
+                        summary: "Survey of LLM and agent-based techniques for software engineering, covering code generation, design, testing, maintenance, and evaluation benchmarks.",
+                        ogDescription: nil,
+                        isURLValid: true,
+                        discoveryDepth: 0,
+                        clicksCount: 3,
+                        lastClickedAt: "2026-04-10T06:07:45Z",
+                        processingState: "ready",
+                        createdAt: "2026-04-10T06:07:21Z",
+                        updatedAt: "2026-04-10T06:08:12Z",
+                        thumbnailURL: nil,
+                        thumbnailDarkURL: nil,
+                        screenshotURL: nil,
+                        screenshotDarkURL: nil
+                    ),
+                    colorScheme: .light,
+                    offlineSnapshot: .empty(hyperlinkID: 1),
+                    onRetryOfflineSave: {}
+                )
+            }
+            .navigationTitle("Details")
+        }
+        .previewDisplayName("Hyperlink Detail Sections")
+    }
+}
+#endif

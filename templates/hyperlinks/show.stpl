@@ -2,6 +2,9 @@
   <section class="flex flex-col gap-3">
     <article class="flex flex-col gap-3">
       <h2 class="text-2xl font-semibold leading-8 tracking-tight"><%= self.display_title() %></h2>
+      <% if let Some(summary) = self.link.summary.as_deref().filter(|value| !value.trim().is_empty()) { %>
+        <p class="text-sm text-subdued"><%= summary %></p>
+      <% } %>
       <p>
         <a href="<%= self.link.url %>" target="_blank" rel="noopener noreferrer" data-hyperlink-id="<%= self.link.id %>" class="break-all text-sm text-accent no-underline hover:text-accent/80"><%= self.link.url %></a>
       </p>

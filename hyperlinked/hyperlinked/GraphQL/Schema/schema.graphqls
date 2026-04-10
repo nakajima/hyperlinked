@@ -1,3 +1,13 @@
+type Array {
+	array: ColumnType!
+}
+
+input BooleanArrayFilterInput {
+	array_contains: [Boolean!]
+	array_contained: [Boolean!]
+	array_overlap: [Boolean!]
+}
+
 input BooleanFilterInput {
 	eq: Boolean
 	ne: Boolean
@@ -8,12 +18,36 @@ input BooleanFilterInput {
 	is_in: [Boolean!]
 	is_not_in: [Boolean!]
 	is_null: Boolean
-	is_not_null: Boolean
+}
+
+type Column {
+	name: String!
+	type_: ColumnType!
+	nullable: Boolean!
+	unique: Boolean
+	comment: String
+}
+
+type ColumnType {
+	primitive: String
+	array: Array
+	enumeration: Enumeration
 }
 
 input CursorInput {
 	cursor: String
 	limit: Int!
+}
+
+type Enumeration {
+	name: String!
+	variants: [String!]!
+}
+
+input FloatArrayFilterInput {
+	array_contains: [Float!]
+	array_contained: [Float!]
+	array_overlap: [Float!]
 }
 
 input FloatFilterInput {
@@ -25,8 +59,7 @@ input FloatFilterInput {
 	lte: Float
 	is_in: [Float!]
 	is_not_in: [Float!]
-	is_null: Float
-	is_not_null: Float
+	is_null: Boolean
 	between: [Float!]
 	not_between: [Float!]
 }
@@ -36,6 +69,7 @@ type Hyperlink {
 	title: String!
 	url: String!
 	rawUrl: String!
+	summary: String
 	ogTitle: String
 	ogDescription: String
 	ogType: String
@@ -46,6 +80,7 @@ type Hyperlink {
 	clicksCount: Int!
 	lastClickedAt: String
 	sourceType: HyperlinkSourceTypeEnum!
+	rssFeedId: Int
 	createdAt: String!
 	updatedAt: String!
 	hyperlinkProcessingJob(filters: HyperlinkProcessingJobFilterInput, orderBy: HyperlinkProcessingJobOrderInput, pagination: PaginationInput): HyperlinkProcessingJobConnection!
@@ -99,11 +134,18 @@ input HyperlinkArtifactFilterInput {
 	createdAt: TextFilterInput
 	and: [HyperlinkArtifactFilterInput!]
 	or: [HyperlinkArtifactFilterInput!]
+	not: HyperlinkArtifactFilterInput
+}
+
+input HyperlinkArtifactHavingInput {
+	hyperlink: HyperlinkFilterInput
+	hyperlinkProcessingJob: HyperlinkProcessingJobFilterInput
 }
 
 enum HyperlinkArtifactKindEnum {
 	snapshot_warc
 	pdf_source
+	paperless_metadata
 	snapshot_error
 	oembed_meta
 	oembed_error
@@ -129,8 +171,7 @@ input HyperlinkArtifactKindEnumFilterInput {
 	lte: HyperlinkArtifactKindEnum
 	is_in: [HyperlinkArtifactKindEnum!]
 	is_not_in: [HyperlinkArtifactKindEnum!]
-	is_null: HyperlinkArtifactKindEnum
-	is_not_null: HyperlinkArtifactKindEnum
+	is_null: Boolean
 }
 
 input HyperlinkArtifactOrderInput {
@@ -152,25 +193,6 @@ enum HyperlinkChangeType {
 	DELETED
 }
 
-enum HyperlinkSourceTypeEnum {
-	unknown
-	html
-	pdf
-}
-
-input HyperlinkSourceTypeEnumFilterInput {
-	eq: HyperlinkSourceTypeEnum
-	ne: HyperlinkSourceTypeEnum
-	gt: HyperlinkSourceTypeEnum
-	gte: HyperlinkSourceTypeEnum
-	lt: HyperlinkSourceTypeEnum
-	lte: HyperlinkSourceTypeEnum
-	is_in: [HyperlinkSourceTypeEnum!]
-	is_not_in: [HyperlinkSourceTypeEnum!]
-	is_null: HyperlinkSourceTypeEnum
-	is_not_null: HyperlinkSourceTypeEnum
-}
-
 type HyperlinkConnection {
 	pageInfo: PageInfo!
 	paginationInfo: PaginationInfo
@@ -188,6 +210,7 @@ input HyperlinkFilterInput {
 	title: StringFilterInput
 	url: StringFilterInput
 	rawUrl: StringFilterInput
+	summary: StringFilterInput
 	ogTitle: StringFilterInput
 	ogDescription: StringFilterInput
 	ogType: StringFilterInput
@@ -197,11 +220,18 @@ input HyperlinkFilterInput {
 	discoveryDepth: IntegerFilterInput
 	clicksCount: IntegerFilterInput
 	lastClickedAt: TextFilterInput
-	sourceType: HyperlinkSourceTypeEnumFilterInput
+	sourceType: StringFilterInput
+	rssFeedId: IntegerFilterInput
 	createdAt: TextFilterInput
 	updatedAt: TextFilterInput
 	and: [HyperlinkFilterInput!]
 	or: [HyperlinkFilterInput!]
+	not: HyperlinkFilterInput
+}
+
+input HyperlinkHavingInput {
+	hyperlinkProcessingJob: HyperlinkProcessingJobFilterInput
+	hyperlinkArtifact: HyperlinkArtifactFilterInput
 }
 
 input HyperlinkOrderInput {
@@ -209,6 +239,7 @@ input HyperlinkOrderInput {
 	title: OrderByEnum
 	url: OrderByEnum
 	rawUrl: OrderByEnum
+	summary: OrderByEnum
 	ogTitle: OrderByEnum
 	ogDescription: OrderByEnum
 	ogType: OrderByEnum
@@ -219,6 +250,7 @@ input HyperlinkOrderInput {
 	clicksCount: OrderByEnum
 	lastClickedAt: OrderByEnum
 	sourceType: OrderByEnum
+	rssFeedId: OrderByEnum
 	createdAt: OrderByEnum
 	updatedAt: OrderByEnum
 }
@@ -263,6 +295,12 @@ input HyperlinkProcessingJobFilterInput {
 	updatedAt: TextFilterInput
 	and: [HyperlinkProcessingJobFilterInput!]
 	or: [HyperlinkProcessingJobFilterInput!]
+	not: HyperlinkProcessingJobFilterInput
+}
+
+input HyperlinkProcessingJobHavingInput {
+	hyperlink: HyperlinkFilterInput
+	hyperlinkArtifact: HyperlinkArtifactFilterInput
 }
 
 enum HyperlinkProcessingJobKindEnum {
@@ -282,8 +320,7 @@ input HyperlinkProcessingJobKindEnumFilterInput {
 	lte: HyperlinkProcessingJobKindEnum
 	is_in: [HyperlinkProcessingJobKindEnum!]
 	is_not_in: [HyperlinkProcessingJobKindEnum!]
-	is_null: HyperlinkProcessingJobKindEnum
-	is_not_null: HyperlinkProcessingJobKindEnum
+	is_null: Boolean
 }
 
 input HyperlinkProcessingJobOrderInput {
@@ -315,8 +352,7 @@ input HyperlinkProcessingJobStateEnumFilterInput {
 	lte: HyperlinkProcessingJobStateEnum
 	is_in: [HyperlinkProcessingJobStateEnum!]
 	is_not_in: [HyperlinkProcessingJobStateEnum!]
-	is_null: HyperlinkProcessingJobStateEnum
-	is_not_null: HyperlinkProcessingJobStateEnum
+	is_null: Boolean
 }
 
 type HyperlinkRef {
@@ -324,6 +360,24 @@ type HyperlinkRef {
 	title: String!
 	url: String!
 	rawUrl: String!
+}
+
+enum HyperlinkSourceTypeEnum {
+	unknown
+	html
+	pdf
+}
+
+input HyperlinkSourceTypeEnumFilterInput {
+	eq: HyperlinkSourceTypeEnum
+	ne: HyperlinkSourceTypeEnum
+	gt: HyperlinkSourceTypeEnum
+	gte: HyperlinkSourceTypeEnum
+	lt: HyperlinkSourceTypeEnum
+	lte: HyperlinkSourceTypeEnum
+	is_in: [HyperlinkSourceTypeEnum!]
+	is_not_in: [HyperlinkSourceTypeEnum!]
+	is_null: Boolean
 }
 
 input IdentityFilterInput {
@@ -335,10 +389,15 @@ input IdentityFilterInput {
 	lte: String
 	is_in: [String!]
 	is_not_in: [String!]
-	is_null: String
-	is_not_null: String
+	is_null: Boolean
 	between: [String!]
 	not_between: [String!]
+}
+
+input IntegerArrayFilterInput {
+	array_contains: [Int!]
+	array_contained: [Int!]
+	array_overlap: [Int!]
 }
 
 input IntegerFilterInput {
@@ -350,11 +409,12 @@ input IntegerFilterInput {
 	lte: Int
 	is_in: [Int!]
 	is_not_in: [Int!]
-	is_null: Int
-	is_not_null: Int
+	is_null: Boolean
 	between: [Int!]
 	not_between: [Int!]
 }
+
+scalar Json
 
 type Mutation {
 	_ping: String
@@ -398,9 +458,15 @@ input PaginationInput @oneOf {
 type Query {
 	hyperlinks(filters: HyperlinkFilterInput, orderBy: HyperlinkOrderInput, pagination: PaginationInput, q: String): HyperlinkConnection!
 	updatedHyperlinks(updatedAt: String!): UpdatedHyperlinksPayload!
-	hyperlinkProcessingJob(filters: HyperlinkProcessingJobFilterInput, orderBy: HyperlinkProcessingJobOrderInput, pagination: PaginationInput): HyperlinkProcessingJobConnection!
-	hyperlinkArtifact(filters: HyperlinkArtifactFilterInput, orderBy: HyperlinkArtifactOrderInput, pagination: PaginationInput): HyperlinkArtifactConnection!
-	_sea_orm_entity_metadata(table_name: String!): String
+	hyperlinkProcessingJob(filters: HyperlinkProcessingJobFilterInput, having: HyperlinkProcessingJobHavingInput, orderBy: HyperlinkProcessingJobOrderInput, pagination: PaginationInput): HyperlinkProcessingJobConnection!
+	hyperlinkArtifact(filters: HyperlinkArtifactFilterInput, having: HyperlinkArtifactHavingInput, orderBy: HyperlinkArtifactOrderInput, pagination: PaginationInput): HyperlinkArtifactConnection!
+	_sea_orm_entity_metadata(table_name: String!): Table!
+}
+
+input StringArrayFilterInput {
+	array_contains: [String!]
+	array_contained: [String!]
+	array_overlap: [String!]
 }
 
 input StringFilterInput {
@@ -410,10 +476,10 @@ input StringFilterInput {
 	gte: String
 	lt: String
 	lte: String
+	ci_eq: String
 	is_in: [String!]
 	is_not_in: [String!]
-	is_null: String
-	is_not_null: String
+	is_null: Boolean
 	contains: String
 	starts_with: String
 	ends_with: String
@@ -421,6 +487,18 @@ input StringFilterInput {
 	not_like: String
 	between: [String!]
 	not_between: [String!]
+}
+
+type Table {
+	columns: [Column!]!
+	primary_key: [String!]!
+	comment: String
+}
+
+input TextArrayFilterInput {
+	array_contains: [String!]
+	array_contained: [String!]
+	array_overlap: [String!]
 }
 
 input TextFilterInput {
@@ -432,8 +510,7 @@ input TextFilterInput {
 	lte: String
 	is_in: [String!]
 	is_not_in: [String!]
-	is_null: String
-	is_not_null: String
+	is_null: Boolean
 	between: [String!]
 	not_between: [String!]
 }
@@ -465,4 +542,5 @@ directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
 	query: Query
 	mutation: Mutation
+	subscription: Subscription
 }

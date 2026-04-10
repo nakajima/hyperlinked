@@ -3,6 +3,7 @@ fragment HyperlinkFields on Hyperlink {
   title
   url
   rawUrl
+  summary
   ogDescription
   discoveryDepth
   clicksCount

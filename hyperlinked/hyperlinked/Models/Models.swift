@@ -20,6 +20,7 @@ struct Hyperlink: Decodable, Equatable, Hashable, Identifiable {
     let title: String
     let url: String
     let rawURL: String
+    let summary: String?
     let ogDescription: String?
     let isURLValid: Bool?
     let discoveryDepth: Int?
@@ -40,6 +41,7 @@ struct Hyperlink: Decodable, Equatable, Hashable, Identifiable {
         case title
         case url
         case rawURL = "raw_url"
+        case summary
         case ogDescription = "og_description"
         case isURLValid = "is_url_valid"
         case discoveryDepth = "discovery_depth"
@@ -61,6 +63,7 @@ struct Hyperlink: Decodable, Equatable, Hashable, Identifiable {
         title: String,
         url: String,
         rawURL: String,
+        summary: String? = nil,
         ogDescription: String?,
         isURLValid: Bool?,
         discoveryDepth: Int?,
@@ -80,6 +83,7 @@ struct Hyperlink: Decodable, Equatable, Hashable, Identifiable {
         self.title = title
         self.url = url
         self.rawURL = rawURL
+        self.summary = summary
         self.ogDescription = ogDescription
         self.isURLValid = isURLValid
         self.discoveryDepth = discoveryDepth
@@ -102,6 +106,7 @@ struct Hyperlink: Decodable, Equatable, Hashable, Identifiable {
         title = try container.decode(String.self, forKey: .title)
         url = try container.decode(String.self, forKey: .url)
         rawURL = try container.decode(String.self, forKey: .rawURL)
+        summary = try container.decodeIfPresent(String.self, forKey: .summary)
         ogDescription = try container.decodeIfPresent(String.self, forKey: .ogDescription)
         isURLValid = try container.decodeIfPresent(Bool.self, forKey: .isURLValid)
         discoveryDepth = try container.decodeIfPresent(Int.self, forKey: .discoveryDepth)
@@ -128,6 +133,7 @@ extension Hyperlink: FetchableRecord, PersistableRecord, TableRecord {
         case title
         case url
         case rawURL = "raw_url"
+        case summary
         case ogDescription = "og_description"
         case isURLValid = "is_url_valid"
         case discoveryDepth = "discovery_depth"
@@ -174,6 +180,7 @@ extension Hyperlink: FetchableRecord, PersistableRecord, TableRecord {
             title: row[Columns.title],
             url: url,
             rawURL: rawURL,
+            summary: row[Columns.summary],
             ogDescription: row[Columns.ogDescription],
             isURLValid: row[Columns.isURLValid],
             discoveryDepth: row[Columns.discoveryDepth],
@@ -198,6 +205,7 @@ extension Hyperlink: FetchableRecord, PersistableRecord, TableRecord {
         container[Columns.title] = title
         container[Columns.url] = url
         container[Columns.rawURL] = rawURL
+        container[Columns.summary] = summary
         container[Columns.ogDescription] = ogDescription
         container[Columns.isURLValid] = isURLValid
         container[Columns.discoveryDepth] = discoveryDepth

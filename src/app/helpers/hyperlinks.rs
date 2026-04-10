@@ -30,6 +30,7 @@ pub(crate) fn to_response(
         ),
         url: model.url.clone(),
         raw_url: model.raw_url.clone(),
+        summary: normalize_optional_display_text(model.summary.as_deref()),
         source_type: hyperlink_source_type_name(&model.source_type).to_string(),
         clicks_count: model.clicks_count,
         last_clicked_at: model.last_clicked_at.as_ref().map(ToString::to_string),
@@ -177,6 +178,10 @@ fn normalize_text_value(value: Option<&str>) -> Option<String> {
     } else {
         Some(normalized)
     }
+}
+
+fn normalize_optional_display_text(value: Option<&str>) -> Option<String> {
+    normalize_text_value(value)
 }
 
 fn normalize_url_value(value: Option<&str>) -> Option<String> {

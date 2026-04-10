@@ -1,18 +1,27 @@
 use async_trait::async_trait;
 use dom_smoothie::Readability;
-use reqwest::{StatusCode, header::HeaderValue};
+use reqwest::{
+    StatusCode,
+    header::{HeaderName, HeaderValue},
+};
 use sea_orm::{ActiveValue::Set, DatabaseConnection};
 use serde::Serialize;
 use std::{
     any::Any,
     panic::{AssertUnwindSafe, catch_unwind},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::{
     app::models::{
         hyperlink_artifact as hyperlink_artifact_model,
         hyperlink_search_doc as hyperlink_search_doc_model, hyperlink_title,
+        llm_discovery::{
+            ChatApiKind, build_chat_request_body, chat_endpoint_candidates,
+            format_reqwest_transport_error,
+        },
+        llm_interaction as llm_interaction_model,
+        llm_settings::{self, LlmBackendKind, LlmSettings},
     },
     entity::{
         hyperlink,
@@ -27,6 +36,10 @@ const READABLE_META_CONTENT_TYPE: &str = "application/json";
 const READABLE_ERROR_CONTENT_TYPE: &str = "application/json";
 const MATHPIX_BASE_URL: &str = "https://api.mathpix.com";
 const MATHPIX_SUBMIT_PDF_PATH: &str = "/v3/pdf";
+const PDF_LLM_INTERACTION_KIND: &str = "pdf_enrichment";
+const PDF_LLM_TIMEOUT: Duration = Duration::from_secs(20);
+const PDF_LLM_MARKDOWN_CHAR_LIMIT: usize = 16_000;
+const PDF_SUMMARY_CHAR_LIMIT: usize = 320;
 
 pub struct ReadabilityFetcher {
     job_id: i32,
@@ -451,14 +464,47 @@ impl Processor for ReadabilityFetcher {
             }
         };
 
-        if let Some(readability_title) = readability_title {
+        let readable_text = String::from_utf8_lossy(&text_payload).to_string();
+
+        if let Some(readability_title) = readability_title.as_deref() {
             let cleaned_title = hyperlink_title::strip_site_affixes(
-                readability_title.as_str(),
+                readability_title,
                 hyperlink.url.as_ref(),
                 hyperlink.raw_url.as_ref(),
             );
             if !cleaned_title.is_empty() && cleaned_title != hyperlink.title.as_ref().as_str() {
                 hyperlink.title = Set(cleaned_title);
+            }
+        }
+
+        if should_attempt_pdf_llm_enrichment(hyperlink) {
+            match enrich_uploaded_pdf_with_llm(
+                connection,
+                hyperlink_id,
+                self.job_id,
+                hyperlink,
+                &readable_text,
+                readability_title.as_deref(),
+            )
+            .await
+            {
+                Ok(Some(enrichment)) => {
+                    if let Some(title) = enrichment.title {
+                        hyperlink.title = Set(title);
+                    }
+                    if let Some(summary) = enrichment.summary {
+                        hyperlink.summary = Set(Some(summary));
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        hyperlink_id,
+                        job_id = self.job_id,
+                        error = %error,
+                        "uploaded pdf llm enrichment failed; continuing without ai metadata"
+                    );
+                }
             }
         }
 
@@ -472,8 +518,6 @@ impl Processor for ReadabilityFetcher {
         )
         .await
         .map_err(ProcessingError::DB)?;
-
-        let readable_text = String::from_utf8_lossy(&text_payload).to_string();
         if let Err(error) = hyperlink_search_doc_model::upsert_readable_text(
             connection,
             hyperlink_id,
@@ -683,6 +727,506 @@ async fn extract_from_pdf(
     })?;
 
     Ok((text_payload, meta_payload, extracted_title))
+}
+
+#[derive(Clone, Debug, Default)]
+struct PdfLlmEnrichment {
+    title: Option<String>,
+    summary: Option<String>,
+}
+
+impl PdfLlmEnrichment {
+    fn is_empty(&self) -> bool {
+        self.title.is_none() && self.summary.is_none()
+    }
+}
+
+async fn enrich_uploaded_pdf_with_llm(
+    connection: &DatabaseConnection,
+    hyperlink_id: i32,
+    job_id: i32,
+    hyperlink: &hyperlink::ActiveModel,
+    readable_text: &str,
+    extracted_title: Option<&str>,
+) -> Result<Option<PdfLlmEnrichment>, String> {
+    let settings = llm_settings::load(connection)
+        .await
+        .map_err(|error| format!("failed to load llm settings: {error}"))?;
+    if !llm_settings_are_configured(&settings) {
+        return Ok(None);
+    }
+
+    let endpoints = chat_endpoint_candidates(&settings.base_url, settings.backend_kind)
+        .map_err(|error| format!("invalid llm settings: {error}"))?;
+    if endpoints.is_empty() {
+        return Ok(None);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(PDF_LLM_TIMEOUT)
+        .build()
+        .map_err(|error| format!("failed to build llm client: {error}"))?;
+    let auth_header = build_llm_auth_header(&settings)?;
+    let provider = settings.provider.as_storage().to_string();
+
+    let user_prompt = serde_json::to_string_pretty(&serde_json::json!({
+        "source_url": hyperlink.url.as_ref(),
+        "submitted_url": hyperlink.raw_url.as_ref(),
+        "current_title": hyperlink.title.as_ref(),
+        "extracted_title": extracted_title,
+        "markdown_excerpt": truncate_pdf_markdown_for_llm(readable_text),
+    }))
+    .unwrap_or_else(|_| readable_text.to_string());
+    let system_prompt = concat!(
+        "You extract metadata for uploaded PDF documents in a personal hyperlinks app. ",
+        "Reply with strict JSON only using the shape {\"title\": string|null, \"summary\": string|null}. ",
+        "Title must be the real document title, never a filename, URL, upload path, LaTeX wrapper like \\title{, author list, or abstract heading. ",
+        "Summary should be a concise plain-text description suitable for replacing a meaningless upload URL in a list. ",
+        "Keep summary to 1-2 sentences and at most 320 characters. Do not include markdown."
+    );
+
+    let mut attempt_failures = Vec::new();
+    for endpoint in endpoints {
+        let endpoint_url = endpoint.url.to_string();
+        let body = build_chat_request_body(
+            endpoint.api_kind,
+            &settings.model,
+            system_prompt,
+            &user_prompt,
+        );
+        let request_body = llm_interaction_model::format_request_body(&body);
+        let started = Instant::now();
+        let mut request = client
+            .post(endpoint.url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .json(&body);
+        if let Some((header_name, header_value)) = auth_header.as_ref() {
+            request = request.header(header_name.clone(), header_value.clone());
+        }
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                let error_message = format_reqwest_transport_error(&error);
+                record_pdf_llm_interaction(
+                    connection,
+                    hyperlink_id,
+                    job_id,
+                    &provider,
+                    &settings.model,
+                    &endpoint_url,
+                    endpoint.api_kind,
+                    &request_body,
+                    None,
+                    None,
+                    Some(error_message.clone()),
+                    started.elapsed(),
+                )
+                .await;
+                attempt_failures.push(format!(
+                    "{} [{}] -> request failed: {}",
+                    endpoint_url,
+                    endpoint.api_kind.as_str(),
+                    error_message
+                ));
+                continue;
+            }
+        };
+
+        let status = response.status();
+        let response_body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                let error_message = format!("failed to read response body: {error}");
+                record_pdf_llm_interaction(
+                    connection,
+                    hyperlink_id,
+                    job_id,
+                    &provider,
+                    &settings.model,
+                    &endpoint_url,
+                    endpoint.api_kind,
+                    &request_body,
+                    None,
+                    Some(status),
+                    Some(error_message.clone()),
+                    started.elapsed(),
+                )
+                .await;
+                attempt_failures.push(format!(
+                    "{} [{}] -> failed to read response body: {}",
+                    endpoint_url,
+                    endpoint.api_kind.as_str(),
+                    error_message
+                ));
+                continue;
+            }
+        };
+
+        if !status.is_success() {
+            let error_message = format!("status {status}: {}", summarize_api_error(&response_body));
+            record_pdf_llm_interaction(
+                connection,
+                hyperlink_id,
+                job_id,
+                &provider,
+                &settings.model,
+                &endpoint_url,
+                endpoint.api_kind,
+                &request_body,
+                Some(response_body.clone()),
+                Some(status),
+                Some(error_message.clone()),
+                started.elapsed(),
+            )
+            .await;
+            attempt_failures.push(format!(
+                "{} [{}] -> {}",
+                endpoint_url,
+                endpoint.api_kind.as_str(),
+                error_message
+            ));
+            continue;
+        }
+
+        let parsed_response = match parse_pdf_llm_chat_response(&response_body) {
+            Ok(parsed) => parsed,
+            Err(error_message) => {
+                record_pdf_llm_interaction(
+                    connection,
+                    hyperlink_id,
+                    job_id,
+                    &provider,
+                    &settings.model,
+                    &endpoint_url,
+                    endpoint.api_kind,
+                    &request_body,
+                    Some(response_body.clone()),
+                    Some(status),
+                    Some(error_message.clone()),
+                    started.elapsed(),
+                )
+                .await;
+                attempt_failures.push(format!(
+                    "{} [{}] -> {}",
+                    endpoint_url,
+                    endpoint.api_kind.as_str(),
+                    error_message
+                ));
+                continue;
+            }
+        };
+
+        let enrichment = normalize_pdf_llm_enrichment(
+            parsed_response.title.as_deref(),
+            parsed_response.summary.as_deref(),
+            hyperlink.url.as_ref(),
+            hyperlink.raw_url.as_ref(),
+        );
+        if enrichment.is_empty() {
+            let error_message =
+                "llm response did not contain a usable title or summary".to_string();
+            record_pdf_llm_interaction(
+                connection,
+                hyperlink_id,
+                job_id,
+                &provider,
+                &settings.model,
+                &endpoint_url,
+                endpoint.api_kind,
+                &request_body,
+                Some(response_body.clone()),
+                Some(status),
+                Some(error_message.clone()),
+                started.elapsed(),
+            )
+            .await;
+            attempt_failures.push(format!(
+                "{} [{}] -> {}",
+                endpoint_url,
+                endpoint.api_kind.as_str(),
+                error_message
+            ));
+            continue;
+        }
+
+        record_pdf_llm_interaction(
+            connection,
+            hyperlink_id,
+            job_id,
+            &provider,
+            &settings.model,
+            &endpoint_url,
+            endpoint.api_kind,
+            &request_body,
+            Some(response_body),
+            Some(status),
+            None,
+            started.elapsed(),
+        )
+        .await;
+        return Ok(Some(enrichment));
+    }
+
+    if attempt_failures.is_empty() {
+        Ok(None)
+    } else {
+        Err(format!(
+            "all configured llm endpoint candidates failed: {}",
+            attempt_failures.join(" | ")
+        ))
+    }
+}
+
+fn llm_settings_are_configured(settings: &LlmSettings) -> bool {
+    settings.backend_kind != LlmBackendKind::Unknown
+        && !settings.base_url.trim().is_empty()
+        && !settings.model.trim().is_empty()
+}
+
+fn should_attempt_pdf_llm_enrichment(hyperlink: &hyperlink::ActiveModel) -> bool {
+    let is_pdf = matches!(
+        hyperlink.source_type.as_ref(),
+        &hyperlink::HyperlinkSourceType::Pdf
+    );
+    let is_upload = is_uploaded_pdf_url(hyperlink.url.as_ref());
+    let has_summary = hyperlink
+        .summary
+        .as_ref()
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+
+    is_pdf && is_upload && !has_summary
+}
+
+fn is_uploaded_pdf_url(value: &str) -> bool {
+    value.trim_start().starts_with("/uploads/")
+}
+
+fn truncate_pdf_markdown_for_llm(markdown: &str) -> String {
+    let normalized = markdown.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= PDF_LLM_MARKDOWN_CHAR_LIMIT {
+        return normalized;
+    }
+
+    let mut truncated = normalized
+        .chars()
+        .take(PDF_LLM_MARKDOWN_CHAR_LIMIT)
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn build_llm_auth_header(
+    settings: &LlmSettings,
+) -> Result<Option<(HeaderName, HeaderValue)>, String> {
+    let Some(api_key) = settings.api_key.as_deref() else {
+        return Ok(None);
+    };
+
+    let header_name = settings
+        .auth_header_name
+        .clone()
+        .unwrap_or_else(|| "Authorization".to_string());
+    let header_prefix = settings
+        .auth_header_prefix
+        .clone()
+        .unwrap_or_else(|| "Bearer".to_string());
+    let header_value = if header_prefix.trim().is_empty() {
+        api_key.to_string()
+    } else {
+        format!("{} {}", header_prefix.trim(), api_key)
+    };
+
+    let header_name = HeaderName::from_bytes(header_name.as_bytes())
+        .map_err(|error| format!("invalid llm auth header name: {error}"))?;
+    let header_value = HeaderValue::from_str(&header_value)
+        .map_err(|error| format!("invalid llm auth header value: {error}"))?;
+
+    Ok(Some((header_name, header_value)))
+}
+
+#[derive(Clone, Debug, Default)]
+struct ParsedPdfLlmResponse {
+    title: Option<String>,
+    summary: Option<String>,
+}
+
+fn parse_pdf_llm_chat_response(body: &str) -> Result<ParsedPdfLlmResponse, String> {
+    let payload: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| format!("llm response was not valid json: {error}"))?;
+    let content = extract_llm_chat_content(&payload)
+        .ok_or_else(|| "llm response did not include assistant message content".to_string())?;
+    let content_json = parse_jsonish_llm_content(&content)?;
+
+    Ok(ParsedPdfLlmResponse {
+        title: content_json
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        summary: content_json
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+    })
+}
+
+fn extract_llm_chat_content(payload: &serde_json::Value) -> Option<String> {
+    payload
+        .pointer("/choices/0/message/content")
+        .and_then(extract_llm_content_value)
+        .or_else(|| {
+            payload
+                .pointer("/message/content")
+                .and_then(extract_llm_content_value)
+        })
+        .or_else(|| payload.get("response").and_then(extract_llm_content_value))
+}
+
+fn extract_llm_content_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(items) => {
+            let mut combined = String::new();
+            for item in items {
+                if let Some(text) = extract_llm_content_value(item) {
+                    combined.push_str(&text);
+                }
+            }
+            if combined.trim().is_empty() {
+                None
+            } else {
+                Some(combined)
+            }
+        }
+        serde_json::Value::Object(map) => map
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| map.get("content").and_then(serde_json::Value::as_str))
+            .map(ToString::to_string),
+        _ => None,
+    }
+}
+
+fn parse_jsonish_llm_content(content: &str) -> Result<serde_json::Value, String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err("assistant message content was empty".to_string());
+    }
+
+    let unfenced = strip_markdown_code_fences(trimmed);
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&unfenced) {
+        return Ok(parsed);
+    }
+
+    let Some(start) = unfenced.find('{') else {
+        return Err("assistant message did not contain a json object".to_string());
+    };
+    let Some(end) = unfenced.rfind('}') else {
+        return Err("assistant message did not contain a complete json object".to_string());
+    };
+    serde_json::from_str::<serde_json::Value>(&unfenced[start..=end])
+        .map_err(|error| format!("assistant message json parse failed: {error}"))
+}
+
+fn strip_markdown_code_fences(value: &str) -> String {
+    let trimmed = value.trim();
+    let Some(stripped) = trimmed.strip_prefix("```") else {
+        return trimmed.to_string();
+    };
+
+    let stripped = stripped
+        .strip_prefix("json")
+        .or_else(|| stripped.strip_prefix("JSON"))
+        .unwrap_or(stripped)
+        .trim_start_matches(['\r', '\n']);
+    stripped
+        .strip_suffix("```")
+        .unwrap_or(stripped)
+        .trim()
+        .to_string()
+}
+
+fn normalize_pdf_llm_enrichment(
+    title: Option<&str>,
+    summary: Option<&str>,
+    url: &str,
+    raw_url: &str,
+) -> PdfLlmEnrichment {
+    let title = title
+        .and_then(normalize_readability_title)
+        .map(|title| hyperlink_title::strip_site_affixes(&title, url, raw_url))
+        .filter(|title| !title.trim().is_empty());
+    let summary = summary.and_then(normalize_summary_candidate);
+
+    PdfLlmEnrichment { title, summary }
+}
+
+fn normalize_summary_candidate(raw: &str) -> Option<String> {
+    let mut normalized = raw
+        .trim()
+        .trim_start_matches("Summary:")
+        .trim_start_matches("summary:")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.starts_with("http://") || normalized.starts_with("https://") {
+        return None;
+    }
+
+    if normalized.chars().count() > PDF_SUMMARY_CHAR_LIMIT {
+        normalized = normalized
+            .chars()
+            .take(PDF_SUMMARY_CHAR_LIMIT)
+            .collect::<String>();
+        normalized.push('…');
+    }
+
+    Some(normalized)
+}
+
+async fn record_pdf_llm_interaction(
+    connection: &DatabaseConnection,
+    hyperlink_id: i32,
+    job_id: i32,
+    provider: &str,
+    model: &str,
+    endpoint_url: &str,
+    api_kind: ChatApiKind,
+    request_body: &str,
+    response_body: Option<String>,
+    response_status: Option<reqwest::StatusCode>,
+    error_message: Option<String>,
+    duration: Duration,
+) {
+    if let Err(error) = llm_interaction_model::record(
+        connection,
+        llm_interaction_model::NewLlmInteraction {
+            kind: PDF_LLM_INTERACTION_KIND.to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            endpoint_url: endpoint_url.to_string(),
+            api_kind: api_kind.as_str().to_string(),
+            hyperlink_id: Some(hyperlink_id),
+            processing_job_id: Some(job_id),
+            admin_job_kind: None,
+            admin_job_id: None,
+            request_body: request_body.to_string(),
+            response_body,
+            response_status: response_status.map(|status| i32::from(status.as_u16())),
+            error_message,
+            duration_ms: Some(llm_interaction_model::duration_ms(duration)),
+            created_at: None,
+        },
+    )
+    .await
+    {
+        tracing::warn!(hyperlink_id, job_id, error = %error, "failed to record pdf llm interaction");
+    }
 }
 
 async fn parse_mathpix_submit_response(
@@ -895,19 +1439,26 @@ fn extract_pdf_metadata_title(payload: &[u8]) -> Option<String> {
 }
 
 fn infer_pdf_title_from_markdown(markdown: &str) -> Option<String> {
-    markdown.lines().take(12).find_map(|line| {
+    let lines = markdown.lines().take(24).collect::<Vec<_>>();
+    for prefix in ["\\title{", "\\section*{", "\\section{"] {
+        if let Some(title) = extract_wrapped_pdf_title(&lines, prefix) {
+            return Some(title);
+        }
+    }
+
+    lines.into_iter().find_map(|line| {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed == "---" {
+        if trimmed.is_empty() || trimmed == "---" || looks_like_pdf_wrapper_line(trimmed) {
             return None;
         }
 
-        let candidate = trimmed
+        let candidate = strip_inline_pdf_title_command(trimmed)
             .trim_start_matches('#')
             .trim()
             .trim_matches(|ch: char| {
                 matches!(
                     ch,
-                    '-' | '•' | '*' | '·' | '—' | '–' | ':' | '"' | '\'' | '“' | '”'
+                    '{' | '}' | '-' | '•' | '*' | '·' | '—' | '–' | ':' | '"' | '\'' | '“' | '”'
                 )
             })
             .trim();
@@ -915,10 +1466,92 @@ fn infer_pdf_title_from_markdown(markdown: &str) -> Option<String> {
     })
 }
 
+fn extract_wrapped_pdf_title(lines: &[&str], prefix: &str) -> Option<String> {
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let Some(remainder) = trimmed.strip_prefix(prefix) else {
+            continue;
+        };
+
+        let mut parts = Vec::new();
+        let remainder = remainder.trim();
+        if !remainder.is_empty() {
+            if let Some(before_close) = remainder.strip_suffix('}') {
+                parts.push(before_close.trim());
+                return normalize_readability_title(&parts.join(" "));
+            }
+            parts.push(remainder);
+        }
+
+        for next_line in lines.iter().skip(index + 1) {
+            let trimmed = next_line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if looks_like_pdf_wrapper_line(trimmed) && parts.is_empty() {
+                break;
+            }
+            if trimmed == "}" {
+                break;
+            }
+            if let Some(before_close) = trimmed.strip_suffix('}') {
+                parts.push(before_close.trim());
+                break;
+            }
+            parts.push(trimmed);
+        }
+
+        if let Some(title) = normalize_readability_title(&parts.join(" ")) {
+            return Some(title);
+        }
+    }
+
+    None
+}
+
+fn strip_inline_pdf_title_command(value: &str) -> &str {
+    for prefix in ["\\section*{", "\\section{", "\\title{"] {
+        if let Some(stripped) = value.strip_prefix(prefix) {
+            return stripped;
+        }
+    }
+    value
+}
+
+fn looks_like_pdf_wrapper_line(value: &str) -> bool {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    trimmed == "{"
+        || trimmed == "}"
+        || trimmed == "\\maketitle"
+        || matches!(
+            lower.as_str(),
+            "\\title{" | "\\author{" | "\\begin{abstract}" | "\\end{abstract}"
+        )
+        || lower.starts_with("\\begin{")
+        || lower.starts_with("\\end{")
+        || (trimmed.starts_with('\\') && trimmed.ends_with('{') && !trimmed.contains(' '))
+}
+
 fn normalize_readability_title(raw: &str) -> Option<String> {
     let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    let trimmed = normalized.trim();
-    if trimmed.len() < 2 {
+    let raw_trimmed = normalized.trim();
+    if looks_like_pdf_wrapper_line(raw_trimmed) {
+        return None;
+    }
+
+    let trimmed = raw_trimmed
+        .trim_matches(|ch: char| matches!(ch, '{' | '}' | '"' | '\'' | '“' | '”'))
+        .trim();
+    if trimmed.len() < 2 || looks_like_pdf_wrapper_line(trimmed) {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("/uploads/")
+    {
         return None;
     }
 

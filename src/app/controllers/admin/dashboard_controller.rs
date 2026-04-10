@@ -307,6 +307,7 @@ struct HyperlinkBackupRow {
     title: String,
     url: String,
     raw_url: String,
+    summary: Option<String>,
     og_title: Option<String>,
     og_description: Option<String>,
     og_type: Option<String>,
@@ -1689,6 +1690,7 @@ where
                 title: model.title,
                 url: model.url,
                 raw_url: model.raw_url,
+                summary: model.summary,
                 og_title: model.og_title,
                 og_description: model.og_description,
                 og_type: model.og_type,
@@ -2206,6 +2208,7 @@ async fn restore_hyperlink_row(
         active.title = Set(row.title.clone());
         active.url = Set(row.url.clone());
         active.raw_url = Set(row.raw_url.clone());
+        active.summary = Set(row.summary.clone());
         active.og_title = Set(row.og_title.clone());
         active.og_description = Set(row.og_description.clone());
         active.og_type = Set(row.og_type.clone());
@@ -2227,6 +2230,7 @@ async fn restore_hyperlink_row(
             title: Set(row.title.clone()),
             url: Set(row.url.clone()),
             raw_url: Set(row.raw_url.clone()),
+            summary: Set(row.summary.clone()),
             og_title: Set(row.og_title.clone()),
             og_description: Set(row.og_description.clone()),
             og_type: Set(row.og_type.clone()),

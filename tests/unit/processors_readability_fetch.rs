@@ -76,8 +76,30 @@ fn infers_pdf_title_from_markdown_heading() {
 }
 
 #[test]
+fn infers_pdf_title_from_latex_title_block() {
+    let markdown = "\\title{\nSWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering\n}\n\\author{\nAuthors\n}";
+    assert_eq!(
+        infer_pdf_title_from_markdown(markdown).as_deref(),
+        Some("SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering")
+    );
+}
+
+#[test]
+fn infers_pdf_title_from_latex_section_heading() {
+    assert_eq!(
+        infer_pdf_title_from_markdown("\\section*{Cooling a Raspberry Pi device}\nBody").as_deref(),
+        Some("Cooling a Raspberry Pi device")
+    );
+}
+
+#[test]
 fn ignores_non_title_pdf_markdown_lines() {
     assert_eq!(infer_pdf_title_from_markdown("---\n\n2024\n"), None);
+    assert_eq!(normalize_readability_title("\\title{"), None);
+    assert_eq!(
+        normalize_readability_title("https://example.com/paper.pdf"),
+        None
+    );
 }
 
 struct FakePdfExtractor {

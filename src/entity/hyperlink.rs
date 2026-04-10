@@ -23,6 +23,7 @@ pub struct Model {
     pub url: String,
     #[sea_orm(indexed, default_value = "")]
     pub raw_url: String,
+    pub summary: Option<String>,
     pub og_title: Option<String>,
     pub og_description: Option<String>,
     pub og_type: Option<String>,

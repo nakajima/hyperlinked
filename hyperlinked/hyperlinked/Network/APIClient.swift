@@ -334,6 +334,7 @@ struct APIClient {
             title: fields.title,
             url: fields.url,
             rawURL: fields.rawUrl,
+            summary: fields.summary,
             ogDescription: fields.ogDescription,
             isURLValid: nil,
             discoveryDepth: fields.discoveryDepth,

@@ -92,6 +92,7 @@ pub(crate) struct HyperlinkResponse {
     pub(crate) title: String,
     pub(crate) url: String,
     pub(crate) raw_url: String,
+    pub(crate) summary: Option<String>,
     pub(crate) source_type: String,
     pub(crate) clicks_count: i32,
     pub(crate) last_clicked_at: Option<String>,
