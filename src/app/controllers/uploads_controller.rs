@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing,
@@ -30,11 +30,15 @@ use crate::{
 pub(crate) use crate::app::models::upload::UPLOADS_PREFIX;
 
 const MAX_UPLOAD_SIZE_BYTES: usize = 100 * 1024 * 1024;
+const MULTIPART_BODY_LIMIT_BYTES: usize = MAX_UPLOAD_SIZE_BYTES + 1024 * 1024;
 const PDF_CONTENT_TYPE: &str = "application/pdf";
 
 pub fn routes() -> Router<Context> {
     Router::new()
-        .route("/uploads", routing::post(create_upload))
+        .route(
+            "/uploads",
+            routing::post(create_upload).layer(DefaultBodyLimit::max(MULTIPART_BODY_LIMIT_BYTES)),
+        )
         .route("/uploads/{id}/{filename}", routing::get(download_upload))
 }
 

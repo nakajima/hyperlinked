@@ -403,9 +403,8 @@ impl Processor for ReadabilityFetcher {
                     }
                 };
 
-                extract_from_html(&html).map(|(text_payload, meta_payload)| {
-                    (text_payload, meta_payload, None)
-                })
+                extract_from_html(&html)
+                    .map(|(text_payload, meta_payload)| (text_payload, meta_payload, None))
             }
             ReadabilitySource::Pdf(pdf_source) => {
                 let pdf_payload = hyperlink_artifact_model::load_payload(&pdf_source)
@@ -905,7 +904,12 @@ fn infer_pdf_title_from_markdown(markdown: &str) -> Option<String> {
         let candidate = trimmed
             .trim_start_matches('#')
             .trim()
-            .trim_matches(|ch: char| matches!(ch, '-' | '•' | '*' | '·' | '—' | '–' | ':' | '"' | '\'' | '“' | '”'))
+            .trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    '-' | '•' | '*' | '·' | '—' | '–' | ':' | '"' | '\'' | '“' | '”'
+                )
+            })
             .trim();
         normalize_readability_title(candidate)
     })

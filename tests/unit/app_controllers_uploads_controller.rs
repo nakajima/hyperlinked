@@ -47,6 +47,33 @@ async fn create_upload_persists_pdf_hyperlink() {
 }
 
 #[tokio::test]
+async fn create_upload_accepts_pdf_larger_than_axum_default_multipart_limit() {
+    let server = new_server("").await;
+
+    let mut payload = b"%PDF-1.4\n".to_vec();
+    payload.resize(3 * 1024 * 1024, b'a');
+
+    let response = server
+        .post("/uploads")
+        .multipart(
+            MultipartForm::new()
+                .add_text("upload_type", "pdf")
+                .add_part(
+                    "file",
+                    Part::bytes(payload)
+                        .file_name("large.pdf")
+                        .mime_type("application/pdf"),
+                ),
+        )
+        .await;
+
+    response.assert_status(StatusCode::CREATED);
+
+    let body: serde_json::Value = response.json();
+    assert_eq!(body["url"], format!("{UPLOADS_PREFIX}/1/large.pdf"));
+}
+
+#[tokio::test]
 async fn create_upload_reuses_same_hash_and_filename() {
     let server = new_server("").await;
 
