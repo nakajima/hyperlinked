@@ -804,6 +804,7 @@ function initializePDFUpload() {
   const submitButton = root.querySelector("[data-pdf-upload-submit]");
   const fileInput = root.querySelector("[data-pdf-upload-input]");
   const overlay = root.querySelector("[data-pdf-upload-overlay]");
+  const activityContainer = root.querySelector("[data-pdf-upload-activity]");
   const resultsWrapper = root.querySelector("[data-pdf-upload-results-wrapper]");
   const resultsList = root.querySelector("[data-pdf-upload-results]");
   const resultTemplate = root.querySelector("[data-pdf-upload-result-template]");
@@ -835,9 +836,26 @@ function initializePDFUpload() {
   let nextResultItemID = 1;
   let pendingNavigationTimer = null;
 
+  function setActivityVisible(visible) {
+    if (!(activityContainer instanceof HTMLElement)) {
+      return;
+    }
+    activityContainer.hidden = !visible;
+    activityContainer.classList.toggle("hidden", !visible);
+  }
+
+  function syncActivityVisibility() {
+    if (!(activityContainer instanceof HTMLElement)) {
+      return;
+    }
+    const hasNonIdleStatus = (statusText.dataset.tone || "idle") !== "idle";
+    setActivityVisible(uploadInFlight || resultItems.length > 0 || hasNonIdleStatus);
+  }
+
   function setStatus(message, tone = "idle") {
     statusText.textContent = message;
     statusText.dataset.tone = tone;
+    syncActivityVisibility();
   }
 
   function cancelPendingNavigation() {
@@ -898,6 +916,7 @@ function initializePDFUpload() {
       resultsList.replaceChildren();
       resultsWrapper.hidden = true;
       resultsWrapper.classList.add("hidden");
+      syncActivityVisibility();
       return;
     }
 
@@ -945,6 +964,7 @@ function initializePDFUpload() {
     resultsList.replaceChildren(...nodes);
     resultsWrapper.hidden = false;
     resultsWrapper.classList.remove("hidden");
+    syncActivityVisibility();
   }
 
   function setResultItems(items) {
@@ -1005,6 +1025,7 @@ function initializePDFUpload() {
     fileInput.disabled = isUploading;
     titleInput.disabled = isUploading;
     submitButton.disabled = isUploading || selectedFiles.length === 0;
+    syncActivityVisibility();
   }
 
   function setDragActive(isActive) {

@@ -87,7 +87,7 @@
     <input type="hidden" name="url" value="" data-url-intent-add-url />
   </form>
 
-  <% include!("_pdf_upload.stpl"); %>
+  <% include!("_pdf_drop_target.stpl"); %>
 
   <hr class="h-px border-0 bg-tertiary" />
 

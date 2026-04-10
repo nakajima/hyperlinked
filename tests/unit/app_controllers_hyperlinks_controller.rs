@@ -368,16 +368,17 @@ async fn html_pages_render() {
     assert!(index_body.contains("data-url-intent-add-form"));
     assert!(index_body.contains("data-url-intent-add-url"));
     assert!(index_body.contains("data-pdf-upload"));
+    assert!(index_body.contains("data-pdf-upload-mode=\"drop-only\""));
     assert!(index_body.contains("data-pdf-upload-form"));
     assert!(index_body.contains("action=\"/uploads\""));
-    assert!(index_body.contains("Choose PDFs"));
     assert!(index_body.contains("Drop PDFs to upload"));
-    assert!(index_body.contains("multiple"));
     assert!(index_body.contains("Upload progress"));
+    assert!(index_body.contains("data-pdf-upload-activity"));
     assert!(index_body.contains("data-pdf-upload-results"));
     assert!(index_body.contains("data-pdf-upload-result-template"));
     assert!(index_body.contains("View hyperlink"));
     assert!(index_body.contains("data-pdf-upload-overlay"));
+    assert!(!index_body.contains(">Upload PDFs</h3>"));
     assert!(index_body.contains("motion-safe:animate-pulse"));
     assert!(index_body.contains("<details class=\"group sm:hidden\">"));
     assert!(index_body.contains("<summary"));
@@ -407,6 +408,8 @@ async fn html_pages_render() {
     assert!(new_page_body.contains("action=\"/hyperlinks\" method=\"post\""));
     assert!(new_page_body.contains("data-pdf-upload"));
     assert!(new_page_body.contains("action=\"/uploads\""));
+    assert!(new_page_body.contains(">Upload PDFs</h3>"));
+    assert!(!new_page_body.contains("data-pdf-upload-mode=\"drop-only\""));
 
     let show = server.get(&format!("/hyperlinks/{}", created.id)).await;
     show.assert_status_ok();

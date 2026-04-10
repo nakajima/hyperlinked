@@ -1,0 +1,87 @@
+<section
+  data-pdf-upload
+  data-pdf-upload-mode="drop-only"
+  data-drag-active="false"
+  data-uploading="false"
+  aria-label="PDF drag and drop uploads"
+>
+  <form
+    action="/uploads"
+    method="post"
+    enctype="multipart/form-data"
+    data-pdf-upload-form
+  >
+    <input type="hidden" name="upload_type" value="pdf" />
+    <input type="hidden" name="title" value="" data-pdf-upload-title />
+
+    <div class="hidden" aria-hidden="true">
+      <div data-pdf-upload-dropzone data-drag-active="false" tabindex="-1">
+        <p data-pdf-upload-filename>No PDFs selected</p>
+        <button type="button" data-pdf-upload-choose>Choose PDFs</button>
+        <button type="submit" data-pdf-upload-submit disabled>Upload Selected PDFs</button>
+        <input
+          type="file"
+          name="file"
+          accept="application/pdf,.pdf"
+          multiple
+          data-pdf-upload-input
+        />
+      </div>
+    </div>
+
+    <div data-pdf-upload-activity class="hidden flex-col gap-3">
+      <p
+        data-pdf-upload-status
+        data-tone="idle"
+        aria-live="polite"
+        class="rounded-[0.4rem] border border-form-control-border bg-surface px-3 py-3 text-sm text-tertiary data-[tone=error]:text-alert data-[tone=success]:text-notice data-[tone=busy]:text-accent"
+      >
+        Drop one or more PDFs anywhere in this window to upload them right away.
+      </p>
+
+      <div data-pdf-upload-results-wrapper class="hidden flex-col gap-2">
+        <p class="text-sm text-secondary">Upload progress</p>
+        <ul data-pdf-upload-results class="flex flex-col gap-2" aria-live="polite"></ul>
+      </div>
+
+      <template data-pdf-upload-result-template>
+        <li class="flex items-start justify-between gap-3 rounded-[0.4rem] border border-form-control-border bg-form-control px-3 py-2">
+          <div class="min-w-0 flex-1">
+            <p class="truncate font-medium text-primary" data-pdf-upload-result-name></p>
+            <p class="mt-1 text-sm text-secondary" data-pdf-upload-result-message></p>
+            <a
+              href="#"
+              data-pdf-upload-result-link
+              hidden
+              class="mt-1 hidden text-sm text-accent no-underline hover:text-accent/80"
+            >
+              View hyperlink
+            </a>
+          </div>
+          <div class="shrink-0">
+            <span
+              data-pdf-upload-result-badge
+              data-state="selected"
+              class="inline-flex min-h-8 items-center rounded-[0.4rem] border border-form-control-border bg-surface px-2 py-1 text-xs font-medium uppercase tracking-tight text-secondary data-[state=uploading]:border-accent data-[state=uploading]:text-accent data-[state=success]:border-notice-border data-[state=success]:text-notice data-[state=error]:border-invalid data-[state=error]:text-alert"
+            >
+              Ready
+            </span>
+          </div>
+        </li>
+      </template>
+    </div>
+  </form>
+
+  <div
+    data-pdf-upload-overlay
+    data-visible="false"
+    hidden
+    aria-hidden="true"
+    class="pointer-events-none fixed inset-0 z-50 hidden items-center justify-center bg-page/80 p-4 backdrop-blur-sm data-[visible=true]:flex"
+  >
+    <div class="w-full max-w-xl rounded-[0.4rem] border border-accent bg-surface px-6 py-8 text-center shadow-lg">
+      <p class="text-lg font-semibold leading-7 tracking-tight">Drop PDFs to upload</p>
+      <p class="mt-2 text-sm text-secondary">Release anywhere in this window to add these PDFs as new hyperlinks.</p>
+    </div>
+  </div>
+</section>
