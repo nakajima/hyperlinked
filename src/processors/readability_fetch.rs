@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use dom_smoothie::Readability;
 use reqwest::{StatusCode, header::HeaderValue};
-use sea_orm::DatabaseConnection;
+use sea_orm::{ActiveValue::Set, DatabaseConnection};
 use serde::Serialize;
 use std::{
     any::Any,
@@ -12,7 +12,7 @@ use std::{
 use crate::{
     app::models::{
         hyperlink_artifact as hyperlink_artifact_model,
-        hyperlink_search_doc as hyperlink_search_doc_model,
+        hyperlink_search_doc as hyperlink_search_doc_model, hyperlink_title,
     },
     entity::{
         hyperlink,
@@ -55,6 +55,7 @@ trait PdfTextExtractor: Send + Sync {
 struct PdfExtraction {
     markdown: String,
     page_count: Option<usize>,
+    title: Option<String>,
 }
 
 struct RustPdfExtractor;
@@ -92,6 +93,8 @@ impl PdfTextExtractor for RustPdfExtractor {
             return Err("pdf extraction produced empty text".to_string());
         }
         Ok(PdfExtraction {
+            title: extract_pdf_metadata_title(payload)
+                .or_else(|| infer_pdf_title_from_markdown(&markdown)),
             markdown,
             page_count,
         })
@@ -276,6 +279,8 @@ impl PdfTextExtractor for MathpixPdfExtractor {
         let poll = self.poll_until_complete(&submit.pdf_id).await?;
         let markdown = self.fetch_markdown(&submit.pdf_id).await?;
         Ok(PdfExtraction {
+            title: extract_pdf_metadata_title(payload)
+                .or_else(|| infer_pdf_title_from_markdown(&markdown)),
             markdown,
             page_count: poll.page_count,
         })
@@ -398,7 +403,9 @@ impl Processor for ReadabilityFetcher {
                     }
                 };
 
-                extract_from_html(&html)
+                extract_from_html(&html).map(|(text_payload, meta_payload)| {
+                    (text_payload, meta_payload, None)
+                })
             }
             ReadabilitySource::Pdf(pdf_source) => {
                 let pdf_payload = hyperlink_artifact_model::load_payload(&pdf_source)
@@ -415,7 +422,7 @@ impl Processor for ReadabilityFetcher {
             }
         };
 
-        let (text_payload, meta_payload) = match extraction {
+        let (text_payload, meta_payload, readability_title) = match extraction {
             Ok(payloads) => payloads,
             Err((stage, message)) => {
                 let error_artifact = persist_readability_error(
@@ -444,6 +451,17 @@ impl Processor for ReadabilityFetcher {
                 )));
             }
         };
+
+        if let Some(readability_title) = readability_title {
+            let cleaned_title = hyperlink_title::strip_site_affixes(
+                readability_title.as_str(),
+                hyperlink.url.as_ref(),
+                hyperlink.raw_url.as_ref(),
+            );
+            if !cleaned_title.is_empty() && cleaned_title != hyperlink.title.as_ref().as_str() {
+                hyperlink.title = Set(cleaned_title);
+            }
+        }
 
         let text_artifact = hyperlink_artifact_model::insert(
             connection,
@@ -590,7 +608,7 @@ async fn extract_from_pdf_with_fallback(
     hyperlink_title: &str,
     source_url: &str,
     payload: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), (String, String)> {
+) -> Result<(Vec<u8>, Vec<u8>, Option<String>), (String, String)> {
     let Some(primary_extractor) = primary_extractor else {
         return extract_from_pdf(fallback_extractor, hyperlink_title, source_url, payload).await;
     };
@@ -624,16 +642,25 @@ async fn extract_from_pdf(
     hyperlink_title: &str,
     source_url: &str,
     payload: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), (String, String)> {
+) -> Result<(Vec<u8>, Vec<u8>, Option<String>), (String, String)> {
     let extraction = extractor
         .extract(payload)
         .await
         .map_err(|error| ("pdf_extract".to_string(), error))?;
 
+    let extracted_title = extraction
+        .title
+        .as_deref()
+        .and_then(normalize_readability_title);
+    let metadata_title = extracted_title
+        .as_deref()
+        .unwrap_or(hyperlink_title)
+        .to_string();
+
     let text_payload = extraction.markdown.clone().into_bytes();
     let meta_payload = serde_json::to_vec_pretty(&ReadableMetadataArtifact {
         source_format: "pdf".to_string(),
-        title: hyperlink_title.to_string(),
+        title: metadata_title,
         byline: None,
         excerpt: None,
         site_name: None,
@@ -656,7 +683,7 @@ async fn extract_from_pdf(
         )
     })?;
 
-    Ok((text_payload, meta_payload))
+    Ok((text_payload, meta_payload, extracted_title))
 }
 
 async fn parse_mathpix_submit_response(
@@ -853,6 +880,52 @@ fn estimate_pdf_page_count(text: &str) -> Option<usize> {
     }
     let separators = text.chars().filter(|ch| *ch == '\u{000C}').count();
     Some(separators + 1)
+}
+
+fn extract_pdf_metadata_title(payload: &[u8]) -> Option<String> {
+    let document = pdf_extract::Document::load_mem(payload).ok()?;
+    let info = document.trailer.get(b"Info").ok()?;
+    let info = match info {
+        pdf_extract::Object::Reference(id) => document.get_object(*id).ok()?,
+        other => other,
+    };
+    let info = info.as_dict().ok()?;
+    let title = info.get(b"Title").ok()?;
+    let decoded = pdf_extract::decode_text_string(title).ok()?;
+    normalize_readability_title(&decoded)
+}
+
+fn infer_pdf_title_from_markdown(markdown: &str) -> Option<String> {
+    markdown.lines().take(12).find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed == "---" {
+            return None;
+        }
+
+        let candidate = trimmed
+            .trim_start_matches('#')
+            .trim()
+            .trim_matches(|ch: char| matches!(ch, '-' | '•' | '*' | '·' | '—' | '–' | ':' | '"' | '\'' | '“' | '”'))
+            .trim();
+        normalize_readability_title(candidate)
+    })
+}
+
+fn normalize_readability_title(raw: &str) -> Option<String> {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = normalized.trim();
+    if trimmed.len() < 2 {
+        return None;
+    }
+
+    if trimmed
+        .chars()
+        .all(|ch| !ch.is_alphanumeric() || ch.is_ascii_digit())
+    {
+        return None;
+    }
+
+    Some(trimmed.chars().take(240).collect())
 }
 
 fn now_utc() -> sea_orm::entity::prelude::DateTime {

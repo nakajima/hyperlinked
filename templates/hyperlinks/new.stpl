@@ -1,9 +1,17 @@
 <section aria-labelledby="new-link-heading" class="flex flex-col gap-4">
-  <h2 id="new-link-heading" class="text-2xl font-semibold leading-8 tracking-tight">Add Link</h2>
-  <% let action = "/hyperlinks"; %>
-  <% let submit_label = "Create"; %>
-  <% let title = self.title; %>
-  <% let url = self.url; %>
-  <% let is_new_record = true; %>
-  <% include!("_form.stpl"); %>
+  <h2 id="new-link-heading" class="text-2xl font-semibold leading-8 tracking-tight">Add Link or Upload PDF</h2>
+
+  <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+    <div class="flex flex-col gap-3">
+      <h3 class="text-lg font-semibold leading-7 tracking-tight">Add Link</h3>
+      <% let action = "/hyperlinks"; %>
+      <% let submit_label = "Create"; %>
+      <% let title = self.title; %>
+      <% let url = self.url; %>
+      <% let is_new_record = true; %>
+      <% include!("_form.stpl"); %>
+    </div>
+
+    <% include!("_pdf_upload.stpl"); %>
+  </div>
 </section>

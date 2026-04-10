@@ -789,7 +789,582 @@ document.addEventListener(
   true,
 );
 
+function initializePDFUpload() {
+  const root = document.querySelector("[data-pdf-upload]");
+  if (!(root instanceof HTMLElement)) {
+    return;
+  }
+
+  const form = root.querySelector("[data-pdf-upload-form]");
+  const titleInput = root.querySelector("[data-pdf-upload-title]");
+  const dropzone = root.querySelector("[data-pdf-upload-dropzone]");
+  const filenameText = root.querySelector("[data-pdf-upload-filename]");
+  const statusText = root.querySelector("[data-pdf-upload-status]");
+  const chooseButton = root.querySelector("[data-pdf-upload-choose]");
+  const submitButton = root.querySelector("[data-pdf-upload-submit]");
+  const fileInput = root.querySelector("[data-pdf-upload-input]");
+  const overlay = root.querySelector("[data-pdf-upload-overlay]");
+  const resultsWrapper = root.querySelector("[data-pdf-upload-results-wrapper]");
+  const resultsList = root.querySelector("[data-pdf-upload-results]");
+  const resultTemplate = root.querySelector("[data-pdf-upload-result-template]");
+
+  if (
+    !(form instanceof HTMLFormElement) ||
+    !(titleInput instanceof HTMLInputElement) ||
+    !(dropzone instanceof HTMLElement) ||
+    !(filenameText instanceof HTMLElement) ||
+    !(statusText instanceof HTMLElement) ||
+    !(chooseButton instanceof HTMLButtonElement) ||
+    !(submitButton instanceof HTMLButtonElement) ||
+    !(fileInput instanceof HTMLInputElement) ||
+    !(overlay instanceof HTMLElement) ||
+    !(resultsWrapper instanceof HTMLElement) ||
+    !(resultsList instanceof HTMLElement) ||
+    !(resultTemplate instanceof HTMLTemplateElement)
+  ) {
+    return;
+  }
+
+  const defaultStatusMessage = "Drop one or more PDFs anywhere in this window to upload them right away.";
+  const defaultFilenameMessage = "No PDFs selected";
+  const MAX_PARALLEL_PDF_UPLOADS = 3;
+  let selectedFiles = [];
+  let resultItems = [];
+  let uploadInFlight = false;
+  let windowDragDepth = 0;
+  let nextResultItemID = 1;
+  let pendingNavigationTimer = null;
+
+  function setStatus(message, tone = "idle") {
+    statusText.textContent = message;
+    statusText.dataset.tone = tone;
+  }
+
+  function cancelPendingNavigation() {
+    if (pendingNavigationTimer !== null) {
+      window.clearTimeout(pendingNavigationTimer);
+      pendingNavigationTimer = null;
+    }
+  }
+
+  function scheduleNavigation(callback, delayMs) {
+    cancelPendingNavigation();
+    pendingNavigationTimer = window.setTimeout(() => {
+      pendingNavigationTimer = null;
+      callback();
+    }, delayMs);
+  }
+
+  function describeSelectedFiles(files) {
+    if (!Array.isArray(files) || files.length === 0) {
+      return defaultFilenameMessage;
+    }
+
+    if (files.length === 1) {
+      return files[0]?.name?.trim() || "document.pdf";
+    }
+
+    const firstName = files[0]?.name?.trim();
+    if (firstName) {
+      return `${firstName} + ${files.length - 1} more PDF${files.length === 2 ? "" : "s"}`;
+    }
+
+    return `${files.length} PDFs selected`;
+  }
+
+  function setSelectedFiles(files) {
+    selectedFiles = Array.isArray(files)
+      ? files.filter((file) => file instanceof File)
+      : [];
+    filenameText.textContent = describeSelectedFiles(selectedFiles);
+    submitButton.disabled = uploadInFlight || selectedFiles.length === 0;
+  }
+
+  function badgeLabelForState(state) {
+    switch (state) {
+      case "uploading":
+        return "Uploading";
+      case "success":
+        return "Uploaded";
+      case "error":
+        return "Failed";
+      default:
+        return "Ready";
+    }
+  }
+
+  function renderResults() {
+    if (resultItems.length === 0) {
+      resultsList.replaceChildren();
+      resultsWrapper.hidden = true;
+      resultsWrapper.classList.add("hidden");
+      return;
+    }
+
+    const nodes = [];
+    for (const item of resultItems) {
+      const row = resultTemplate.content.firstElementChild?.cloneNode(true);
+      if (!(row instanceof HTMLElement)) {
+        continue;
+      }
+
+      const nameElement = row.querySelector("[data-pdf-upload-result-name]");
+      const messageElement = row.querySelector("[data-pdf-upload-result-message]");
+      const badgeElement = row.querySelector("[data-pdf-upload-result-badge]");
+      const linkElement = row.querySelector("[data-pdf-upload-result-link]");
+
+      if (nameElement instanceof HTMLElement) {
+        const fileName = item.file?.name?.trim();
+        nameElement.textContent = fileName || "document.pdf";
+      }
+
+      if (messageElement instanceof HTMLElement) {
+        messageElement.textContent = item.message || "";
+      }
+
+      if (badgeElement instanceof HTMLElement) {
+        badgeElement.dataset.state = item.state || "selected";
+        badgeElement.textContent = badgeLabelForState(item.state);
+      }
+
+      if (linkElement instanceof HTMLAnchorElement) {
+        if (Number.isFinite(item.hyperlinkID) && item.hyperlinkID > 0) {
+          linkElement.href = `/hyperlinks/${encodeURIComponent(String(item.hyperlinkID))}`;
+          linkElement.hidden = false;
+          linkElement.classList.remove("hidden");
+        } else {
+          linkElement.hidden = true;
+          linkElement.classList.add("hidden");
+          linkElement.removeAttribute("href");
+        }
+      }
+
+      nodes.push(row);
+    }
+
+    resultsList.replaceChildren(...nodes);
+    resultsWrapper.hidden = false;
+    resultsWrapper.classList.remove("hidden");
+  }
+
+  function setResultItems(items) {
+    resultItems = Array.isArray(items) ? items : [];
+    renderResults();
+  }
+
+  function createResultItems(files) {
+    return files.map((file) => ({
+      id: nextResultItemID++,
+      file,
+      state: "selected",
+      message: "Ready to upload.",
+      hyperlinkID: null,
+    }));
+  }
+
+  function uploadProgressCounts(items) {
+    const counts = {
+      selected: 0,
+      uploading: 0,
+      success: 0,
+      error: 0,
+    };
+
+    for (const item of items) {
+      if (item?.state === "uploading") {
+        counts.uploading += 1;
+      } else if (item?.state === "success") {
+        counts.success += 1;
+      } else if (item?.state === "error") {
+        counts.error += 1;
+      } else {
+        counts.selected += 1;
+      }
+    }
+
+    return counts;
+  }
+
+  function setBusyUploadStatus(items) {
+    const counts = uploadProgressCounts(items);
+    const completed = counts.success + counts.error;
+    const parts = [`${completed}/${items.length} finished`];
+    if (counts.uploading > 0) {
+      parts.push(`${counts.uploading} active`);
+    }
+    if (counts.error > 0) {
+      parts.push(`${counts.error} failed`);
+    }
+    setStatus(`Uploading PDFs (${parts.join(", ")})…`, "busy");
+  }
+
+  function setUploadState(isUploading) {
+    uploadInFlight = isUploading;
+    root.dataset.uploading = isUploading ? "true" : "false";
+    chooseButton.disabled = isUploading;
+    fileInput.disabled = isUploading;
+    titleInput.disabled = isUploading;
+    submitButton.disabled = isUploading || selectedFiles.length === 0;
+  }
+
+  function setDragActive(isActive) {
+    const value = isActive ? "true" : "false";
+    root.dataset.dragActive = value;
+    dropzone.dataset.dragActive = value;
+    overlay.dataset.visible = value;
+    overlay.hidden = !isActive;
+    overlay.setAttribute("aria-hidden", isActive ? "false" : "true");
+  }
+
+  function resetWindowDragState() {
+    windowDragDepth = 0;
+    setDragActive(false);
+  }
+
+  function dataTransferHasFiles(dataTransfer) {
+    if (!dataTransfer) {
+      return false;
+    }
+    if (dataTransfer.files instanceof FileList && dataTransfer.files.length > 0) {
+      return true;
+    }
+    return Array.from(dataTransfer.types || []).includes("Files");
+  }
+
+  function isPDFFile(file) {
+    if (!(file instanceof File)) {
+      return false;
+    }
+    const type = typeof file.type === "string" ? file.type.toLowerCase() : "";
+    const name = typeof file.name === "string" ? file.name.toLowerCase() : "";
+    return type === "application/pdf" || name.endsWith(".pdf");
+  }
+
+  async function readUploadError(response, fallbackMessage) {
+    try {
+      const text = await response.text();
+      if (!text) {
+        return fallbackMessage;
+      }
+
+      try {
+        const payload = JSON.parse(text);
+        if (payload && typeof payload.error === "string" && payload.error.trim().length > 0) {
+          return payload.error.trim();
+        }
+        if (payload && typeof payload.message === "string" && payload.message.trim().length > 0) {
+          return payload.message.trim();
+        }
+      } catch (_) {}
+
+      const trimmed = text.trim();
+      return trimmed || fallbackMessage;
+    } catch (_) {
+      return fallbackMessage;
+    }
+  }
+
+  async function uploadSinglePDF(file, title) {
+    if (!isPDFFile(file)) {
+      throw new Error("Only PDF files can be uploaded.");
+    }
+
+    const filename = file.name && file.name.trim().length > 0 ? file.name.trim() : "document.pdf";
+    const formData = new FormData();
+    formData.append("upload_type", "pdf");
+    if (title) {
+      formData.append("title", title);
+    }
+    formData.append("filename", filename);
+    formData.append("file", file, filename);
+
+    let response;
+    try {
+      response = await fetch(form.action || "/uploads", {
+        method: "POST",
+        body: formData,
+        credentials: "same-origin",
+      });
+    } catch (error) {
+      const message = error instanceof Error && error.message
+        ? error.message
+        : "network error";
+      throw new Error(`Upload failed for ${filename}: ${message}`);
+    }
+
+    if (!response.ok) {
+      const message = await readUploadError(response, `Upload failed for ${filename}.`);
+      throw new Error(message);
+    }
+
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (_) {
+      throw new Error(`Upload succeeded for ${filename}, but the server response was invalid.`);
+    }
+
+    const hyperlinkID = Number(payload?.id);
+    if (!Number.isFinite(hyperlinkID) || hyperlinkID < 1) {
+      throw new Error(`Upload succeeded for ${filename}, but the hyperlink could not be opened.`);
+    }
+
+    return hyperlinkID;
+  }
+
+  async function uploadResultItems(items) {
+    if (uploadInFlight) {
+      setStatus("A PDF upload is already in progress.", "busy");
+      return;
+    }
+
+    cancelPendingNavigation();
+
+    const pdfItems = Array.isArray(items)
+      ? items.filter((item) => item?.file instanceof File && isPDFFile(item.file))
+      : [];
+
+    if (pdfItems.length === 0) {
+      setSelectedFiles([]);
+      setResultItems([]);
+      setStatus("Only PDF files can be uploaded.", "error");
+      return;
+    }
+
+    setSelectedFiles(pdfItems.map((item) => item.file));
+    setResultItems(pdfItems);
+    setUploadState(true);
+    setBusyUploadStatus(pdfItems);
+
+    const createdIDs = [];
+    const failedItems = [];
+    const sharedTitle = pdfItems.length === 1 ? titleInput.value.trim() : "";
+    let nextIndex = 0;
+
+    async function runUploadWorker() {
+      while (nextIndex < pdfItems.length) {
+        const item = pdfItems[nextIndex];
+        nextIndex += 1;
+
+        const filename = item.file?.name?.trim() || "document.pdf";
+        item.state = "uploading";
+        item.hyperlinkID = null;
+        item.message = "Uploading…";
+        renderResults();
+        setBusyUploadStatus(pdfItems);
+
+        try {
+          const hyperlinkID = await uploadSinglePDF(item.file, sharedTitle);
+          item.state = "success";
+          item.hyperlinkID = hyperlinkID;
+          item.message = "Uploaded successfully.";
+          createdIDs.push(hyperlinkID);
+        } catch (error) {
+          item.state = "error";
+          item.hyperlinkID = null;
+          item.message = error instanceof Error && error.message
+            ? error.message
+            : `Upload failed for ${filename}.`;
+          failedItems.push(item);
+        }
+
+        renderResults();
+        if (uploadProgressCounts(pdfItems).selected + uploadProgressCounts(pdfItems).uploading > 0) {
+          setBusyUploadStatus(pdfItems);
+        }
+      }
+    }
+
+    const parallelism = Math.min(MAX_PARALLEL_PDF_UPLOADS, pdfItems.length);
+    await Promise.all(
+      Array.from({ length: parallelism }, () => runUploadWorker())
+    );
+
+    setUploadState(false);
+
+    if (failedItems.length === 0) {
+      setSelectedFiles([]);
+
+      if (createdIDs.length === 1) {
+        setStatus("Upload complete. Opening hyperlink…", "success");
+        scheduleNavigation(() => {
+          window.location.assign(`/hyperlinks/${encodeURIComponent(String(createdIDs[0]))}`);
+        }, 350);
+        return;
+      }
+
+      setStatus(`Uploaded ${createdIDs.length} PDFs with up to ${parallelism} uploads in parallel. Refreshing list…`, "success");
+      scheduleNavigation(() => {
+        if (window.location.pathname === "/hyperlinks" || window.location.pathname === "/hyperlinks/") {
+          window.location.reload();
+        } else {
+          window.location.assign("/hyperlinks");
+        }
+      }, 900);
+      return;
+    }
+
+    setSelectedFiles(failedItems.map((item) => item.file));
+
+    const messageParts = [];
+    if (createdIDs.length > 0) {
+      messageParts.push(`Uploaded ${createdIDs.length} PDF${createdIDs.length === 1 ? "" : "s"}.`);
+    }
+    messageParts.push(`Failed to upload ${failedItems.length} PDF${failedItems.length === 1 ? "" : "s"}.`);
+    const firstFailureMessage = failedItems[0]?.message?.trim();
+    if (firstFailureMessage) {
+      messageParts.push(firstFailureMessage);
+    }
+    if (createdIDs.length > 0) {
+      messageParts.push("Successful uploads include links below.");
+    }
+    setStatus(messageParts.join(" "), "error");
+  }
+
+  function handleCandidateFiles(files, source) {
+    if (uploadInFlight) {
+      setStatus("A PDF upload is already in progress.", "busy");
+      return;
+    }
+
+    cancelPendingNavigation();
+
+    const pdfFiles = Array.isArray(files)
+      ? files.filter((file) => file instanceof File && isPDFFile(file))
+      : [];
+
+    if (pdfFiles.length === 0) {
+      setSelectedFiles([]);
+      setResultItems([]);
+      setStatus(source === "picker" ? defaultStatusMessage : "Only PDF files can be uploaded.", source === "picker" ? "idle" : "error");
+      return;
+    }
+
+    const items = createResultItems(pdfFiles);
+    setSelectedFiles(pdfFiles);
+    setResultItems(items);
+
+    if (source === "drop") {
+      void uploadResultItems(items);
+      return;
+    }
+
+    if (pdfFiles.length === 1) {
+      setStatus(`Ready to upload ${pdfFiles[0].name}.`, "idle");
+      return;
+    }
+
+    const titleWarning = titleInput.value.trim()
+      ? " The title field will be ignored for multiple files."
+      : "";
+    setStatus(`Ready to upload ${pdfFiles.length} PDFs.${titleWarning}`, "idle");
+  }
+
+  chooseButton.addEventListener("click", () => {
+    if (uploadInFlight) {
+      return;
+    }
+    fileInput.click();
+  });
+
+  dropzone.addEventListener("click", (event) => {
+    if (uploadInFlight) {
+      return;
+    }
+    if (event.target instanceof Element && event.target.closest("button, input, a")) {
+      return;
+    }
+    fileInput.click();
+  });
+
+  dropzone.addEventListener("keydown", (event) => {
+    if (uploadInFlight) {
+      return;
+    }
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault();
+    fileInput.click();
+  });
+
+  fileInput.addEventListener("change", () => {
+    const files = Array.from(fileInput.files || []);
+    fileInput.value = "";
+    handleCandidateFiles(files, "picker");
+  });
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (selectedFiles.length === 0) {
+      setStatus("Choose at least one PDF before uploading.", "error");
+      return;
+    }
+    void uploadResultItems(createResultItems(selectedFiles));
+  });
+
+  document.addEventListener("dragenter", (event) => {
+    if (!(event instanceof DragEvent) || !dataTransferHasFiles(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    windowDragDepth += 1;
+    if (!uploadInFlight) {
+      setDragActive(true);
+      setStatus("Drop one or more PDFs anywhere in this window to upload them.", "idle");
+    }
+  });
+
+  document.addEventListener("dragover", (event) => {
+    if (!(event instanceof DragEvent) || !dataTransferHasFiles(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = uploadInFlight ? "none" : "copy";
+    }
+    if (!uploadInFlight) {
+      setDragActive(true);
+    }
+  });
+
+  document.addEventListener("dragleave", (event) => {
+    if (!(event instanceof DragEvent)) {
+      return;
+    }
+    if (windowDragDepth === 0 && !dataTransferHasFiles(event.dataTransfer)) {
+      return;
+    }
+    windowDragDepth = Math.max(0, windowDragDepth - 1);
+    if (windowDragDepth === 0) {
+      setDragActive(false);
+      if (!uploadInFlight && selectedFiles.length === 0 && resultItems.length === 0) {
+        setStatus(defaultStatusMessage, "idle");
+      }
+    }
+  });
+
+  document.addEventListener("drop", (event) => {
+    if (!(event instanceof DragEvent) || !dataTransferHasFiles(event.dataTransfer)) {
+      return;
+    }
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer?.files || []);
+    resetWindowDragState();
+    handleCandidateFiles(files, "drop");
+  });
+
+  window.addEventListener("blur", resetWindowDragState);
+  window.addEventListener("dragend", resetWindowDragState);
+
+  setSelectedFiles([]);
+  setResultItems([]);
+  setUploadState(false);
+  setStatus(defaultStatusMessage, "idle");
+}
+
 initializeUrlIntent();
+initializePDFUpload();
 initializeLlmModelDiscovery();
 
 function updateQueuePendingBadge(pending) {

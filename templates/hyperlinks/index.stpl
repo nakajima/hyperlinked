@@ -87,6 +87,8 @@
     <input type="hidden" name="url" value="" data-url-intent-add-url />
   </form>
 
+  <% include!("_pdf_upload.stpl"); %>
+
   <hr class="h-px border-0 bg-tertiary" />
 
   <% if self.has_free_text() { %>

@@ -122,6 +122,10 @@ pub async fn process_job(
         HyperlinkProcessingJobKind::Readability => {
             match pipeline.process_readability(connection).await {
                 Ok(_) => {
+                    if hyperlink_active_model.is_changed() {
+                        hyperlink_active_model.updated_at = Set(now_utc());
+                        hyperlink_active_model.update(connection).await?;
+                    }
                     mark_job_succeeded(connection, running_job.id).await?;
                     if should_enqueue_sublink_discovery(hyperlink_discovery_depth) {
                         enqueue_sublink_discovery_job(connection, sender, running_job.hyperlink_id)
