@@ -508,43 +508,21 @@ async fn enqueue_processing_jobs(
         .await
         .map_err(|err| format!("failed to load artifact collection settings: {err}"))?;
 
-    if collection_settings.collect_og {
-        let result = artifact_job::resolve_and_enqueue_for_job_kind_with_settings(
-            connection,
-            hyperlink_id,
-            HyperlinkProcessingJobKind::Og,
-            ArtifactFetchMode::RefetchTarget,
-            collection_settings,
-            Some(queue),
-        )
-        .await
-        .map_err(|err| format!("failed to resolve og processing job dependencies: {err}"))?;
-        if matches!(result, ArtifactJobResolveResult::UnsupportedJobKind { .. }) {
-            return Err(
-                "failed to enqueue og processing job: unsupported og artifact job kind".to_string(),
-            );
-        }
-    }
-
-    if collection_settings.collect_readability {
-        let result = artifact_job::resolve_and_enqueue_for_job_kind_with_settings(
-            connection,
-            hyperlink_id,
-            HyperlinkProcessingJobKind::Readability,
-            ArtifactFetchMode::RefetchTarget,
-            collection_settings,
-            Some(queue),
-        )
-        .await
-        .map_err(|err| {
-            format!("failed to resolve readability processing job dependencies: {err}")
-        })?;
-        if matches!(result, ArtifactJobResolveResult::UnsupportedJobKind { .. }) {
-            return Err(
-                "failed to enqueue readability processing job: unsupported readability artifact job kind"
-                    .to_string(),
-            );
-        }
+    let result = artifact_job::resolve_and_enqueue_for_job_kind_with_settings(
+        connection,
+        hyperlink_id,
+        HyperlinkProcessingJobKind::Snapshot,
+        ArtifactFetchMode::RefetchTarget,
+        collection_settings,
+        Some(queue),
+    )
+    .await
+    .map_err(|err| format!("failed to resolve snapshot processing job dependencies: {err}"))?;
+    if matches!(result, ArtifactJobResolveResult::UnsupportedJobKind { .. }) {
+        return Err(
+            "failed to enqueue snapshot processing job: unsupported snapshot artifact job kind"
+                .to_string(),
+        );
     }
 
     Ok(())

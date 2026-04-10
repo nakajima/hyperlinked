@@ -9,6 +9,8 @@ use axum::{
 use sea_orm::EntityTrait;
 use std::{collections::HashMap, sync::Arc};
 
+use crate::entity::hyperlink_processing_job::{self, HyperlinkProcessingJobKind};
+
 #[derive(Clone)]
 struct MockPaperlessState {
     pages: Arc<Vec<Vec<Value>>>,
@@ -336,6 +338,54 @@ async fn imports_pdf_and_stores_metadata_artifact() {
             .iter()
             .any(|row| row.kind == HyperlinkArtifactKind::PaperlessMetadata)
     );
+}
+
+#[tokio::test]
+async fn imports_pdf_with_processing_queue_enqueues_snapshot_job() {
+    let connection = new_connection().await;
+    let processing_queue = crate::queue::ProcessingQueue::connect(connection.clone())
+        .await
+        .expect("processing queue should initialize");
+
+    let pages = vec![vec![json!({
+        "id": 102,
+        "title": "Queued Import",
+        "created": "2026-01-14T20:11:03Z",
+        "original_file_name": "queued-import.pdf"
+    })]];
+    let mut downloads = HashMap::new();
+    downloads.insert(
+        102,
+        (b"%PDF-1.7\n%queued".to_vec(), "application/pdf".to_string()),
+    );
+
+    let (base_url, server_task) = start_mock_paperless(pages, downloads).await;
+
+    let report = import_from_api(
+        &connection,
+        ImportOptions {
+            base_url,
+            api_token: "paperless-token".to_string(),
+            since: None,
+            page_size: Some(50),
+            dry_run: false,
+        },
+        Some(&processing_queue),
+    )
+    .await
+    .expect("paperless import should succeed");
+
+    server_task.abort();
+
+    assert_eq!(report.summary.imported, 1);
+
+    let jobs = hyperlink_processing_job::Entity::find()
+        .all(&connection)
+        .await
+        .expect("jobs should load");
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].hyperlink_id, 1);
+    assert_eq!(jobs[0].kind, HyperlinkProcessingJobKind::Snapshot);
 }
 
 #[tokio::test]

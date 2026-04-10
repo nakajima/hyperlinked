@@ -332,39 +332,20 @@ async fn enqueue_upload_processing_jobs(state: &Context, hyperlink_id: i32) -> R
         .await
         .map_err(|err| format!("failed to load artifact collection settings: {err}"))?;
 
-    if collection_settings.collect_og {
-        let result = artifact_job::resolve_and_enqueue_for_job_kind_with_settings(
-            &state.connection,
-            hyperlink_id,
-            HyperlinkProcessingJobKind::Og,
-            ArtifactFetchMode::RefetchTarget,
-            collection_settings,
-            Some(queue),
-        )
-        .await
-        .map_err(|err| format!("failed to resolve og job dependencies: {err}"))?;
-        if matches!(result, ArtifactJobResolveResult::UnsupportedJobKind { .. }) {
-            return Err("failed to enqueue og job: unsupported og artifact job kind".to_string());
-        }
-    }
-
-    if collection_settings.collect_readability {
-        let result = artifact_job::resolve_and_enqueue_for_job_kind_with_settings(
-            &state.connection,
-            hyperlink_id,
-            HyperlinkProcessingJobKind::Readability,
-            ArtifactFetchMode::RefetchTarget,
-            collection_settings,
-            Some(queue),
-        )
-        .await
-        .map_err(|err| format!("failed to resolve readability job dependencies: {err}"))?;
-        if matches!(result, ArtifactJobResolveResult::UnsupportedJobKind { .. }) {
-            return Err(
-                "failed to enqueue readability job: unsupported readability artifact job kind"
-                    .to_string(),
-            );
-        }
+    let result = artifact_job::resolve_and_enqueue_for_job_kind_with_settings(
+        &state.connection,
+        hyperlink_id,
+        HyperlinkProcessingJobKind::Snapshot,
+        ArtifactFetchMode::RefetchTarget,
+        collection_settings,
+        Some(queue),
+    )
+    .await
+    .map_err(|err| format!("failed to resolve snapshot job dependencies: {err}"))?;
+    if matches!(result, ArtifactJobResolveResult::UnsupportedJobKind { .. }) {
+        return Err(
+            "failed to enqueue snapshot job: unsupported snapshot artifact job kind".to_string(),
+        );
     }
 
     Ok(())
