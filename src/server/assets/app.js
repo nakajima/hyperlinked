@@ -829,6 +829,7 @@ function initializePDFUpload() {
   const defaultStatusMessage = "Drop one or more PDFs anywhere in this window to upload them right away.";
   const defaultFilenameMessage = "No PDFs selected";
   const MAX_PARALLEL_PDF_UPLOADS = 3;
+  const PDF_UPLOAD_MAX_ATTEMPTS = 3;
   let selectedFiles = [];
   let resultItems = [];
   let uploadInFlight = false;
@@ -1061,76 +1062,107 @@ function initializePDFUpload() {
     return type === "application/pdf" || name.endsWith(".pdf");
   }
 
+  function sleep(delayMs) {
+    return new Promise((resolve) => {
+      window.setTimeout(resolve, delayMs);
+    });
+  }
+
+  function isRetryableUploadStatus(status) {
+    return status === 408 || status === 425 || status === 429 || status >= 500;
+  }
+
   async function readUploadError(response, fallbackMessage) {
+    const statusPrefix = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+
     try {
       const text = await response.text();
       if (!text) {
-        return fallbackMessage;
+        return `${statusPrefix}: ${fallbackMessage}`;
       }
 
       try {
         const payload = JSON.parse(text);
         if (payload && typeof payload.error === "string" && payload.error.trim().length > 0) {
-          return payload.error.trim();
+          return `${statusPrefix}: ${payload.error.trim()}`;
         }
         if (payload && typeof payload.message === "string" && payload.message.trim().length > 0) {
-          return payload.message.trim();
+          return `${statusPrefix}: ${payload.message.trim()}`;
         }
       } catch (_) {}
 
       const trimmed = text.trim();
-      return trimmed || fallbackMessage;
+      return trimmed ? `${statusPrefix}: ${trimmed}` : `${statusPrefix}: ${fallbackMessage}`;
     } catch (_) {
-      return fallbackMessage;
+      return `${statusPrefix}: ${fallbackMessage}`;
     }
   }
 
-  async function uploadSinglePDF(file, title) {
+  async function uploadSinglePDF(file, title, onRetryableFailure) {
     if (!isPDFFile(file)) {
       throw new Error("Only PDF files can be uploaded.");
     }
 
     const filename = file.name && file.name.trim().length > 0 ? file.name.trim() : "document.pdf";
-    const formData = new FormData();
-    formData.append("upload_type", "pdf");
-    if (title) {
-      formData.append("title", title);
-    }
-    formData.append("filename", filename);
-    formData.append("file", file, filename);
 
-    let response;
-    try {
-      response = await fetch(form.action || "/uploads", {
-        method: "POST",
-        body: formData,
-        credentials: "same-origin",
-      });
-    } catch (error) {
-      const message = error instanceof Error && error.message
-        ? error.message
-        : "network error";
-      throw new Error(`Upload failed for ${filename}: ${message}`);
+    for (let attempt = 1; attempt <= PDF_UPLOAD_MAX_ATTEMPTS; attempt += 1) {
+      const formData = new FormData();
+      formData.append("upload_type", "pdf");
+      if (title) {
+        formData.append("title", title);
+      }
+      formData.append("filename", filename);
+      formData.append("file", file, filename);
+
+      let response;
+      try {
+        response = await fetch(form.action || "/uploads", {
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+        });
+      } catch (error) {
+        const message = error instanceof Error && error.message
+          ? error.message
+          : "network error";
+        if (attempt < PDF_UPLOAD_MAX_ATTEMPTS) {
+          onRetryableFailure?.(
+            `Network error while uploading ${filename}. Retrying (${attempt + 1}/${PDF_UPLOAD_MAX_ATTEMPTS})…`
+          );
+          await sleep(300 * attempt);
+          continue;
+        }
+        throw new Error(`Upload failed for ${filename}: network error (${message})`);
+      }
+
+      if (!response.ok) {
+        const message = await readUploadError(response, `Upload failed for ${filename}.`);
+        if (isRetryableUploadStatus(response.status) && attempt < PDF_UPLOAD_MAX_ATTEMPTS) {
+          onRetryableFailure?.(
+            `${message}. Retrying (${attempt + 1}/${PDF_UPLOAD_MAX_ATTEMPTS})…`
+          );
+          await sleep(300 * attempt);
+          continue;
+        }
+        throw new Error(message);
+      }
+
+      let payload;
+      try {
+        payload = await response.json();
+      } catch (_) {
+        throw new Error(`Upload succeeded for ${filename}, but the server response was invalid.`);
+      }
+
+      const hyperlinkID = Number(payload?.id);
+      if (!Number.isFinite(hyperlinkID) || hyperlinkID < 1) {
+        throw new Error(`Upload succeeded for ${filename}, but the hyperlink could not be opened.`);
+      }
+
+      return hyperlinkID;
     }
 
-    if (!response.ok) {
-      const message = await readUploadError(response, `Upload failed for ${filename}.`);
-      throw new Error(message);
-    }
-
-    let payload;
-    try {
-      payload = await response.json();
-    } catch (_) {
-      throw new Error(`Upload succeeded for ${filename}, but the server response was invalid.`);
-    }
-
-    const hyperlinkID = Number(payload?.id);
-    if (!Number.isFinite(hyperlinkID) || hyperlinkID < 1) {
-      throw new Error(`Upload succeeded for ${filename}, but the hyperlink could not be opened.`);
-    }
-
-    return hyperlinkID;
+    throw new Error(`Upload failed for ${filename}.`);
   }
 
   async function uploadResultItems(items) {
@@ -1175,7 +1207,11 @@ function initializePDFUpload() {
         setBusyUploadStatus(pdfItems);
 
         try {
-          const hyperlinkID = await uploadSinglePDF(item.file, sharedTitle);
+          const hyperlinkID = await uploadSinglePDF(item.file, sharedTitle, (retryMessage) => {
+            item.message = retryMessage;
+            renderResults();
+            setBusyUploadStatus(pdfItems);
+          });
           item.state = "success";
           item.hyperlinkID = hyperlinkID;
           item.message = "Uploaded successfully.";
