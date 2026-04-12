@@ -362,6 +362,30 @@ struct hyperlinkedTests {
         #expect(ReadabilityHTMLUpgradeRetryPlan.retryDelaySeconds == [2, 4, 8, 16])
     }
 
+    @Test
+    func readabilityHTMLDocumentStylerInjectsDarkModeImageTreatmentIntoHead() {
+        let styled = ReadabilityHTMLDocumentStyler.styledHTML(
+            from: "<html><head><title>Doc</title></head><body><img src='figure.png'><mjx-container class='MathJax'></mjx-container></body></html>"
+        )
+
+        #expect(styled.contains("hyperlinked-readable-html-theme"))
+        #expect(styled.contains("prefers-color-scheme: dark"))
+        #expect(styled.contains("filter: brightness(0.58) contrast(0.92) saturate(0.88);"))
+        #expect(styled.contains("mjx-container *"))
+        #expect(styled.contains("<img src='figure.png'>"))
+    }
+
+    @Test
+    func readabilityHTMLDocumentStylerWrapsFragmentsInFullHTMLDocument() {
+        let styled = ReadabilityHTMLDocumentStyler.styledHTML(
+            from: "<article><img src='figure.png'></article>"
+        )
+
+        #expect(styled.contains("<!DOCTYPE html>"))
+        #expect(styled.contains("<body>"))
+        #expect(styled.contains("<article><img src='figure.png'></article>"))
+    }
+
     private func makeStoreForWidgetReloadTesting() throws -> (HyperlinkStore, WidgetTimelineReloaderSpy, DatabaseQueue) {
         let reloader = WidgetTimelineReloaderSpy()
         let dbQueue = try DatabaseQueue(path: ":memory:")

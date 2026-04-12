@@ -371,8 +371,8 @@ private struct ReadabilityHTMLContentView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.isOpaque = false
-        webView.backgroundColor = .clear
-        webView.scrollView.backgroundColor = .clear
+        webView.backgroundColor = .systemBackground
+        webView.scrollView.backgroundColor = .systemBackground
         return webView
     }
 
@@ -383,7 +383,10 @@ private struct ReadabilityHTMLContentView: UIViewRepresentable {
         if context.coordinator.lastHTML != html || context.coordinator.lastBaseURL != baseURL {
             context.coordinator.lastHTML = html
             context.coordinator.lastBaseURL = baseURL
-            webView.loadHTMLString(html, baseURL: baseURL)
+            webView.loadHTMLString(
+                ReadabilityHTMLDocumentStyler.styledHTML(from: html),
+                baseURL: baseURL
+            )
         }
     }
 
@@ -422,6 +425,242 @@ private struct ReadabilityHTMLContentView: UIViewRepresentable {
             onOpenHyperlink(matchedHyperlink)
             decisionHandler(.cancel)
         }
+    }
+}
+
+enum ReadabilityHTMLDocumentStyler {
+    private static let themeStyleIdentifier = "hyperlinked-readable-html-theme"
+
+    static func styledHTML(from rawHTML: String) -> String {
+        guard !rawHTML.contains(themeStyleIdentifier) else {
+            return rawHTML
+        }
+
+        let trimmed = rawHTML.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return rawHTML
+        }
+
+        let injection = """
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">
+        <meta name=\"color-scheme\" content=\"light dark\">
+        <style id=\"\(themeStyleIdentifier)\">
+        :root {
+          color-scheme: light dark;
+          --reader-bg-light: #ffffff;
+          --reader-bg-dark: #111113;
+          --reader-fg-light: #111113;
+          --reader-fg-dark: #f3f3f5;
+          --reader-link-light: #0a66d1;
+          --reader-link-dark: #8bb8ff;
+          --reader-border-dark: rgba(255, 255, 255, 0.12);
+          --reader-border-light: rgba(17, 17, 19, 0.10);
+          --reader-surface-dark: rgba(255, 255, 255, 0.06);
+          --reader-surface-light: rgba(17, 17, 19, 0.03);
+        }
+
+        html {
+          background: var(--reader-bg-light) !important;
+          -webkit-text-size-adjust: 100%;
+        }
+
+        body {
+          margin: 0 auto;
+          padding: 0 0 32px;
+          background: transparent !important;
+          color: var(--reader-fg-light) !important;
+        }
+
+        a,
+        a:visited {
+          color: var(--reader-link-light);
+        }
+
+        img,
+        picture img,
+        svg,
+        canvas,
+        video {
+          max-width: 100%;
+          height: auto;
+          border-radius: 12px;
+        }
+
+        figure {
+          margin: 1.5em 0;
+        }
+
+        table {
+          width: 100%;
+          border-collapse: collapse;
+        }
+
+        th,
+        td {
+          padding: 0.45rem 0.65rem;
+        }
+
+        figure,
+        img,
+        svg,
+        canvas,
+        table,
+        pre,
+        blockquote {
+          border-color: var(--reader-border-light);
+        }
+
+        @media (prefers-color-scheme: dark) {
+          html {
+            background: var(--reader-bg-dark) !important;
+          }
+
+          body,
+          article,
+          main,
+          section,
+          div,
+          p,
+          span,
+          li,
+          ul,
+          ol,
+          dl,
+          dt,
+          dd,
+          h1,
+          h2,
+          h3,
+          h4,
+          h5,
+          h6,
+          figcaption,
+          caption,
+          small,
+          strong,
+          em,
+          sub,
+          sup,
+          blockquote,
+          pre,
+          code,
+          table,
+          thead,
+          tbody,
+          tr,
+          th,
+          td {
+            color: var(--reader-fg-dark) !important;
+          }
+
+          body,
+          article,
+          main,
+          section,
+          div,
+          p,
+          span,
+          li,
+          ul,
+          ol,
+          dl,
+          dt,
+          dd,
+          figcaption,
+          caption,
+          small,
+          strong,
+          em,
+          sub,
+          sup {
+            background: transparent !important;
+          }
+
+          a,
+          a *,
+          a:visited,
+          a:visited * {
+            color: var(--reader-link-dark) !important;
+          }
+
+          mjx-container,
+          mjx-container *,
+          .MathJax,
+          .MathJax *,
+          .math-inline,
+          .math-inline *,
+          .math-block,
+          .math-block * {
+            color: var(--reader-fg-dark) !important;
+          }
+
+          figure,
+          table,
+          thead,
+          tbody,
+          tr,
+          th,
+          td,
+          pre,
+          code,
+          blockquote {
+            border-color: var(--reader-border-dark) !important;
+          }
+
+          figure,
+          table,
+          pre,
+          code,
+          blockquote {
+            background: var(--reader-surface-dark) !important;
+          }
+
+          img,
+          picture img,
+          svg,
+          canvas,
+          video {
+            filter: brightness(0.58) contrast(0.92) saturate(0.88);
+            box-shadow: 0 0 0 1px var(--reader-border-dark);
+            background: var(--reader-surface-dark);
+          }
+
+          [style*='background'],
+          [style*='background-color'] {
+            background-color: transparent !important;
+          }
+
+          [style*='color:'],
+          [style*='color: '] {
+            color: inherit !important;
+          }
+        }
+        </style>
+        """
+
+        if let headCloseRange = trimmed.range(of: "</head>", options: .caseInsensitive) {
+            var themedHTML = trimmed
+            themedHTML.insert(contentsOf: "\n\(injection)\n", at: headCloseRange.lowerBound)
+            return themedHTML
+        }
+
+        if let bodyOpenRange = trimmed.range(of: "<body", options: .caseInsensitive) {
+            var themedHTML = trimmed
+            themedHTML.insert(contentsOf: "<head>\n\(injection)\n</head>\n", at: bodyOpenRange.lowerBound)
+            return themedHTML
+        }
+
+        return """
+        <!DOCTYPE html>
+        <html>
+          <head>
+            \(injection)
+          </head>
+          <body>
+            \(trimmed)
+          </body>
+        </html>
+        """
     }
 }
 
