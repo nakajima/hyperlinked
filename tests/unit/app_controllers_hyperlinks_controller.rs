@@ -971,10 +971,11 @@ async fn artifact_download_endpoint_uses_latest_artifact_per_kind() {
                 VALUES
                     (1, 1, NULL, 'readable_text', X'6669727374', 'text/markdown; charset=utf-8', 5, '2026-02-19 00:00:01'),
                     (2, 1, NULL, 'readable_text', X'7365636f6e642070726576696577', 'text/markdown; charset=utf-8', 14, '2026-02-19 00:00:02'),
-                    (3, 1, NULL, 'pdf_source', X'255044462D312E34', 'application/pdf', 8, '2026-02-19 00:00:01'),
-                    (4, 1, NULL, 'pdf_source', X'255044462D312E350A25', 'application/pdf', 10, '2026-02-19 00:00:03'),
-                    (5, 1, NULL, 'snapshot_warc', X'57415243', 'application/warc', 4, '2026-02-19 00:00:04'),
-                    (6, 1, NULL, 'snapshot_warc', X'1F8B0800920EA06900030B770C7256284ECC2DC8490500D757B83F0B000000', 'application/warc+gzip', 31, '2026-02-19 00:00:05');
+                    (3, 1, NULL, 'readable_html', CAST('<article><h1>Readable HTML</h1></article>' AS BLOB), 'text/html; charset=utf-8', 40, '2026-02-19 00:00:02'),
+                    (4, 1, NULL, 'pdf_source', X'255044462D312E34', 'application/pdf', 8, '2026-02-19 00:00:01'),
+                    (5, 1, NULL, 'pdf_source', X'255044462D312E350A25', 'application/pdf', 10, '2026-02-19 00:00:03'),
+                    (6, 1, NULL, 'snapshot_warc', X'57415243', 'application/warc', 4, '2026-02-19 00:00:04'),
+                    (7, 1, NULL, 'snapshot_warc', X'1F8B0800920EA06900030B770C7256284ECC2DC8490500D757B83F0B000000', 'application/warc+gzip', 31, '2026-02-19 00:00:05');
             "#,
         ))
         .await;
@@ -987,6 +988,16 @@ async fn artifact_download_endpoint_uses_latest_artifact_per_kind() {
         "attachment; filename=\"hyperlink-1-readable_text.md\"",
     );
     assert_eq!(download.text(), "second preview");
+
+    let html_inline = server
+        .get("/hyperlinks/1/artifacts/readable_html/inline")
+        .await;
+    html_inline.assert_status_ok();
+    html_inline.assert_header("content-type", "text/html; charset=utf-8");
+    assert_eq!(
+        html_inline.text(),
+        "<article><h1>Readable HTML</h1></article>"
+    );
 
     let pdf_download = server.get("/hyperlinks/1/artifacts/pdf_source").await;
     pdf_download.assert_status_ok();
@@ -1047,6 +1058,62 @@ async fn artifact_download_endpoint_uses_latest_artifact_per_kind() {
         .get("/hyperlinks/999/artifacts/readable_text")
         .await
         .assert_status_not_found();
+}
+
+#[tokio::test]
+async fn missing_pdf_readable_html_enqueues_on_demand_readability_job() {
+    let (server, connection) = new_server_with_queue(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Uploaded PDF', '/uploads/1/paper.pdf', '/uploads/1/paper.pdf', 'pdf', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (1, 1, NULL, 'pdf_source', X'255044462D312E350A25', 'application/pdf', 10, '2026-02-19 00:00:01'),
+                    (2, 1, NULL, 'readable_text', CAST('# Paper' AS BLOB), 'text/markdown; charset=utf-8', 7, '2026-02-19 00:00:02'),
+                    (3, 1, NULL, 'readable_meta', CAST('{"title":"Paper"}' AS BLOB), 'application/json', 17, '2026-02-19 00:00:03');
+            "#,
+        ))
+        .await;
+
+    let response = server
+        .get("/hyperlinks/1/artifacts/readable_html/inline")
+        .await;
+    response.assert_status_not_found();
+
+    let latest = crate::app::models::hyperlink_processing_job::latest_for_hyperlink(&connection, 1)
+        .await
+        .expect("latest job should load")
+        .expect("job should exist");
+    assert_eq!(
+        latest.kind,
+        hyperlink_processing_job::HyperlinkProcessingJobKind::Readability
+    );
+}
+
+#[tokio::test]
+async fn missing_non_pdf_readable_html_does_not_enqueue_on_demand_job() {
+    let (server, connection) = new_server_with_queue(Some(
+            r#"
+                INSERT INTO hyperlink (id, title, url, raw_url, source_type, clicks_count, last_clicked_at, created_at, updated_at)
+                VALUES (1, 'Web Page', 'https://example.com/article', 'https://example.com/article', 'html', 0, NULL, '2026-02-19 00:00:00', '2026-02-19 00:00:00');
+                INSERT INTO hyperlink_artifact (id, hyperlink_id, job_id, kind, payload, content_type, size_bytes, created_at)
+                VALUES
+                    (1, 1, NULL, 'snapshot_warc', X'57415243', 'application/warc', 4, '2026-02-19 00:00:01'),
+                    (2, 1, NULL, 'readable_text', CAST('# Article' AS BLOB), 'text/markdown; charset=utf-8', 9, '2026-02-19 00:00:02'),
+                    (3, 1, NULL, 'readable_meta', CAST('{"title":"Article"}' AS BLOB), 'application/json', 19, '2026-02-19 00:00:03');
+            "#,
+        ))
+        .await;
+
+    let response = server
+        .get("/hyperlinks/1/artifacts/readable_html/inline")
+        .await;
+    response.assert_status_not_found();
+
+    let latest = crate::app::models::hyperlink_processing_job::latest_for_hyperlink(&connection, 1)
+        .await
+        .expect("latest job query should succeed");
+    assert!(latest.is_none());
 }
 
 #[tokio::test]

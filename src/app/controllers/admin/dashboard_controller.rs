@@ -2571,6 +2571,7 @@ async fn delete_readability_artifacts_and_clear_search(
         connection,
         &[
             HyperlinkArtifactKind::ReadableText,
+            HyperlinkArtifactKind::ReadableHtml,
             HyperlinkArtifactKind::ReadableMeta,
             HyperlinkArtifactKind::ReadableError,
         ],

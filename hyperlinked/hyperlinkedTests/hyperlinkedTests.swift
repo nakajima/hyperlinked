@@ -285,6 +285,83 @@ struct hyperlinkedTests {
         #expect(snapshot.readabilityFileURL?.path == markdownURL.path)
     }
 
+    @Test
+    func saveReadabilityHTMLPersistsHTMLSnapshotPath() throws {
+        let dbQueue = try DatabaseQueue(path: ":memory:")
+        try dbQueue.write { db in
+            try db.create(table: DB.hyperlinkOfflineSnapshotTableName) { t in
+                t.column("hyperlink_id", .integer).primaryKey()
+                t.column("readability_state", .text).notNull().defaults(to: "missing")
+                t.column("readability_path", .text)
+                t.column("readability_error", .text)
+                t.column("readability_saved_at", .text)
+                t.column("pdf_state", .text).notNull().defaults(to: "missing")
+                t.column("pdf_path", .text)
+                t.column("pdf_error", .text)
+                t.column("pdf_saved_at", .text)
+            }
+        }
+
+        let store = HyperlinkOfflineStore(dbQueue: dbQueue, fileManager: .default)
+        try store.saveReadabilityHTML("<html><body>Readable HTML</body></html>", hyperlinkID: 13)
+
+        let snapshot = try store.snapshot(for: 13)
+        #expect(snapshot.resolvedReadabilityState == .available)
+        #expect(snapshot.readabilityFileURL?.pathExtension == "html")
+    }
+
+    @Test
+    func readabilityHTMLUpgradeRetryPlanRetriesOnlyPDFs() {
+        let pdf = Hyperlink(
+            id: 21,
+            title: "Paper",
+            url: "https://example.com/paper.pdf",
+            rawURL: "https://example.com/paper.pdf",
+            summary: nil,
+            ogDescription: nil,
+            isURLValid: true,
+            discoveryDepth: 0,
+            clicksCount: 0,
+            lastClickedAt: nil,
+            processingState: "ready",
+            createdAt: "2026-04-11T00:00:00Z",
+            updatedAt: "2026-04-11T00:00:00Z",
+            thumbnailURL: nil,
+            thumbnailDarkURL: nil,
+            screenshotURL: nil,
+            screenshotDarkURL: nil,
+            discoveredVia: []
+        )
+        let article = Hyperlink(
+            id: 22,
+            title: "Article",
+            url: "https://example.com/article",
+            rawURL: "https://example.com/article",
+            summary: nil,
+            ogDescription: nil,
+            isURLValid: true,
+            discoveryDepth: 0,
+            clicksCount: 0,
+            lastClickedAt: nil,
+            processingState: "ready",
+            createdAt: "2026-04-11T00:00:00Z",
+            updatedAt: "2026-04-11T00:00:00Z",
+            thumbnailURL: nil,
+            thumbnailDarkURL: nil,
+            screenshotURL: nil,
+            screenshotDarkURL: nil,
+            discoveredVia: []
+        )
+
+        #expect(ReadabilityHTMLUpgradeRetryPlan.shouldRetry(for: pdf))
+        #expect(!ReadabilityHTMLUpgradeRetryPlan.shouldRetry(for: article))
+    }
+
+    @Test
+    func readabilityHTMLUpgradeRetryPlanUsesExpectedBackoff() {
+        #expect(ReadabilityHTMLUpgradeRetryPlan.retryDelaySeconds == [2, 4, 8, 16])
+    }
+
     private func makeStoreForWidgetReloadTesting() throws -> (HyperlinkStore, WidgetTimelineReloaderSpy, DatabaseQueue) {
         let reloader = WidgetTimelineReloaderSpy()
         let dbQueue = try DatabaseQueue(path: ":memory:")

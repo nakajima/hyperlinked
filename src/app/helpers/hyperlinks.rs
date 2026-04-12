@@ -382,7 +382,7 @@ fn word_count(value: &str) -> usize {
     value.split_whitespace().count()
 }
 
-pub(crate) fn show_artifact_kinds() -> [HyperlinkArtifactKind; 15] {
+pub(crate) fn show_artifact_kinds() -> [HyperlinkArtifactKind; 16] {
     [
         HyperlinkArtifactKind::SnapshotWarc,
         HyperlinkArtifactKind::PdfSource,
@@ -397,6 +397,7 @@ pub(crate) fn show_artifact_kinds() -> [HyperlinkArtifactKind; 15] {
         HyperlinkArtifactKind::ScreenshotThumbDarkWebp,
         HyperlinkArtifactKind::ScreenshotError,
         HyperlinkArtifactKind::ReadableText,
+        HyperlinkArtifactKind::ReadableHtml,
         HyperlinkArtifactKind::ReadableMeta,
         HyperlinkArtifactKind::ReadableError,
     ]
@@ -499,6 +500,7 @@ fn artifact_kind_info(
         HyperlinkArtifactKind::OgImage => ("og_image", "Open Graph Image", "img", false),
         HyperlinkArtifactKind::OgError => ("og_error", "Open Graph Error", "json", true),
         HyperlinkArtifactKind::ReadableText => ("readable_text", "Readable Markdown", "md", false),
+        HyperlinkArtifactKind::ReadableHtml => ("readable_html", "Readable HTML", "html", false),
         HyperlinkArtifactKind::ReadableMeta => {
             ("readable_meta", "Readable Metadata", "json", false)
         }
@@ -607,12 +609,7 @@ pub(crate) fn artifact_fetch_path(hyperlink_id: i32, kind: &HyperlinkArtifactKin
 }
 
 pub(crate) fn is_readability_artifact_kind(kind: &HyperlinkArtifactKind) -> bool {
-    matches!(
-        kind,
-        HyperlinkArtifactKind::ReadableText
-            | HyperlinkArtifactKind::ReadableMeta
-            | HyperlinkArtifactKind::ReadableError
-    )
+    matches!(kind, HyperlinkArtifactKind::ReadableText)
 }
 
 pub(crate) fn render_relative_time(datetime: &sea_orm::entity::prelude::DateTime) -> String {

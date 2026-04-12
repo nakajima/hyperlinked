@@ -166,9 +166,17 @@ final class HyperlinkOfflineStore {
         try upsert(snapshot)
     }
 
-    func saveReadability(markdown: String, hyperlinkID: Int) throws {
-        let url = try fileURL(for: hyperlinkID, filename: "readability.md")
-        try markdown.write(to: url, atomically: true, encoding: .utf8)
+    func saveReadabilityMarkdown(_ markdown: String, hyperlinkID: Int) throws {
+        try saveReadability(content: markdown, hyperlinkID: hyperlinkID, filename: "readability.md")
+    }
+
+    func saveReadabilityHTML(_ html: String, hyperlinkID: Int) throws {
+        try saveReadability(content: html, hyperlinkID: hyperlinkID, filename: "readability.html")
+    }
+
+    private func saveReadability(content: String, hyperlinkID: Int, filename: String) throws {
+        let url = try fileURL(for: hyperlinkID, filename: filename)
+        try content.write(to: url, atomically: true, encoding: .utf8)
         let snapshot = try snapshot(for: hyperlinkID)
         try upsert(
             HyperlinkOfflineSnapshot(
@@ -378,8 +386,12 @@ actor HyperlinkOfflineSnapshotManager {
 
         do {
             try store.markReadabilityPending(hyperlinkID: hyperlink.id)
-            let markdown = try await client.fetchArtifactText(hyperlinkID: hyperlink.id, kind: "readable_text")
-            try store.saveReadability(markdown: markdown, hyperlinkID: hyperlink.id)
+            if let html = try? await client.fetchArtifactText(hyperlinkID: hyperlink.id, kind: "readable_html") {
+                try store.saveReadabilityHTML(html, hyperlinkID: hyperlink.id)
+            } else {
+                let markdown = try await client.fetchArtifactText(hyperlinkID: hyperlink.id, kind: "readable_text")
+                try store.saveReadabilityMarkdown(markdown, hyperlinkID: hyperlink.id)
+            }
             logger.log("offline_readability_save_succeeded", details: ["hyperlink_id": String(hyperlink.id)])
         } catch {
             try? store.markReadabilityFailed(hyperlinkID: hyperlink.id, message: error.localizedDescription)

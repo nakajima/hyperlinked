@@ -321,14 +321,14 @@ async fn serve_latest_artifact(
         return ctx.error(StatusCode::BAD_REQUEST, "invalid artifact kind");
     };
 
-    match hyperlink::Entity::find_by_id(id)
+    let hyperlink = match hyperlink::Entity::find_by_id(id)
         .one(&ctx.state().connection)
         .await
     {
-        Ok(Some(_)) => {}
+        Ok(Some(hyperlink)) => hyperlink,
         Ok(None) => return ctx.error(StatusCode::NOT_FOUND, format!("hyperlink {id} not found")),
         Err(err) => return ctx.internal_error(format!("failed to fetch hyperlink {id}: {err}")),
-    }
+    };
 
     let artifact = match crate::app::models::hyperlink_artifact::latest_for_hyperlink_kind(
         &ctx.state().connection,
@@ -339,6 +339,7 @@ async fn serve_latest_artifact(
     {
         Ok(Some(artifact)) => artifact,
         Ok(None) => {
+            maybe_enqueue_missing_pdf_readable_html(&ctx, &hyperlink, &kind).await;
             return ctx.error(
                 StatusCode::NOT_FOUND,
                 format!(
@@ -380,4 +381,91 @@ async fn serve_latest_artifact(
     }
 
     ctx.binary(StatusCode::OK, headers, payload)
+}
+
+async fn maybe_enqueue_missing_pdf_readable_html(
+    ctx: &ControllerContext,
+    hyperlink: &hyperlink::Model,
+    kind: &HyperlinkArtifactKind,
+) {
+    if !matches!(kind, HyperlinkArtifactKind::ReadableHtml) {
+        return;
+    }
+
+    let Some(queue) = ctx.state().processing_queue.as_ref() else {
+        return;
+    };
+
+    let has_pdf_source = match crate::app::models::hyperlink_artifact::latest_for_hyperlink_kind(
+        &ctx.state().connection,
+        hyperlink.id,
+        HyperlinkArtifactKind::PdfSource,
+    )
+    .await
+    {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(err) => {
+            tracing::warn!(
+                hyperlink_id = hyperlink.id,
+                error = %err,
+                "failed to inspect pdf_source while handling missing readable_html artifact"
+            );
+            return;
+        }
+    };
+
+    if !has_pdf_source {
+        return;
+    }
+
+    match artifact_job::resolve_and_enqueue_for_artifact_kind(
+        &ctx.state().connection,
+        hyperlink.id,
+        HyperlinkArtifactKind::ReadableHtml,
+        ArtifactFetchMode::RefetchTarget,
+        Some(queue),
+    )
+    .await
+    {
+        Ok(ArtifactJobResolveResult::EnqueuedRequested {
+            requested_kind,
+            queued_job_id,
+        }) => {
+            tracing::info!(
+                hyperlink_id = hyperlink.id,
+                job_id = queued_job_id,
+                kind = ?requested_kind,
+                "queued on-demand readable_html generation after missing artifact request"
+            );
+        }
+        Ok(ArtifactJobResolveResult::EnqueuedDependency {
+            requested_kind,
+            dependency_kind,
+            queued_job_id,
+        }) => {
+            tracing::info!(
+                hyperlink_id = hyperlink.id,
+                job_id = queued_job_id,
+                kind = ?requested_kind,
+                dependency_kind = ?dependency_kind,
+                "queued dependency while attempting on-demand readable_html generation"
+            );
+        }
+        Ok(
+            ArtifactJobResolveResult::AlreadySatisfied { .. }
+            | ArtifactJobResolveResult::DisabledRequested { .. }
+            | ArtifactJobResolveResult::DisabledDependency { .. }
+            | ArtifactJobResolveResult::UnfetchableDependency { .. }
+            | ArtifactJobResolveResult::UnsupportedArtifactKind { .. }
+            | ArtifactJobResolveResult::UnsupportedJobKind { .. },
+        ) => {}
+        Err(err) => {
+            tracing::warn!(
+                hyperlink_id = hyperlink.id,
+                error = %err,
+                "failed to queue on-demand readable_html generation after missing artifact request"
+            );
+        }
+    }
 }

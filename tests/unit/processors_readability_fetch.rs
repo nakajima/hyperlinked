@@ -120,11 +120,12 @@ impl PdfTextExtractor for FakePdfExtractor {
 
 #[tokio::test]
 async fn extracts_pdf_text_and_metadata() {
-    let (text_payload, meta_payload, readability_title) = extract_from_pdf(
+    let payloads = extract_from_pdf(
         &FakePdfExtractor {
             name: "fake",
             result: Ok(PdfExtraction {
                 markdown: "sample text".to_string(),
+                rendered_html: Some("<article><h1>Readable Title</h1></article>".to_string()),
                 page_count: Some(2),
                 title: Some("Readable Title".to_string()),
             }),
@@ -137,21 +138,29 @@ async fn extracts_pdf_text_and_metadata() {
     .expect("pdf extraction should succeed");
 
     assert_eq!(
-        String::from_utf8(text_payload).expect("text payload should decode"),
+        String::from_utf8(payloads.text_payload).expect("text payload should decode"),
         "sample text"
     );
+    assert_eq!(
+        String::from_utf8(payloads.html_payload.expect("html payload should exist"))
+            .expect("html payload should decode"),
+        "<article><h1>Readable Title</h1></article>"
+    );
     let meta: serde_json::Value =
-        serde_json::from_slice(&meta_payload).expect("meta should decode");
+        serde_json::from_slice(&payloads.meta_payload).expect("meta should decode");
     assert_eq!(meta["source_format"], "pdf");
     assert_eq!(meta["title"], "Readable Title");
     assert_eq!(meta["pdf_page_count"], 2);
     assert_eq!(meta["pdf_extractor"], "fake");
-    assert_eq!(readability_title.as_deref(), Some("Readable Title"));
+    assert_eq!(
+        payloads.readability_title.as_deref(),
+        Some("Readable Title")
+    );
 }
 
 #[tokio::test]
 async fn falls_back_to_local_extractor_when_primary_fails() {
-    let (text_payload, meta_payload, readability_title) = extract_from_pdf_with_fallback(
+    let payloads = extract_from_pdf_with_fallback(
         Some(&FakePdfExtractor {
             name: "mathpix",
             result: Err("mathpix failed".to_string()),
@@ -160,6 +169,7 @@ async fn falls_back_to_local_extractor_when_primary_fails() {
             name: "pdf_extract",
             result: Ok(PdfExtraction {
                 markdown: "fallback text".to_string(),
+                rendered_html: None,
                 page_count: Some(3),
                 title: Some("Fallback Title".to_string()),
             }),
@@ -172,13 +182,16 @@ async fn falls_back_to_local_extractor_when_primary_fails() {
     .expect("fallback extractor should succeed");
 
     assert_eq!(
-        String::from_utf8(text_payload).expect("text payload should decode"),
+        String::from_utf8(payloads.text_payload).expect("text payload should decode"),
         "fallback text"
     );
     let meta: serde_json::Value =
-        serde_json::from_slice(&meta_payload).expect("meta should decode");
+        serde_json::from_slice(&payloads.meta_payload).expect("meta should decode");
     assert_eq!(meta["pdf_extractor"], "pdf_extract");
-    assert_eq!(readability_title.as_deref(), Some("Fallback Title"));
+    assert_eq!(
+        payloads.readability_title.as_deref(),
+        Some("Fallback Title")
+    );
 }
 
 #[tokio::test]
@@ -268,6 +281,9 @@ async fn readability_process_updates_pdf_hyperlink_title_from_extracted_title() 
             name: "fake",
             result: Ok(PdfExtraction {
                 markdown: "# Readable Upload Title\n\nBody".to_string(),
+                rendered_html: Some(
+                    "<article><h1>Readable Upload Title</h1><p>Body</p></article>".to_string(),
+                ),
                 page_count: Some(1),
                 title: Some("Readable Upload Title".to_string()),
             }),
@@ -281,6 +297,7 @@ async fn readability_process_updates_pdf_hyperlink_title_from_extracted_title() 
         .expect("readability should succeed");
 
     assert!(output.text_artifact_id.is_some());
+    assert!(output.html_artifact_id.is_some());
     assert!(output.meta_artifact_id.is_some());
     assert_eq!(active_hyperlink.title.as_ref(), "Readable Upload Title");
 }

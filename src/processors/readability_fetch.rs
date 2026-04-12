@@ -32,6 +32,7 @@ use crate::{
 };
 
 const READABLE_TEXT_CONTENT_TYPE: &str = "text/markdown; charset=utf-8";
+const READABLE_HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 const READABLE_META_CONTENT_TYPE: &str = "application/json";
 const READABLE_ERROR_CONTENT_TYPE: &str = "application/json";
 const MATHPIX_BASE_URL: &str = "https://api.mathpix.com";
@@ -49,6 +50,7 @@ pub struct ReadabilityFetcher {
 
 pub struct ReadabilityFetchOutput {
     pub text_artifact_id: Option<i32>,
+    pub html_artifact_id: Option<i32>,
     pub meta_artifact_id: Option<i32>,
     pub error_artifact_id: Option<i32>,
 }
@@ -67,8 +69,17 @@ trait PdfTextExtractor: Send + Sync {
 #[derive(Clone, Debug)]
 struct PdfExtraction {
     markdown: String,
+    rendered_html: Option<String>,
     page_count: Option<usize>,
     title: Option<String>,
+}
+
+#[derive(Debug)]
+struct ReadabilityArtifactsPayload {
+    text_payload: Vec<u8>,
+    html_payload: Option<Vec<u8>>,
+    meta_payload: Vec<u8>,
+    readability_title: Option<String>,
 }
 
 struct RustPdfExtractor;
@@ -109,6 +120,7 @@ impl PdfTextExtractor for RustPdfExtractor {
             title: extract_pdf_metadata_title(payload)
                 .or_else(|| infer_pdf_title_from_markdown(&markdown)),
             markdown,
+            rendered_html: None,
             page_count,
         })
     }
@@ -147,7 +159,7 @@ impl MathpixPdfExtractor {
             .mime_str("application/pdf")
             .map_err(|error| format!("failed to build mathpix upload payload: {error}"))?;
         let options_part = reqwest::multipart::Part::text(
-            r#"{"conversion_formats":{"md":true},"math_inline_delimiters":["$","$"]}"#,
+            r#"{"conversion_formats":{"md":true,"html":true},"math_inline_delimiters":["$","$"]}"#,
         )
         .mime_str("application/json")
         .map_err(|error| format!("failed to build mathpix options payload: {error}"))?;
@@ -276,6 +288,43 @@ impl MathpixPdfExtractor {
             failures.join("; ")
         ))
     }
+
+    async fn fetch_html(&self, pdf_id: &str) -> Result<Option<String>, String> {
+        let url = format!("{MATHPIX_BASE_URL}/v3/pdf/{pdf_id}.html");
+        let request = self.client.get(url);
+        let request = self.set_auth_headers(request)?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("failed to fetch mathpix html: {error}"))?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                pdf_id,
+                status = %status,
+                error = %summarize_api_error(&body),
+                "mathpix html conversion was unavailable; continuing with markdown only"
+            );
+            return Ok(None);
+        }
+
+        let html = response
+            .text()
+            .await
+            .map_err(|error| format!("failed to decode mathpix html payload: {error}"))?;
+        let trimmed = html.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(trimmed.to_string()))
+    }
 }
 
 #[async_trait]
@@ -291,10 +340,12 @@ impl PdfTextExtractor for MathpixPdfExtractor {
         let submit = self.submit_pdf(payload).await?;
         let poll = self.poll_until_complete(&submit.pdf_id).await?;
         let markdown = self.fetch_markdown(&submit.pdf_id).await?;
+        let rendered_html = self.fetch_html(&submit.pdf_id).await?;
         Ok(PdfExtraction {
             title: extract_pdf_metadata_title(payload)
                 .or_else(|| infer_pdf_title_from_markdown(&markdown)),
             markdown,
+            rendered_html,
             page_count: poll.page_count,
         })
     }
@@ -416,8 +467,14 @@ impl Processor for ReadabilityFetcher {
                     }
                 };
 
-                extract_from_html(&html)
-                    .map(|(text_payload, meta_payload)| (text_payload, meta_payload, None))
+                extract_from_html(&html).map(|(text_payload, meta_payload)| {
+                    ReadabilityArtifactsPayload {
+                        text_payload,
+                        html_payload: None,
+                        meta_payload,
+                        readability_title: None,
+                    }
+                })
             }
             ReadabilitySource::Pdf(pdf_source) => {
                 let pdf_payload = hyperlink_artifact_model::load_payload(&pdf_source)
@@ -434,7 +491,12 @@ impl Processor for ReadabilityFetcher {
             }
         };
 
-        let (text_payload, meta_payload, readability_title) = match extraction {
+        let ReadabilityArtifactsPayload {
+            text_payload,
+            html_payload,
+            meta_payload,
+            readability_title,
+        } = match extraction {
             Ok(payloads) => payloads,
             Err((stage, message)) => {
                 let error_artifact = persist_readability_error(
@@ -452,6 +514,7 @@ impl Processor for ReadabilityFetcher {
                 if matches!(stage.as_str(), "pdf_extract") {
                     return Ok(ReadabilityFetchOutput {
                         text_artifact_id: None,
+                        html_artifact_id: None,
                         meta_artifact_id: None,
                         error_artifact_id: Some(error_artifact.id),
                     });
@@ -534,6 +597,23 @@ impl Processor for ReadabilityFetcher {
             );
         }
 
+        let html_artifact = if let Some(html_payload) = html_payload {
+            Some(
+                hyperlink_artifact_model::insert(
+                    connection,
+                    hyperlink_id,
+                    Some(self.job_id),
+                    HyperlinkArtifactKind::ReadableHtml,
+                    html_payload,
+                    READABLE_HTML_CONTENT_TYPE,
+                )
+                .await
+                .map_err(ProcessingError::DB)?,
+            )
+        } else {
+            None
+        };
+
         let meta_artifact = hyperlink_artifact_model::insert(
             connection,
             hyperlink_id,
@@ -547,6 +627,7 @@ impl Processor for ReadabilityFetcher {
 
         Ok(ReadabilityFetchOutput {
             text_artifact_id: Some(text_artifact.id),
+            html_artifact_id: html_artifact.map(|artifact| artifact.id),
             meta_artifact_id: Some(meta_artifact.id),
             error_artifact_id: None,
         })
@@ -651,7 +732,7 @@ async fn extract_from_pdf_with_fallback(
     hyperlink_title: &str,
     source_url: &str,
     payload: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>, Option<String>), (String, String)> {
+) -> Result<ReadabilityArtifactsPayload, (String, String)> {
     let Some(primary_extractor) = primary_extractor else {
         return extract_from_pdf(fallback_extractor, hyperlink_title, source_url, payload).await;
     };
@@ -685,7 +766,7 @@ async fn extract_from_pdf(
     hyperlink_title: &str,
     source_url: &str,
     payload: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>, Option<String>), (String, String)> {
+) -> Result<ReadabilityArtifactsPayload, (String, String)> {
     let extraction = extractor
         .extract(payload)
         .await
@@ -701,6 +782,7 @@ async fn extract_from_pdf(
         .to_string();
 
     let text_payload = extraction.markdown.clone().into_bytes();
+    let html_payload = extraction.rendered_html.map(|html| html.into_bytes());
     let meta_payload = serde_json::to_vec_pretty(&ReadableMetadataArtifact {
         source_format: "pdf".to_string(),
         title: metadata_title,
@@ -726,7 +808,12 @@ async fn extract_from_pdf(
         )
     })?;
 
-    Ok((text_payload, meta_payload, extracted_title))
+    Ok(ReadabilityArtifactsPayload {
+        text_payload,
+        html_payload,
+        meta_payload,
+        readability_title: extracted_title,
+    })
 }
 
 #[derive(Clone, Debug, Default)]

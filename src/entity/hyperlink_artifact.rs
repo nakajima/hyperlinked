@@ -35,6 +35,8 @@ pub enum HyperlinkArtifactKind {
     OgError,
     #[sea_orm(string_value = "readable_text")]
     ReadableText,
+    #[sea_orm(string_value = "readable_html")]
+    ReadableHtml,
     #[sea_orm(string_value = "readable_meta")]
     ReadableMeta,
     #[sea_orm(string_value = "readable_error")]

@@ -126,6 +126,7 @@ impl ArtifactState {
                 HyperlinkArtifactKind::PdfSource,
                 HyperlinkArtifactKind::OgMeta,
                 HyperlinkArtifactKind::ReadableText,
+                HyperlinkArtifactKind::ReadableHtml,
                 HyperlinkArtifactKind::ReadableMeta,
             ]))
             .into_tuple::<HyperlinkArtifactKind>()
@@ -139,6 +140,7 @@ impl ArtifactState {
                 HyperlinkArtifactKind::PdfSource => state.has_pdf_source = true,
                 HyperlinkArtifactKind::OgMeta => state.has_og_meta = true,
                 HyperlinkArtifactKind::ReadableText => state.has_readable_text = true,
+                HyperlinkArtifactKind::ReadableHtml => {}
                 HyperlinkArtifactKind::ReadableMeta => state.has_readable_meta = true,
                 _ => {}
             }
@@ -241,6 +243,7 @@ pub fn job_kind_for_artifact_kind(
         | HyperlinkArtifactKind::OgImage
         | HyperlinkArtifactKind::OgError => Some(HyperlinkProcessingJobKind::Og),
         HyperlinkArtifactKind::ReadableText
+        | HyperlinkArtifactKind::ReadableHtml
         | HyperlinkArtifactKind::ReadableMeta
         | HyperlinkArtifactKind::ReadableError => Some(HyperlinkProcessingJobKind::Readability),
         HyperlinkArtifactKind::PaperlessMetadata

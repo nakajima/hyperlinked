@@ -1,5 +1,6 @@
 import PDFKit
 import SwiftUI
+import WebKit
 #if !targetEnvironment(macCatalyst)
 import Textual
 #endif
@@ -11,23 +12,56 @@ struct ReadabilityReaderView: View {
 
     @State private var isLoading = false
     @State private var markdown = ""
+    @State private var html = ""
+    @State private var htmlBaseURL: URL?
     @State private var errorMessage: String?
     @State private var contentSourceLabel = ""
     @State private var rendererMode: ReadabilityMarkdownRendererMode = .plainText
     @State private var routedHyperlink: Hyperlink?
+    @State private var htmlUpgradeTask: Task<Void, Never>?
+    @State private var htmlUpgradeTaskToken: UUID?
+    @State private var isWaitingForRenderedHTML = false
+
+    private var displayedContentSourceLabel: String {
+        guard !contentSourceLabel.isEmpty else {
+            return ""
+        }
+
+        if isWaitingForRenderedHTML {
+            return "\(contentSourceLabel) · generating rendered PDF…"
+        }
+
+        return contentSourceLabel
+    }
 
     var body: some View {
         Group {
-            if isLoading && markdown.isEmpty {
+            if isLoading && markdown.isEmpty && html.isEmpty {
                 ProgressView("Loading readability…")
+            } else if !html.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    if !displayedContentSourceLabel.isEmpty {
+                        Text(displayedContentSourceLabel)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal)
+                    }
+
+                    ReadabilityHTMLContentView(
+                        html: html,
+                        baseURL: htmlBaseURL,
+                        hyperlink: hyperlink,
+                        onOpenHyperlink: { routedHyperlink = $0 }
+                    )
+                }
             } else if !markdown.isEmpty {
                 ScrollView {
                     HStack {
                         Spacer(minLength: 0)
 
                         VStack(alignment: .leading, spacing: 16) {
-                            if !contentSourceLabel.isEmpty {
-                                Text(contentSourceLabel)
+                            if !displayedContentSourceLabel.isEmpty {
+                                Text(displayedContentSourceLabel)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -62,43 +96,172 @@ struct ReadabilityReaderView: View {
         .task(id: appModel.selectedServerURL?.absoluteString) {
             await load()
         }
+        .onDisappear {
+            cancelPendingHTMLUpgrade()
+        }
     }
 
+    @MainActor
     private func load() async {
+        cancelPendingHTMLUpgrade()
         isLoading = true
         defer { isLoading = false }
 
-        if let client = appModel.apiClient,
-           let remoteMarkdown = try? await client.fetchArtifactText(hyperlinkID: hyperlink.id, kind: "readable_text") {
-            applyLoadedMarkdown(remoteMarkdown, sourceLabel: "Live version")
-            errorMessage = nil
-            return
+        if let client = appModel.apiClient {
+            if let remoteHTML = try? await client.fetchArtifactText(hyperlinkID: hyperlink.id, kind: "readable_html") {
+                applyLoadedHTML(
+                    remoteHTML,
+                    baseURL: client.artifactInlineURL(hyperlinkID: hyperlink.id, kind: "readable_html"),
+                    sourceLabel: ReadabilityContentSourceLabel.live
+                )
+                errorMessage = nil
+                return
+            }
+
+            if let remoteMarkdown = try? await client.fetchArtifactText(hyperlinkID: hyperlink.id, kind: "readable_text") {
+                applyLoadedMarkdown(remoteMarkdown, sourceLabel: ReadabilityContentSourceLabel.live)
+                errorMessage = nil
+                scheduleHTMLUpgrade(using: client)
+                return
+            }
         }
 
         do {
             let snapshot = try HyperlinkOfflineStore.openShared().snapshot(for: hyperlink.id)
             guard let url = snapshot.readabilityFileURL else {
-                markdown = ""
-                contentSourceLabel = ""
-                rendererMode = .plainText
+                clearLoadedContent()
                 errorMessage = snapshot.readabilityError ?? "No offline readability snapshot was saved for this link."
                 return
             }
-            let loadedMarkdown = try String(contentsOf: url, encoding: .utf8)
-            applyLoadedMarkdown(loadedMarkdown, sourceLabel: "Offline snapshot")
+
+            let loadedContent = try String(contentsOf: url, encoding: .utf8)
+            if url.pathExtension.lowercased() == "html" {
+                applyLoadedHTML(
+                    loadedContent,
+                    baseURL: url.deletingLastPathComponent(),
+                    sourceLabel: ReadabilityContentSourceLabel.offlineSnapshot
+                )
+            } else {
+                applyLoadedMarkdown(loadedContent, sourceLabel: ReadabilityContentSourceLabel.offlineSnapshot)
+            }
             errorMessage = nil
         } catch {
-            markdown = ""
-            contentSourceLabel = ""
-            rendererMode = .plainText
+            clearLoadedContent()
             errorMessage = error.localizedDescription
         }
     }
 
+    @MainActor
+    private func cancelPendingHTMLUpgrade() {
+        htmlUpgradeTask?.cancel()
+        htmlUpgradeTask = nil
+        htmlUpgradeTaskToken = nil
+        isWaitingForRenderedHTML = false
+    }
+
+    @MainActor
+    private func scheduleHTMLUpgrade(using client: APIClient) {
+        guard ReadabilityHTMLUpgradeRetryPlan.shouldRetry(for: hyperlink) else {
+            isWaitingForRenderedHTML = false
+            return
+        }
+
+        cancelPendingHTMLUpgrade()
+        let taskToken = UUID()
+        htmlUpgradeTaskToken = taskToken
+        isWaitingForRenderedHTML = true
+
+        let hyperlinkID = hyperlink.id
+        let htmlBaseURL = client.artifactInlineURL(hyperlinkID: hyperlinkID, kind: "readable_html")
+        htmlUpgradeTask = Task {
+            for retryDelaySeconds in ReadabilityHTMLUpgradeRetryPlan.retryDelaySeconds {
+                do {
+                    try await Task.sleep(nanoseconds: retryDelaySeconds * 1_000_000_000)
+                } catch {
+                    await MainActor.run {
+                        guard htmlUpgradeTaskToken == taskToken else { return }
+                        htmlUpgradeTask = nil
+                        htmlUpgradeTaskToken = nil
+                        isWaitingForRenderedHTML = false
+                    }
+                    return
+                }
+
+                guard !Task.isCancelled else {
+                    await MainActor.run {
+                        guard htmlUpgradeTaskToken == taskToken else { return }
+                        htmlUpgradeTask = nil
+                        htmlUpgradeTaskToken = nil
+                        isWaitingForRenderedHTML = false
+                    }
+                    return
+                }
+
+                guard let upgradedHTML = try? await client.fetchArtifactText(hyperlinkID: hyperlinkID, kind: "readable_html") else {
+                    continue
+                }
+
+                await MainActor.run {
+                    guard htmlUpgradeTaskToken == taskToken else { return }
+                    applyLoadedHTML(
+                        upgradedHTML,
+                        baseURL: htmlBaseURL,
+                        sourceLabel: ReadabilityContentSourceLabel.live
+                    )
+                    errorMessage = nil
+                    htmlUpgradeTask = nil
+                    htmlUpgradeTaskToken = nil
+                    isWaitingForRenderedHTML = false
+                }
+                return
+            }
+
+            await MainActor.run {
+                guard htmlUpgradeTaskToken == taskToken else { return }
+                htmlUpgradeTask = nil
+                htmlUpgradeTaskToken = nil
+                isWaitingForRenderedHTML = false
+            }
+        }
+    }
+
+    private func clearLoadedContent() {
+        markdown = ""
+        html = ""
+        htmlBaseURL = nil
+        contentSourceLabel = ""
+        rendererMode = .plainText
+        isWaitingForRenderedHTML = false
+    }
+
     private func applyLoadedMarkdown(_ loadedMarkdown: String, sourceLabel: String) {
         markdown = loadedMarkdown
+        html = ""
+        htmlBaseURL = nil
         contentSourceLabel = sourceLabel
         rendererMode = ReadabilityMarkdownRendererMode.preferred(for: loadedMarkdown)
+    }
+
+    private func applyLoadedHTML(_ loadedHTML: String, baseURL: URL?, sourceLabel: String) {
+        html = loadedHTML
+        htmlBaseURL = baseURL
+        markdown = ""
+        contentSourceLabel = sourceLabel
+        rendererMode = .plainText
+        isWaitingForRenderedHTML = false
+    }
+}
+
+private enum ReadabilityContentSourceLabel {
+    static let live = "Live version"
+    static let offlineSnapshot = "Offline snapshot"
+}
+
+enum ReadabilityHTMLUpgradeRetryPlan {
+    static let retryDelaySeconds: [UInt64] = [2, 4, 8, 16]
+
+    static func shouldRetry(for hyperlink: Hyperlink) -> Bool {
+        hyperlink.looksLikePDF
     }
 }
 
@@ -145,12 +308,17 @@ private struct ReadabilityMarkdownContentView: View {
         #if targetEnvironment(macCatalyst)
         plainTextContent
         #else
-        let content = StructuredText(markdown: markdown, baseURL: articleBaseURL)
+        let content = StructuredText(
+            markdown: markdown,
+            baseURL: articleBaseURL,
+            syntaxExtensions: [.math]
+        )
             .font(.body)
             .foregroundStyle(.primary)
             .textual.structuredTextStyle(.gitHub)
             .textual.overflowMode(.scroll)
             .textual.codeBlockStyle(ReadabilityCodeBlockStyle())
+            .textual.mathProperties(.init(fontName: .latinModern, fontScale: 1.08, textAlignment: .center))
             .textual.textSelection(.enabled)
             .environment(\.openURL, OpenURLAction(handler: handleOpenURL))
 
@@ -171,7 +339,7 @@ private struct ReadabilityMarkdownContentView: View {
     }
 
     private func handleOpenURL(_ url: URL) -> OpenURLAction.Result {
-        guard let matchedHyperlink = resolveStoredHyperlink(for: url) else {
+        guard let matchedHyperlink = ReadabilityNavigationResolver.resolveStoredHyperlink(for: url) else {
             return .systemAction(url)
         }
 
@@ -182,8 +350,83 @@ private struct ReadabilityMarkdownContentView: View {
         onOpenHyperlink(matchedHyperlink)
         return .handled
     }
+}
 
-    private func resolveStoredHyperlink(for url: URL) -> Hyperlink? {
+private struct ReadabilityHTMLContentView: UIViewRepresentable {
+    let html: String
+    let baseURL: URL?
+    let hyperlink: Hyperlink
+    let onOpenHyperlink: (Hyperlink) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(hyperlink: hyperlink, onOpenHyperlink: onOpenHyperlink)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        let preferences = WKWebpagePreferences()
+        preferences.allowsContentJavaScript = false
+        configuration.defaultWebpagePreferences = preferences
+
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.hyperlink = hyperlink
+        context.coordinator.onOpenHyperlink = onOpenHyperlink
+
+        if context.coordinator.lastHTML != html || context.coordinator.lastBaseURL != baseURL {
+            context.coordinator.lastHTML = html
+            context.coordinator.lastBaseURL = baseURL
+            webView.loadHTMLString(html, baseURL: baseURL)
+        }
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var hyperlink: Hyperlink
+        var onOpenHyperlink: (Hyperlink) -> Void
+        var lastHTML = ""
+        var lastBaseURL: URL?
+
+        init(hyperlink: Hyperlink, onOpenHyperlink: @escaping (Hyperlink) -> Void) {
+            self.hyperlink = hyperlink
+            self.onOpenHyperlink = onOpenHyperlink
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            guard navigationAction.navigationType == .linkActivated,
+                  let url = navigationAction.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+
+            guard let matchedHyperlink = ReadabilityNavigationResolver.resolveStoredHyperlink(for: url) else {
+                decisionHandler(.allow)
+                return
+            }
+
+            guard matchedHyperlink.id != hyperlink.id else {
+                decisionHandler(.cancel)
+                return
+            }
+
+            onOpenHyperlink(matchedHyperlink)
+            decisionHandler(.cancel)
+        }
+    }
+}
+
+private enum ReadabilityNavigationResolver {
+    static func resolveStoredHyperlink(for url: URL) -> Hyperlink? {
         let normalizedURL = HyperlinkURLMatcher.normalizedString(for: url)
         guard let store = try? HyperlinkStore.openShared(),
               let hyperlinks = try? store.fetchAll() else {
@@ -296,4 +539,63 @@ private struct PDFKitContainerView: UIViewRepresentable {
             view.document = PDFDocument(url: fileURL)
         }
     }
+}
+
+#Preview("Readability Markdown") {
+    ScrollView {
+        ReadabilityMarkdownContentView(
+            markdown: "# Example\n\nInline math: $x^2 + y^2 = z^2$",
+            hyperlink: Hyperlink(
+                id: 1,
+                title: "Example",
+                url: "https://example.com/article",
+                rawURL: "https://example.com/article",
+                summary: nil,
+                ogDescription: nil,
+                isURLValid: true,
+                discoveryDepth: 0,
+                clicksCount: 0,
+                lastClickedAt: nil,
+                processingState: "ready",
+                createdAt: "2026-04-10T00:00:00Z",
+                updatedAt: "2026-04-10T00:00:00Z",
+                thumbnailURL: nil,
+                thumbnailDarkURL: nil,
+                screenshotURL: nil,
+                screenshotDarkURL: nil,
+                discoveredVia: []
+            ),
+            rendererMode: .textual,
+            onOpenHyperlink: { _ in }
+        )
+        .padding()
+    }
+}
+
+#Preview("Readability HTML") {
+    ReadabilityHTMLContentView(
+        html: "<html><body style='font-family: -apple-system; color: white; background: black;'><h1>Readable HTML</h1><p>Rendered by Mathpix.</p></body></html>",
+        baseURL: URL(string: "https://example.com")!,
+        hyperlink: Hyperlink(
+            id: 1,
+            title: "Example",
+            url: "https://example.com/paper.pdf",
+            rawURL: "https://example.com/paper.pdf",
+            summary: nil,
+            ogDescription: nil,
+            isURLValid: true,
+            discoveryDepth: 0,
+            clicksCount: 0,
+            lastClickedAt: nil,
+            processingState: "ready",
+            createdAt: "2026-04-10T00:00:00Z",
+            updatedAt: "2026-04-10T00:00:00Z",
+            thumbnailURL: nil,
+            thumbnailDarkURL: nil,
+            screenshotURL: nil,
+            screenshotDarkURL: nil,
+            discoveredVia: []
+        ),
+        onOpenHyperlink: { _ in }
+    )
 }
