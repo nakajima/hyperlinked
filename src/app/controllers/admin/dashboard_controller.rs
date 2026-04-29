@@ -74,6 +74,7 @@ use crate::{
         context::Context,
         flash::{Flash, FlashName, redirect_with_flash},
         font_diagnostics::FontDiagnostics,
+        system_stats::SystemStats,
     },
 };
 
@@ -379,6 +380,7 @@ async fn render_admin_tab(
     let fonts = crate::server::font_diagnostics::current();
     let mathpix = crate::integrations::mathpix::current_status();
     let mathpix_usage = crate::integrations::mathpix::current_usage_summary().await;
+    let system_stats = crate::server::system_stats::current();
 
     views::render_html_page_with_admin_tabs_and_flash(
         "Admin",
@@ -395,6 +397,7 @@ async fn render_admin_tab(
             &fonts,
             &mathpix,
             &mathpix_usage,
+            &system_stats,
         ),
         Flash::from_headers(headers),
     )
@@ -1720,6 +1723,7 @@ struct AdminIndexTemplate<'a> {
     fonts: &'a FontDiagnostics,
     mathpix: &'a MathpixStatus,
     mathpix_usage: &'a MathpixUsageSummary,
+    system_stats: &'a SystemStats,
     rendered_at: chrono::DateTime<Utc>,
 }
 
@@ -1785,6 +1789,20 @@ impl AdminIndexTemplate<'_> {
 
     fn format_usd_estimate(&self, value: f64) -> String {
         format!("${value:.2}")
+    }
+
+    fn format_process_cpu_percent(&self) -> String {
+        match self.system_stats.cpu_percent {
+            Some(percent) if percent.is_finite() => format!("{percent:.1}%"),
+            _ => "-".to_string(),
+        }
+    }
+
+    fn format_process_resident_memory(&self) -> String {
+        match self.system_stats.resident_memory_bytes {
+            Some(bytes) => format!("{} RSS", format_bytes(bytes)),
+            None => "-".to_string(),
+        }
     }
 
     fn llm_interaction_context(&self, interaction: &llm_interaction::Model) -> String {
@@ -1895,6 +1913,7 @@ fn render_index(
     fonts: &FontDiagnostics,
     mathpix: &MathpixStatus,
     mathpix_usage: &MathpixUsageSummary,
+    system_stats: &SystemStats,
 ) -> Result<String, sailfish::RenderError> {
     AdminIndexTemplate {
         active_tab,
@@ -1912,6 +1931,7 @@ fn render_index(
         fonts,
         mathpix,
         mathpix_usage,
+        system_stats,
         rendered_at: Utc::now(),
     }
     .render()

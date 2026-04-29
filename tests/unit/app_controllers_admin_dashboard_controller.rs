@@ -25,6 +25,15 @@ fn default_mathpix_usage_summary() -> MathpixUsageSummary {
     MathpixUsageSummary::default()
 }
 
+fn default_system_stats() -> SystemStats {
+    SystemStats {
+        pid: 1234,
+        cpu_percent: Some(1.5),
+        resident_memory_bytes: Some(64 * 1024 * 1024),
+        error: None,
+    }
+}
+
 fn default_llm_settings() -> LlmSettings {
     LlmSettings::default()
 }
@@ -198,6 +207,7 @@ fn render_index_shows_chromium_setup_when_missing() {
         &fonts,
         &mathpix,
         &mathpix_usage,
+        &default_system_stats(),
     )
     .expect("admin template should render");
     assert!(html.contains("Screenshot browser setup required"));
@@ -233,6 +243,7 @@ fn render_index_hides_chromium_setup_when_available() {
         &fonts,
         &mathpix,
         &mathpix_usage,
+        &default_system_stats(),
     )
     .expect("admin template should render");
     assert!(!html.contains("Screenshot browser setup required"));
@@ -285,6 +296,7 @@ fn render_index_shows_font_setup_when_missing_fonts_detected() {
         &fonts,
         &mathpix,
         &mathpix_usage,
+        &default_system_stats(),
     )
     .expect("admin template should render");
     assert!(html.contains("Screenshot font setup recommended"));
@@ -324,10 +336,50 @@ fn render_index_shows_mathpix_enabled_status() {
         &fonts,
         &mathpix,
         &mathpix_usage,
+        &default_system_stats(),
     )
     .expect("admin template should render");
     assert!(html.contains("PDF Mathpix parsing"));
     assert!(html.contains("Enabled"));
+}
+
+#[test]
+fn render_index_shows_system_stats() {
+    let summary = MissingArtifactsSummary::default();
+    let stats = AdminDatasetStats::default();
+    let chromium = ChromiumDiagnostics {
+        chromium_path: "/usr/bin/chromium".to_string(),
+        chromium_resolved_path: Some("/usr/bin/chromium".to_string()),
+        chromium_found: true,
+    };
+    let fonts = FontDiagnostics::default();
+    let mathpix = default_mathpix_status();
+    let mathpix_usage = default_mathpix_usage_summary();
+    let system_stats = default_system_stats();
+
+    let html = render_index(
+        AdminTab::Overview,
+        &summary,
+        &stats,
+        &ArtifactCollectionSettings::default(),
+        &default_llm_settings(),
+        AdminLlmInteractionsPage::default(),
+        &crate::server::admin_jobs::QueuePendingCounts {
+            pending: 0,
+            queued: 0,
+            processing: 0,
+        },
+        &chromium,
+        &fonts,
+        &mathpix,
+        &mathpix_usage,
+        &system_stats,
+    )
+    .expect("admin template should render");
+    assert!(html.contains("App process"));
+    assert!(html.contains("<code class=\"font-mono text-[0.9em]\">1234</code>"));
+    assert!(html.contains("<code class=\"font-mono text-[0.9em]\">1.5%</code>"));
+    assert!(html.contains("<code class=\"font-mono text-[0.9em]\">64.0MB RSS</code>"));
 }
 
 #[test]
@@ -362,6 +414,7 @@ fn render_index_shows_mathpix_disabled_reason() {
         &fonts,
         &mathpix,
         &mathpix_usage,
+        &default_system_stats(),
     )
     .expect("admin template should render");
     assert!(html.contains("PDF Mathpix parsing"));
@@ -439,6 +492,7 @@ fn render_index_shows_mathpix_usage_summary() {
         &fonts,
         &mathpix,
         &mathpix_usage,
+        &default_system_stats(),
     )
     .expect("admin template should render");
     assert!(
@@ -490,6 +544,7 @@ fn render_index_shows_mathpix_usage_warning() {
         &fonts,
         &mathpix,
         &mathpix_usage,
+        &default_system_stats(),
     )
     .expect("admin template should render");
     assert!(html.contains("Mathpix usage unavailable: timeout"));

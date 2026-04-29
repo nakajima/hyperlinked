@@ -6,6 +6,7 @@ pub(crate) mod font_diagnostics;
 pub mod graphql;
 mod http_logging;
 mod mdns;
+pub(crate) mod system_stats;
 
 use axum::{Router, response::Redirect, routing::get};
 use axum::{
