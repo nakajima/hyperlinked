@@ -9,12 +9,12 @@ use crate::{
             artifact_inline_path, artifact_kind_label, artifact_kind_slug,
             is_readability_artifact_kind, parse_artifact_kind, show_path,
         },
-        models::{
-            artifact_job::{self, ArtifactFetchMode, ArtifactJobResolveResult},
-            hyperlink_search_doc,
-        },
+        models::artifact_job::{self, ArtifactFetchMode, ArtifactJobResolveResult},
     },
-    entity::{hyperlink, hyperlink_artifact, hyperlink_artifact::HyperlinkArtifactKind},
+    entity::{
+        hyperlink, hyperlink_artifact, hyperlink_artifact::HyperlinkArtifactKind,
+        hyperlink_search_doc,
+    },
 };
 
 use super::result::{ActionResult, ControllerContext};
@@ -177,7 +177,7 @@ pub(crate) async fn delete_artifact_kind(
         )
         .await
     {
-        if !hyperlink_search_doc::is_search_doc_missing_error(&error) {
+        if !hyperlink_search_doc::is_missing_table_error(&error) {
             return ctx.internal_error(format!(
                 "failed to clear readability search text for hyperlink {}: {error}",
                 params.id

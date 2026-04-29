@@ -14,8 +14,7 @@ use std::{
 
 use crate::{
     app::models::{
-        hyperlink_artifact as hyperlink_artifact_model,
-        hyperlink_search_doc as hyperlink_search_doc_model, hyperlink_title,
+        hyperlink_artifact as hyperlink_artifact_model, hyperlink_title,
         llm_discovery::{
             ChatApiKind, build_chat_request_body, chat_endpoint_candidates,
             format_reqwest_transport_error,
@@ -26,6 +25,7 @@ use crate::{
     entity::{
         hyperlink,
         hyperlink_artifact::{self as hyperlink_artifact_entity, HyperlinkArtifactKind},
+        hyperlink_search_doc,
     },
     integrations::mathpix::{self, MathpixConfig, MathpixMode},
     processors::processor::{ProcessingError, Processor},
@@ -581,14 +581,11 @@ impl Processor for ReadabilityFetcher {
         )
         .await
         .map_err(ProcessingError::DB)?;
-        if let Err(error) = hyperlink_search_doc_model::upsert_readable_text(
-            connection,
-            hyperlink_id,
-            &readable_text,
-        )
-        .await
+        if let Err(error) =
+            hyperlink_search_doc::upsert_readable_text(connection, hyperlink_id, &readable_text)
+                .await
         {
-            if !hyperlink_search_doc_model::is_search_doc_missing_error(&error) {
+            if !hyperlink_search_doc::is_missing_table_error(&error) {
                 return Err(ProcessingError::DB(error));
             }
             tracing::debug!(

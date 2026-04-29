@@ -1,3 +1,5 @@
+mod archive_transfer;
+mod artifact_maintenance;
 pub mod backups_controller;
 pub mod dashboard_controller;
 pub mod feeds_controller;

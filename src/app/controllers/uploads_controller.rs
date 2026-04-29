@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::{
     app::models::{
         artifact_job::{self, ArtifactFetchMode, ArtifactJobResolveResult},
-        hyperlink_artifact as hyperlink_artifact_model, hyperlink_processing_job, settings,
+        hyperlink_artifact as hyperlink_artifact_model, settings,
         upload::{
             DEFAULT_FILENAME, find_existing_pdf_upload, latest_job_optional, looks_like_pdf,
             normalized_upload_title, now_utc, pending_upload_placeholder, sanitize_pdf_filename,
@@ -376,7 +376,7 @@ fn to_response(
         clicks_count: link.clicks_count,
         last_clicked_at: link.last_clicked_at.map(|value| value.to_string()),
         processing_state: latest_job
-            .map(|job| hyperlink_processing_job::state_name(job.state.clone()).to_string())
+            .map(|job| job.state.as_str().to_string())
             .unwrap_or_else(|| "ready".to_string()),
         created_at: link.created_at.to_string(),
         updated_at: link.updated_at.to_string(),

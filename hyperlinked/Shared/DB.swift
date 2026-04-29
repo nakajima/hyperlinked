@@ -1,6 +1,5 @@
 import Foundation
 import GRDB
-import GRDBQuery
 
 enum DBError: LocalizedError {
     case appGroupContainerUnavailable(String)
@@ -17,8 +16,8 @@ enum DBError: LocalizedError {
 }
 
 public struct DB {
-    nonisolated static let appGroupID = "group.fm.folder.hyperlinked"
-    nonisolated static let databaseFilename = "db.sqlite"
+    nonisolated static let appGroupID = AppGroupConfig.appGroupID
+    nonisolated static let databaseFilename = AppGroupConfig.databaseFilename
     nonisolated static let outboxTableName = "share_outbox_items"
     nonisolated static let hyperlinkTableName = "hyperlink_records"
     nonisolated static let hyperlinkOfflineSnapshotTableName = "hyperlink_offline_snapshots"
@@ -29,12 +28,6 @@ public struct DB {
         } catch {
             return FileManager.default.temporaryDirectory
                 .appendingPathComponent(databaseFilename, isDirectory: false)
-        }
-    }
-
-    @MainActor static func databaseContext() -> DatabaseContext {
-        .readWrite {
-            try databaseQueue()
         }
     }
 

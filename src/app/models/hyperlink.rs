@@ -1,10 +1,8 @@
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, ExprTrait, QueryFilter,
-    QueryOrder, QuerySelect, TransactionTrait,
+    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
     entity::prelude::{DateTime, DateTimeUtc},
-    sea_query::Expr,
 };
 use serde::Deserialize;
 
@@ -18,8 +16,10 @@ use crate::{
     entity::hyperlink_processing_job::HyperlinkProcessingJobKind,
 };
 
-pub const ROOT_DISCOVERY_DEPTH: i32 = 0;
-pub const DISCOVERED_DISCOVERY_DEPTH: i32 = 1;
+pub use crate::entity::hyperlink::{
+    DISCOVERED_DISCOVERY_DEPTH, ROOT_DISCOVERY_DEPTH, TitleBackfillReport, backfill_clean_titles,
+    delete_by_id_with_tombstone, find_by_url, increment_click_count_by_id, list_updated_after,
+};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct HyperlinkInput {
@@ -38,13 +38,6 @@ pub struct NormalizedHyperlinkInput {
 pub enum UpsertResult {
     Inserted,
     Updated,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct TitleBackfillReport {
-    pub scanned: usize,
-    pub updated: usize,
-    pub unchanged: usize,
 }
 
 pub async fn validate_and_normalize(
@@ -126,29 +119,6 @@ pub async fn insert_discovered(
             }
         }
     }
-}
-
-pub async fn find_by_url(
-    connection: &DatabaseConnection,
-    url: &str,
-) -> Result<Option<hyperlink::Model>, sea_orm::DbErr> {
-    hyperlink::Entity::find()
-        .filter(hyperlink::Column::Url.eq(url.to_string()))
-        .order_by_asc(hyperlink::Column::Id)
-        .one(connection)
-        .await
-}
-
-pub async fn list_updated_after(
-    connection: &impl ConnectionTrait,
-    updated_after: DateTime,
-) -> Result<Vec<hyperlink::Model>, sea_orm::DbErr> {
-    hyperlink::Entity::find()
-        .filter(hyperlink::Column::UpdatedAt.gt(updated_after))
-        .order_by_asc(hyperlink::Column::UpdatedAt)
-        .order_by_asc(hyperlink::Column::Id)
-        .all(connection)
-        .await
 }
 
 async fn insert_with_created_at_and_depth(
@@ -266,99 +236,6 @@ async fn promote_existing_to_root(
     }
     active_model.updated_at = Set(now_utc());
     active_model.update(connection).await
-}
-
-pub async fn increment_click_count_by_id(
-    connection: &DatabaseConnection,
-    id: i32,
-) -> Result<Option<hyperlink::Model>, sea_orm::DbErr> {
-    let now = now_utc();
-    let updated = hyperlink::Entity::update_many()
-        .col_expr(
-            hyperlink::Column::ClicksCount,
-            Expr::col(hyperlink::Column::ClicksCount).add(1),
-        )
-        .col_expr(hyperlink::Column::LastClickedAt, Expr::val(now).into())
-        .filter(hyperlink::Column::Id.eq(id))
-        .exec(connection)
-        .await?;
-
-    if updated.rows_affected == 0 {
-        return Ok(None);
-    }
-
-    hyperlink::Entity::find_by_id(id).one(connection).await
-}
-
-pub async fn delete_by_id_with_tombstone(
-    connection: &DatabaseConnection,
-    id: i32,
-) -> Result<bool, sea_orm::DbErr> {
-    if hyperlink::Entity::find_by_id(id)
-        .one(connection)
-        .await?
-        .is_none()
-    {
-        return Ok(false);
-    }
-
-    let deleted_at = now_utc();
-    let txn = connection.begin().await?;
-    crate::app::models::hyperlink_tombstone::upsert(&txn, id, deleted_at).await?;
-    let deleted = hyperlink::Entity::delete_by_id(id).exec(&txn).await?;
-
-    if deleted.rows_affected == 0 {
-        txn.rollback().await?;
-        return Ok(false);
-    }
-
-    txn.commit().await?;
-    Ok(true)
-}
-
-pub async fn backfill_clean_titles(
-    connection: &DatabaseConnection,
-    batch_size: u64,
-) -> Result<TitleBackfillReport, sea_orm::DbErr> {
-    let mut report = TitleBackfillReport::default();
-    let mut last_id = 0i32;
-    let batch_size = batch_size.clamp(1, 10_000);
-
-    loop {
-        let rows = hyperlink::Entity::find()
-            .filter(hyperlink::Column::Id.gt(last_id))
-            .order_by_asc(hyperlink::Column::Id)
-            .limit(batch_size)
-            .all(connection)
-            .await?;
-
-        if rows.is_empty() {
-            break;
-        }
-
-        for row in rows {
-            last_id = row.id;
-            report.scanned += 1;
-
-            let cleaned_title = crate::app::models::hyperlink_title::strip_site_affixes(
-                row.title.as_str(),
-                row.url.as_str(),
-                row.raw_url.as_str(),
-            );
-            if cleaned_title == row.title {
-                report.unchanged += 1;
-                continue;
-            }
-
-            let mut active_model: hyperlink::ActiveModel = row.into();
-            active_model.title = Set(cleaned_title);
-            active_model.updated_at = Set(now_utc());
-            active_model.update(connection).await?;
-            report.updated += 1;
-        }
-    }
-
-    Ok(report)
 }
 
 async fn enqueue_processing_if_enabled(

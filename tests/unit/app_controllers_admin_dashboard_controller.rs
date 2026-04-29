@@ -1122,7 +1122,7 @@ fn sqlite_disk_stats_from_main_path_counts_main_wal_and_shm() {
 
 #[tokio::test]
 async fn admin_export_downloads_zip_payload_with_artifacts() {
-    let (server, _) = new_server(
+    let (server, connection) = new_server(
             r#"
                 INSERT INTO hyperlink (id, title, url, raw_url, discovery_depth, clicks_count, last_clicked_at, created_at, updated_at)
                 VALUES
@@ -1137,6 +1137,10 @@ async fn admin_export_downloads_zip_payload_with_artifacts() {
             "#,
         )
         .await;
+
+    crate::app::models::readability_progress::set(&connection, 2, 0.625)
+        .await
+        .expect("readability progress should save");
 
     let not_ready = server.get("/admin/export/download").await;
     not_ready.assert_status(StatusCode::CONFLICT);
@@ -1179,6 +1183,7 @@ async fn admin_export_downloads_zip_payload_with_artifacts() {
     assert_eq!(manifest.hyperlinks, 2);
     assert_eq!(manifest.relations, 1);
     assert_eq!(manifest.artifacts, 1);
+    assert_eq!(manifest.readability_progress, 1);
 
     let hyperlinks: Vec<HyperlinkBackupRow> =
         read_zip_json_file(&mut archive, BACKUP_HYPERLINKS_PATH).expect("hyperlinks should parse");
@@ -1200,6 +1205,13 @@ async fn admin_export_downloads_zip_payload_with_artifacts() {
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].id, 9);
     assert_eq!(artifacts[0].payload_path, "artifacts/9.bin");
+
+    let readability_progress: Vec<ReadabilityProgressBackupRow> =
+        read_zip_json_file(&mut archive, BACKUP_READABILITY_PROGRESS_PATH)
+            .expect("readability progress should parse");
+    assert_eq!(readability_progress.len(), 1);
+    assert_eq!(readability_progress[0].hyperlink_id, 2);
+    assert_eq!(readability_progress[0].progress, 0.625);
 
     let payload = read_zip_binary_file(&mut archive, "artifacts/9.bin")
         .expect("artifact payload should exist");
@@ -1374,12 +1386,18 @@ async fn admin_import_restores_zip_payload_with_artifacts() {
         checksum_sha256: None,
         payload_path: "artifacts/33.bin".to_string(),
     }];
+    let readability_progress = vec![ReadabilityProgressBackupRow {
+        hyperlink_id: 12,
+        progress: 0.375,
+        updated_at: "2026-02-22T00:35:00Z".to_string(),
+    }];
     let manifest = BackupManifest {
         version: BACKUP_VERSION,
         exported_at: "2026-02-22T00:40:00Z".to_string(),
         hyperlinks: hyperlinks.len(),
         relations: relations.len(),
         artifacts: artifacts.len(),
+        readability_progress: readability_progress.len(),
     };
 
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
@@ -1400,6 +1418,12 @@ async fn admin_import_restores_zip_payload_with_artifacts() {
     .expect("artifact payload should write");
     write_zip_json_file(&mut writer, BACKUP_ARTIFACTS_PATH, &artifacts)
         .expect("artifacts should write");
+    write_zip_json_file(
+        &mut writer,
+        BACKUP_READABILITY_PROGRESS_PATH,
+        &readability_progress,
+    )
+    .expect("readability progress should write");
     let archive_payload = writer
         .finish()
         .expect("zip writer should finish")
@@ -1457,6 +1481,16 @@ async fn admin_import_restores_zip_payload_with_artifacts() {
             0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50
         ]
     );
+
+    let restored_progress = crate::app::models::readability_progress::get(&connection, 12)
+        .await
+        .expect("readability progress should load")
+        .expect("readability progress should exist");
+    assert_eq!(restored_progress.progress, 0.375);
+    assert_eq!(
+        format_datetime(&restored_progress.updated_at),
+        "2026-02-22T00:35:00Z"
+    );
 }
 
 #[tokio::test]
@@ -1502,6 +1536,7 @@ async fn admin_import_restores_gzip_snapshot_warc_artifact_and_processing_payloa
         hyperlinks: hyperlinks.len(),
         relations: relations.len(),
         artifacts: artifacts.len(),
+        readability_progress: 0,
     };
 
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
@@ -1610,6 +1645,7 @@ async fn admin_import_cancel_stops_running_import_job() {
         hyperlinks: hyperlinks.len(),
         relations: relations.len(),
         artifacts: artifacts.len(),
+        readability_progress: 0,
     };
 
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));

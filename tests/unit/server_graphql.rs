@@ -4,6 +4,10 @@ use axum_test::TestServer;
 use serde_json::{Value, json};
 
 async fn new_server() -> TestServer {
+    new_server_with_connection().await.0
+}
+
+async fn new_server_with_connection() -> (TestServer, DatabaseConnection) {
     let connection = test_support::new_memory_connection().await;
     test_support::initialize_hyperlinks_schema(&connection).await;
     test_support::execute_sql(
@@ -29,13 +33,16 @@ async fn new_server() -> TestServer {
     let app = Router::<Context>::new()
         .merge(routes())
         .with_state(Context {
-            connection,
+            connection: connection.clone(),
             processing_queue: None,
             backup_exports: crate::server::admin_backup::AdminBackupManager::default(),
             backup_imports: crate::server::admin_import::AdminImportManager::default(),
         });
 
-    TestServer::new(app).expect("test server should initialize")
+    (
+        TestServer::new(app).expect("test server should initialize"),
+        connection,
+    )
 }
 
 async fn run_graphql(server: &TestServer, query: &str) -> Value {
@@ -315,6 +322,160 @@ async fn graphql_updated_hyperlinks_rejects_invalid_updated_at() {
 }
 
 #[tokio::test]
+async fn graphql_readability_progress_round_trips() {
+    let server = new_server().await;
+    let mutation_payload = run_graphql(
+        &server,
+        r#"
+            mutation {
+              setReadabilityProgress(hyperlinkId: 1, progress: 0.42) {
+                hyperlinkId
+                progress
+                updatedAt
+              }
+            }
+            "#,
+    )
+    .await;
+
+    assert_eq!(
+        mutation_payload["data"]["setReadabilityProgress"]["hyperlinkId"],
+        1
+    );
+    assert_eq!(
+        mutation_payload["data"]["setReadabilityProgress"]["progress"],
+        0.42
+    );
+    assert!(
+        mutation_payload["data"]["setReadabilityProgress"]["updatedAt"]
+            .as_str()
+            .unwrap_or("")
+            .contains('T')
+    );
+
+    let query_payload = run_graphql(
+        &server,
+        r#"
+            {
+              readabilityProgress(hyperlinkId: 1) {
+                hyperlinkId
+                progress
+                updatedAt
+              }
+            }
+            "#,
+    )
+    .await;
+
+    assert_eq!(
+        query_payload["data"]["readabilityProgress"]["hyperlinkId"],
+        1
+    );
+    assert_eq!(
+        query_payload["data"]["readabilityProgress"]["progress"],
+        0.42
+    );
+}
+
+#[tokio::test]
+async fn graphql_readability_progress_rejects_invalid_values() {
+    let server = new_server().await;
+    let payload = run_graphql(
+        &server,
+        r#"
+            mutation {
+              setReadabilityProgress(hyperlinkId: 1, progress: 1.5) {
+                progress
+              }
+            }
+            "#,
+    )
+    .await;
+
+    let errors = payload["errors"].as_array().expect("errors should exist");
+    assert!(
+        !errors.is_empty(),
+        "invalid progress should return a graphql error"
+    );
+
+    let first_error_message = errors
+        .first()
+        .and_then(|item| item.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    assert!(
+        first_error_message.contains("progress must be between 0.0 and 1.0"),
+        "expected validator error, got: {first_error_message}"
+    );
+}
+
+#[tokio::test]
+async fn graphql_readability_progress_rejects_missing_hyperlinks() {
+    let server = new_server().await;
+    let payload = run_graphql(
+        &server,
+        r#"
+            mutation {
+              setReadabilityProgress(hyperlinkId: 999, progress: 0.42) {
+                progress
+              }
+            }
+            "#,
+    )
+    .await;
+
+    let errors = payload["errors"].as_array().expect("errors should exist");
+    assert!(
+        !errors.is_empty(),
+        "missing hyperlink should return a graphql error"
+    );
+
+    let first_error_message = errors
+        .first()
+        .and_then(|item| item.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    assert!(
+        first_error_message.contains("hyperlink 999 not found"),
+        "expected missing hyperlink error, got: {first_error_message}"
+    );
+}
+
+#[tokio::test]
+async fn graphql_readability_progress_ignores_orphaned_progress_rows() {
+    let (server, connection) = new_server_with_connection().await;
+    crate::app::models::kv_store::set(
+        &connection,
+        "readability_progress.hyperlink.999",
+        "0.500000",
+    )
+    .await
+    .expect("orphaned progress should save");
+
+    let payload = run_graphql(
+        &server,
+        r#"
+            {
+              readabilityProgress(hyperlinkId: 999) {
+                hyperlinkId
+                progress
+              }
+            }
+            "#,
+    )
+    .await;
+
+    assert!(payload["data"]["readabilityProgress"].is_null());
+    let stored =
+        crate::app::models::kv_store::get(&connection, "readability_progress.hyperlink.999")
+            .await
+            .expect("orphaned progress lookup should succeed");
+    assert!(stored.is_none());
+}
+
+#[tokio::test]
 async fn graphql_query_artifacts_connection_works() {
     let server = new_server().await;
     let payload = run_graphql(
@@ -346,24 +507,10 @@ async fn graphql_query_artifacts_connection_works() {
 }
 
 #[tokio::test]
-async fn graphql_mutation_is_rejected() {
+async fn graphql_ping_mutation_is_available() {
     let server = new_server().await;
     let payload = run_graphql(&server, "mutation { _ping }").await;
-    let errors = payload["errors"].as_array().expect("errors should exist");
-    assert!(
-        !errors.is_empty(),
-        "mutation should fail on read-only schema"
-    );
-    let first_error_message = errors
-        .first()
-        .and_then(|item| item.get("message"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_lowercase();
-    assert!(
-        first_error_message.contains("mutations are disabled"),
-        "expected read-only error, got: {first_error_message}"
-    );
+    assert_eq!(payload["data"]["_ping"], "pong");
 }
 
 #[tokio::test]

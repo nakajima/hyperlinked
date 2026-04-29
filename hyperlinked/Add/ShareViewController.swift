@@ -14,14 +14,20 @@ final class ShareViewController: UIViewController {
         case failed(String)
     }
 
-    private struct ConfiguredServerConnection {
-        let baseURL: URL
-        let authorizationHeaderValue: String?
-    }
+    private enum ServerConfigurationState {
+        case ready(baseURL: URL, authorizationHeaderValue: String?)
+        case missingServer
+        case missingCredentials
 
-    private let appGroupID = "group.fm.folder.hyperlinked"
-    private let selectedServerURLKey = "selected_server_base_url"
-    private let selectedServerAuthModeKey = "selected_server_auth_mode"
+        var validationMessage: String {
+            switch self {
+            case .ready, .missingServer:
+                return "Open Hyperlinked and configure a server first."
+            case .missingCredentials:
+                return "Open Hyperlinked and save Basic Auth credentials for this server."
+            }
+        }
+    }
 
     private var candidates: [SharedLinkCandidate] = []
     private var selectedCandidateID: String?
@@ -31,10 +37,8 @@ final class ShareViewController: UIViewController {
     private var isSubmitting = false
     private var isManualUIVisible = false
     private var isShowingTransientToast = false
-    private let credentialsStore = ShareServerCredentialsStore()
-    private lazy var outboxStore: ShareOutboxStore? = try? ShareOutboxStore.openShared(
-        appGroupID: appGroupID
-    )
+    private let credentialsStore = ServerCredentialsStore()
+    private lazy var outboxStore: ShareOutboxStore? = try? ShareOutboxStore.openShared()
 
     private let titleLabel = UILabel()
     private let titleTextView = UITextView()
@@ -199,16 +203,12 @@ final class ShareViewController: UIViewController {
 
             if extraction.candidates.count == 1, let candidate = extraction.candidates.first {
                 let defaultTitle = extraction.title.trimmingCharacters(in: .whitespacesAndNewlines)
-                let saveResult = await executeSave(
-                    candidate: candidate,
-                    resolvedTitle: defaultTitle.nilIfEmpty
-                )
-                switch saveResult {
+                switch await executeSave(candidate: candidate, resolvedTitle: defaultTitle.nilIfEmpty) {
                 case .delivered:
-                    await completeAfterToast("Saved")
+                    await completeRequest(afterShowing: "Saved", asToast: true)
                     return
                 case .queuedOffline:
-                    await completeAfterToast("Saved offline")
+                    await completeRequest(afterShowing: "Saved offline", asToast: true)
                     return
                 case .failed(let message):
                     await MainActor.run {
@@ -239,11 +239,9 @@ final class ShareViewController: UIViewController {
         }
 
         candidates = extraction.candidates
-        if candidates.count == 1 {
-            selectedCandidateID = candidates.first?.id
-        } else if !candidates.contains(where: { $0.id == selectedCandidateID }) {
-            selectedCandidateID = nil
-        }
+        selectedCandidateID = candidates.count == 1
+            ? candidates.first?.id
+            : candidates.first(where: { $0.id == selectedCandidateID })?.id
 
         linksTableView.reloadData()
     }
@@ -252,8 +250,9 @@ final class ShareViewController: UIViewController {
         candidate: SharedLinkCandidate,
         resolvedTitle: String?
     ) async -> SaveExecutionResult {
-        guard let serverConnection = configuredServerConnection() else {
-            return .failed(serverConfigurationValidationMessage())
+        let serverConfiguration = serverConfigurationState()
+        guard case let .ready(baseURL, authorizationHeaderValue) = serverConfiguration else {
+            return .failed(serverConfiguration.validationMessage)
         }
         guard let outboxStore else {
             return .failed("Could not save this link locally. Please try again.")
@@ -280,8 +279,8 @@ final class ShareViewController: UIViewController {
         }
 
         let client = ShareAPIClient(
-            baseURL: serverConnection.baseURL,
-            authorizationHeaderValue: serverConnection.authorizationHeaderValue
+            baseURL: baseURL,
+            authorizationHeaderValue: authorizationHeaderValue
         )
         do {
             try await deliverOutboxItem(queuedItem, with: client)
@@ -304,14 +303,24 @@ final class ShareViewController: UIViewController {
         view.setNeedsLayout()
     }
 
-    private func completeAfterToast(_ message: String) async {
+    private func completeRequest(afterShowing message: String, asToast: Bool) async {
         await MainActor.run {
-            setManualUIVisible(false)
-            showTransientToast(message)
+            if asToast {
+                setManualUIVisible(false)
+                showTransientToast(message)
+            } else {
+                statusLabel.text = message
+                statusLabel.isHidden = false
+                statusLabel.textColor = .secondaryLabel
+            }
         }
-        try? await Task.sleep(nanoseconds: 700_000_000)
+        try? await Task.sleep(nanoseconds: asToast ? 700_000_000 : 650_000_000)
         await MainActor.run {
-            hideTransientToast()
+            if asToast {
+                isShowingTransientToast = false
+                transientToastView?.removeFromSuperview()
+                transientToastView = nil
+            }
             extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
         }
     }
@@ -354,13 +363,6 @@ final class ShareViewController: UIViewController {
         }
     }
 
-    @MainActor
-    private func hideTransientToast() {
-        isShowingTransientToast = false
-        transientToastView?.removeFromSuperview()
-        transientToastView = nil
-    }
-
     private func validationMessage() -> String? {
         if isSubmitting {
             return "Saving..."
@@ -368,8 +370,9 @@ final class ShareViewController: UIViewController {
         if isPreparingPayload {
             return "Preparing shared content..."
         }
-        guard configuredServerConnection() != nil else {
-            return serverConfigurationValidationMessage()
+        let serverConfiguration = serverConfigurationState()
+        guard case .ready = serverConfiguration else {
+            return serverConfiguration.validationMessage
         }
         guard outboxStore != nil else {
             return "Could not access shared storage for offline queue."
@@ -470,15 +473,11 @@ final class ShareViewController: UIViewController {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty ?? extractedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let saveResult = await executeSave(
-            candidate: selectedCandidate,
-            resolvedTitle: resolvedTitle
-        )
-        switch saveResult {
+        switch await executeSave(candidate: selectedCandidate, resolvedTitle: resolvedTitle) {
         case .delivered:
-            await finishWithCompletionMessage("Saved to Hyperlinked.")
+            await completeRequest(afterShowing: "Saved to Hyperlinked.", asToast: false)
         case .queuedOffline:
-            await finishWithCompletionMessage("Saved offline. Syncing later.")
+            await completeRequest(afterShowing: "Saved offline. Syncing later.", asToast: false)
         case .failed(let message):
             showBlockingError(message)
         }
@@ -537,108 +536,34 @@ final class ShareViewController: UIViewController {
         present(alert, animated: true)
     }
 
-    private func finishWithCompletionMessage(_ message: String) async {
-        await MainActor.run {
-            statusLabel.text = message
-            statusLabel.isHidden = false
-            statusLabel.textColor = .secondaryLabel
-        }
-        try? await Task.sleep(nanoseconds: 650_000_000)
-        await MainActor.run {
-            extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
-        }
-    }
-
     private func updateTitlePlaceholderVisibility() {
         titlePlaceholderLabel.isHidden = !titleTextView.text
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .isEmpty
     }
 
-    private func configuredServerConnection() -> ConfiguredServerConnection? {
-        let defaults = UserDefaults(suiteName: appGroupID)
-        guard let raw = defaults?.string(forKey: selectedServerURLKey) else {
-            return nil
-        }
-        guard let baseURL = normalizedServerURL(from: raw) else {
-            return nil
+    private func serverConfigurationState() -> ServerConfigurationState {
+        let defaults = UserDefaults(suiteName: AppGroupConfig.appGroupID)
+        guard let raw = defaults?.string(forKey: AppGroupConfig.DefaultsKey.selectedServerURL),
+              let baseURL = ServerConnectionSettings.normalizedServerURL(from: raw) else {
+            return .missingServer
         }
 
-        let mode = ShareServerAuthMode(
-            rawValue: defaults?.string(forKey: selectedServerAuthModeKey) ?? ""
-        ) ?? .none
-        switch mode {
-        case .none:
-            return ConfiguredServerConnection(
-                baseURL: baseURL,
-                authorizationHeaderValue: nil
-            )
-        case .basic:
-            let serverKey = serverCredentialKey(for: baseURL)
-            guard let credentials = credentialsStore.loadCredentials(for: serverKey) else {
-                return nil
-            }
-            return ConfiguredServerConnection(
-                baseURL: baseURL,
-                authorizationHeaderValue: credentials.authorizationHeaderValue
-            )
-        }
-    }
-
-    private func serverConfigurationValidationMessage() -> String {
-        let defaults = UserDefaults(suiteName: appGroupID)
-        guard let raw = defaults?.string(forKey: selectedServerURLKey),
-              let baseURL = normalizedServerURL(from: raw) else {
-            return "Open Hyperlinked and configure a server first."
-        }
-        let mode = ShareServerAuthMode(
-            rawValue: defaults?.string(forKey: selectedServerAuthModeKey) ?? ""
+        let mode = ServerAuthMode(
+            rawValue: defaults?.string(forKey: AppGroupConfig.DefaultsKey.selectedServerAuthMode) ?? ""
         ) ?? .none
         guard mode == .basic else {
-            return "Open Hyperlinked and configure a server first."
-        }
-        let serverKey = serverCredentialKey(for: baseURL)
-        if credentialsStore.loadCredentials(for: serverKey) == nil {
-            return "Open Hyperlinked and save Basic Auth credentials for this server."
-        }
-        return "Open Hyperlinked and configure a server first."
-    }
-
-    private func serverCredentialKey(for url: URL) -> String {
-        normalizedServerURL(from: url.absoluteString)?
-            .absoluteString
-            .lowercased() ?? url.absoluteString.lowercased()
-    }
-
-    private func normalizedServerURL(from rawValue: String) -> URL? {
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return nil
+            return .ready(baseURL: baseURL, authorizationHeaderValue: nil)
         }
 
-        let candidate = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
-        guard var components = URLComponents(string: candidate),
-              let scheme = components.scheme?.lowercased(),
-              (scheme == "http" || scheme == "https"),
-              let host = components.host,
-              !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
+        let serverKey = ServerConnectionSettings.serverCredentialKey(for: baseURL)
+        guard let credentials = credentialsStore.loadCredentials(for: serverKey) else {
+            return .missingCredentials
         }
-
-        components.user = nil
-        components.password = nil
-        components.path = ""
-        components.query = nil
-        components.fragment = nil
-
-        guard let url = components.url else {
-            return nil
-        }
-        let absolute = url.absoluteString
-        if absolute.hasSuffix("/") {
-            return URL(string: String(absolute.dropLast()))
-        }
-        return url
+        return .ready(
+            baseURL: baseURL,
+            authorizationHeaderValue: credentials.authorizationHeaderValue
+        )
     }
 }
 

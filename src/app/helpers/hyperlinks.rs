@@ -42,7 +42,7 @@ pub(crate) fn to_response(
 
 pub(crate) fn processing_state_name(job: Option<&hyperlink_processing_job::Model>) -> &'static str {
     match job {
-        Some(job) => crate::app::models::hyperlink_processing_job::state_name(job.state.clone()),
+        Some(job) => job.state.as_str(),
         None => "idle",
     }
 }

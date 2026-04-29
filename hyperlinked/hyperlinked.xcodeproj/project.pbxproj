@@ -15,6 +15,7 @@
 		A6FE79992F4F92C30021B6C3 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A6FE79982F4F92C30021B6C3 /* WidgetKit.framework */; };
 		A6FE799B2F4F92C30021B6C3 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A6FE799A2F4F92C30021B6C3 /* SwiftUI.framework */; };
 		A6FE79A82F4F92C40021B6C3 /* WidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A6FE79962F4F92C30021B6C3 /* WidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		C0A100022F70000100A1A1A1 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A63EC0312F4D9B8900C9F2E1 /* GRDB */; };
 		B0A100012F60000100A1A1A1 /* Apollo in Frameworks */ = {isa = PBXBuildFile; productRef = B0A100022F60000100A1A1A1 /* Apollo */; };
 		B0A100032F60000100A1A1A1 /* ApolloAPI in Frameworks */ = {isa = PBXBuildFile; productRef = B0A100042F60000100A1A1A1 /* ApolloAPI */; };
 /* End PBXBuildFile section */
@@ -124,6 +125,11 @@
 			path = Widget;
 			sourceTree = "<group>";
 		};
+		C0A100012F70000100A1A1A1 /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Shared;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -165,6 +171,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0A100022F70000100A1A1A1 /* GRDB in Frameworks */,
 				A6FE799B2F4F92C30021B6C3 /* SwiftUI.framework in Frameworks */,
 				A6FE79992F4F92C30021B6C3 /* WidgetKit.framework in Frameworks */,
 			);
@@ -181,6 +188,7 @@
 				A63EBFAB2F4CDD9700C9F2E1 /* hyperlinkedUITests */,
 				A63EC0212F4D991F00C9F2E1 /* Add */,
 				A6FE799C2F4F92C30021B6C3 /* Widget */,
+				C0A100012F70000100A1A1A1 /* Shared */,
 				A6FE79972F4F92C30021B6C3 /* Frameworks */,
 				A63EBF922F4CDD9700C9F2E1 /* Products */,
 			);
@@ -227,6 +235,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				A63EBF932F4CDD9700C9F2E1 /* hyperlinked */,
+				C0A100012F70000100A1A1A1 /* Shared */,
 			);
 			name = hyperlinked;
 			packageProductDependencies = (
@@ -300,6 +309,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				A63EC0212F4D991F00C9F2E1 /* Add */,
+				C0A100012F70000100A1A1A1 /* Shared */,
 			);
 			name = Add;
 			packageProductDependencies = (
@@ -323,9 +333,11 @@
 			);
 			fileSystemSynchronizedGroups = (
 				A6FE799C2F4F92C30021B6C3 /* Widget */,
+				C0A100012F70000100A1A1A1 /* Shared */,
 			);
 			name = WidgetExtension;
 			packageProductDependencies = (
+				A63EC0312F4D9B8900C9F2E1 /* GRDB */,
 			);
 			productName = WidgetExtension;
 			productReference = A6FE79962F4F92C30021B6C3 /* WidgetExtension.appex */;
@@ -1096,7 +1108,6 @@
 		A659C5032F6E599900E37016 /* Textual */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A659C5022F6E599900E37016 /* XCRemoteSwiftPackageReference "textual" */;
-			platformFilter = ios;
 			productName = Textual;
 		};
 		B0A100022F60000100A1A1A1 /* Apollo */ = {

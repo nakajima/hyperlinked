@@ -22,14 +22,16 @@ use seaography::{
         dynamic::{
             Enum, Field, FieldFuture, FieldValue, InputValue, Object, Schema, SchemaError, TypeRef,
         },
-        parser::types::{DocumentOperations, OperationType},
     },
     heck::ToLowerCamelCase,
     lazy_static,
 };
 
 use crate::{
-    entity::{hyperlink, hyperlink_artifact, hyperlink_processing_job, hyperlink_relation},
+    entity::{
+        hyperlink, hyperlink_artifact, hyperlink_processing_job, hyperlink_relation,
+        hyperlink_tombstone,
+    },
     server::{
         context::Context,
         hyperlink_fetcher::{HyperlinkFetchQuery, HyperlinkFetcher},
@@ -57,6 +59,7 @@ const UPDATED_HYPERLINKS_PAYLOAD_TYPE: &str = "UpdatedHyperlinksPayload";
 const UPDATED_HYPERLINK_CHANGE_TYPE: &str = "UpdatedHyperlinkChange";
 const HYPERLINK_CHANGE_TYPE_ENUM: &str = "HyperlinkChangeType";
 const HYPERLINK_REF_TYPE: &str = "HyperlinkRef";
+const READABILITY_PROGRESS_TYPE: &str = "ReadabilityProgress";
 const FIELD_UPDATED_AT: &str = "updatedAt";
 
 #[derive(Clone, Debug)]
@@ -157,10 +160,6 @@ async fn execute(
     headers: HeaderMap,
     Json(request): Json<Request>,
 ) -> Json<Response> {
-    if operation_type(&request) == Some(OperationType::Mutation) {
-        return Json(read_only_response());
-    }
-
     let request_base_url = GraphqlRequestBaseUrl(
         derive_request_base_url(&headers).unwrap_or_else(|| "http://localhost:8765".to_string()),
     );
@@ -188,6 +187,9 @@ fn schema(
     register_read_only_entity!(builder, hyperlink);
     register_hyperlinks_query_field(&mut builder, hyperlinks_query_index);
     register_updated_hyperlinks_query_field(&mut builder);
+    builder.outputs.push(readability_progress_object());
+    register_readability_progress_query_field(&mut builder);
+    register_readability_progress_mutation_field(&mut builder);
     register_read_only_entity!(builder, hyperlink_processing_job);
     register_read_only_entity!(builder, hyperlink_artifact);
     register_hyperlink_sublinks_field(&mut builder);
@@ -336,6 +338,125 @@ fn register_updated_hyperlinks_query_field(builder: &mut Builder) {
     builder.queries.push(updated_hyperlinks_field);
 }
 
+fn register_readability_progress_query_field(builder: &mut Builder) {
+    const FIELD_HYPERLINK_ID: &str = "hyperlinkId";
+
+    builder.queries.push(
+        Field::new(
+            "readabilityProgress",
+            TypeRef::named(READABILITY_PROGRESS_TYPE),
+            move |ctx| {
+                FieldFuture::new(async move {
+                    let db = ctx.data::<DatabaseConnection>()?;
+                    let hyperlink_id =
+                        parse_hyperlink_id_argument(ctx.args.try_get(FIELD_HYPERLINK_ID)?)?;
+                    let progress = crate::app::models::readability_progress::get(db, hyperlink_id)
+                        .await?
+                        .map(FieldValue::owned_any);
+                    Ok(progress)
+                })
+            },
+        )
+        .argument(InputValue::new(
+            FIELD_HYPERLINK_ID,
+            TypeRef::named_nn(TypeRef::INT),
+        )),
+    );
+}
+
+fn register_readability_progress_mutation_field(builder: &mut Builder) {
+    const FIELD_HYPERLINK_ID: &str = "hyperlinkId";
+    const FIELD_PROGRESS: &str = "progress";
+
+    builder.mutations.push(
+        Field::new(
+            "setReadabilityProgress",
+            TypeRef::named_nn(READABILITY_PROGRESS_TYPE),
+            move |ctx| {
+                FieldFuture::new(async move {
+                    let db = ctx.data::<DatabaseConnection>()?;
+                    let hyperlink_id =
+                        parse_hyperlink_id_argument(ctx.args.try_get(FIELD_HYPERLINK_ID)?)?;
+                    let progress = ctx.args.try_get(FIELD_PROGRESS)?.f64()?;
+                    let progress = validate_readability_progress(progress)?;
+                    let saved =
+                        crate::app::models::readability_progress::set(db, hyperlink_id, progress)
+                            .await
+                            .map_err(|err| async_graphql::Error::new(err.to_string()))?;
+                    Ok(Some(FieldValue::owned_any(saved)))
+                })
+            },
+        )
+        .argument(InputValue::new(
+            FIELD_HYPERLINK_ID,
+            TypeRef::named_nn(TypeRef::INT),
+        ))
+        .argument(InputValue::new(
+            FIELD_PROGRESS,
+            TypeRef::named_nn(TypeRef::FLOAT),
+        )),
+    );
+}
+
+fn readability_progress_object() -> Object {
+    Object::new(READABILITY_PROGRESS_TYPE)
+        .field(Field::new(
+            "hyperlinkId",
+            TypeRef::named_nn(TypeRef::INT),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let progress = ctx
+                        .parent_value
+                        .try_downcast_ref::<crate::app::models::readability_progress::ReadabilityProgress>()?;
+                    Ok(Some(FieldValue::value(progress.hyperlink_id)))
+                })
+            },
+        ))
+        .field(Field::new("progress", TypeRef::named_nn(TypeRef::FLOAT), |ctx| {
+            FieldFuture::new(async move {
+                let progress = ctx
+                    .parent_value
+                    .try_downcast_ref::<crate::app::models::readability_progress::ReadabilityProgress>()?;
+                Ok(Some(FieldValue::value(progress.progress)))
+            })
+        }))
+        .field(Field::new(
+            "updatedAt",
+            TypeRef::named_nn(TypeRef::STRING),
+            |ctx| {
+                FieldFuture::new(async move {
+                    let progress = ctx
+                        .parent_value
+                        .try_downcast_ref::<crate::app::models::readability_progress::ReadabilityProgress>()?;
+                    Ok(Some(FieldValue::value(format_graphql_datetime(
+                        &progress.updated_at,
+                    ))))
+                })
+            },
+        ))
+}
+
+fn parse_hyperlink_id_argument(
+    value: async_graphql::dynamic::ValueAccessor<'_>,
+) -> async_graphql::Result<i32> {
+    let raw = value.i64()?;
+    i32::try_from(raw).map_err(|_| async_graphql::Error::new("hyperlinkId is out of range"))
+}
+
+fn validate_readability_progress(progress: f64) -> async_graphql::Result<f64> {
+    if !progress.is_finite() {
+        return Err(async_graphql::Error::new("progress must be a finite float"));
+    }
+
+    if !(0.0..=1.0).contains(&progress) {
+        return Err(async_graphql::Error::new(
+            "progress must be between 0.0 and 1.0",
+        ));
+    }
+
+    Ok(progress)
+}
+
 fn updated_hyperlinks_payload_object() -> Object {
     Object::new(UPDATED_HYPERLINKS_PAYLOAD_TYPE)
         .field(Field::new(
@@ -435,8 +556,7 @@ async fn load_updated_hyperlinks_payload(
     let updated_hyperlinks =
         crate::app::models::hyperlink::list_updated_after(connection, updated_after).await?;
     let deleted_hyperlinks =
-        crate::app::models::hyperlink_tombstone::list_updated_after(connection, updated_after)
-            .await?;
+        hyperlink_tombstone::list_updated_after(connection, updated_after).await?;
 
     let mut changes = Vec::with_capacity(updated_hyperlinks.len() + deleted_hyperlinks.len());
 
@@ -796,29 +916,6 @@ fn first_header_value(headers: &HeaderMap, key: &str) -> Option<String> {
     }
 }
 
-fn operation_type(request: &Request) -> Option<OperationType> {
-    let document = async_graphql::parser::parse_query(&request.query).ok()?;
-
-    match (&request.operation_name, &document.operations) {
-        (Some(_), DocumentOperations::Single(_)) => None,
-        (Some(operation_name), DocumentOperations::Multiple(operations)) => operations
-            .get(operation_name.as_str())
-            .map(|operation| operation.node.ty),
-        (None, DocumentOperations::Single(operation)) => Some(operation.node.ty),
-        (None, DocumentOperations::Multiple(operations)) if operations.len() == 1 => operations
-            .values()
-            .next()
-            .map(|operation| operation.node.ty),
-        (None, DocumentOperations::Multiple(_)) => None,
-    }
-}
-
-fn read_only_response() -> Response {
-    Response::from_errors(vec![ServerError::new(
-        "mutations are disabled on this endpoint",
-        None,
-    )])
-}
 #[cfg(test)]
 #[path = "../../tests/unit/server_graphql.rs"]
 mod tests;

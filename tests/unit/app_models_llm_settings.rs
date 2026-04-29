@@ -4,6 +4,7 @@ use crate::test_support;
 #[tokio::test]
 async fn load_defaults_when_keys_are_missing() {
     let connection = test_support::new_memory_connection().await;
+    test_support::initialize_hyperlinks_schema(&connection).await;
     let loaded = load(&connection).await.expect("settings should load");
     assert_eq!(loaded, LlmSettings::default());
 }
@@ -11,6 +12,7 @@ async fn load_defaults_when_keys_are_missing() {
 #[tokio::test]
 async fn save_normalizes_and_round_trips() {
     let connection = test_support::new_memory_connection().await;
+    test_support::initialize_hyperlinks_schema(&connection).await;
     let saved = save(
         &connection,
         LlmSettings {

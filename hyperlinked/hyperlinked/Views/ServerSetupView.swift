@@ -138,7 +138,7 @@ struct ServerSetupView: View {
     }
 
     private func connectManually() async {
-        guard let normalized = AppModel.normalizedServerURL(from: manualServerInput) else {
+        guard let normalized = ServerConnectionSettings.normalizedServerURL(from: manualServerInput) else {
             statusMessage = "Enter a valid server URL, for example http://192.168.1.24:8765."
             logger.log(
                 "manual_server_connect_rejected",

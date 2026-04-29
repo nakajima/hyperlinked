@@ -13,14 +13,14 @@ struct WidgetRotationFailureContext {
 }
 
 enum WidgetDiagnosticsBridge {
-    private static let appGroupID = "group.fm.folder.hyperlinked"
-    private static let pendingEventsKey = "diagnostics.pending_events.v1"
-    private static let lastFailureAtKey = "diagnostics.widget_rotation.last_failure_at.v1"
-    private static let lastFailureDBModeKey = "diagnostics.widget_rotation.last_failure_db_mode.v1"
-    private static let lastFailureSQLiteCodeKey = "diagnostics.widget_rotation.last_failure_sqlite_code.v1"
-    private static let lastFailureSQLiteMessageKey = "diagnostics.widget_rotation.last_failure_sqlite_message.v1"
-    private static let lastFailureStageKey = "diagnostics.widget_rotation.last_failure_stage.v1"
-    private static let lastSuccessAtKey = "diagnostics.widget_rotation.last_success_at.v1"
+    private static let appGroupID = AppGroupConfig.appGroupID
+    private static let pendingEventsKey = AppGroupConfig.DiagnosticsKey.pendingEvents
+    private static let lastFailureAtKey = AppGroupConfig.DiagnosticsKey.lastFailureAt
+    private static let lastFailureDBModeKey = AppGroupConfig.DiagnosticsKey.lastFailureDBMode
+    private static let lastFailureSQLiteCodeKey = AppGroupConfig.DiagnosticsKey.lastFailureSQLiteCode
+    private static let lastFailureSQLiteMessageKey = AppGroupConfig.DiagnosticsKey.lastFailureSQLiteMessage
+    private static let lastFailureStageKey = AppGroupConfig.DiagnosticsKey.lastFailureStage
+    private static let lastSuccessAtKey = AppGroupConfig.DiagnosticsKey.lastSuccessAt
     private static let maxPendingEvents = 100
     private static let warningFreshnessWindow: TimeInterval = 24 * 60 * 60
     private static let formatter: ISO8601DateFormatter = {

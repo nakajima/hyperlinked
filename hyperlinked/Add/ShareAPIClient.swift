@@ -57,7 +57,7 @@ struct ShareAPIClient {
             "multipart/form-data; boundary=\(boundary)",
             forHTTPHeaderField: "Content-Type"
         )
-        request.httpBody = buildUploadPDFBody(
+        request.httpBody = HTTPRequestBuilder.buildPDFUploadBody(
             boundary: boundary,
             title: title,
             filename: filename,
@@ -67,99 +67,35 @@ struct ShareAPIClient {
     }
 
     private func makeRequest(path: String, method: String) throws -> URLRequest {
-        let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        let endpoint = baseURL.appendingPathComponent(cleanPath)
-        guard let scheme = endpoint.scheme, (scheme == "http" || scheme == "https") else {
-            throw ShareAPIClientError.invalidURL
+        do {
+            return try HTTPRequestBuilder.makeRequest(
+                baseURL: baseURL,
+                path: path,
+                method: method,
+                authorizationHeaderValue: authorizationHeaderValue
+            )
+        } catch let error as HTTPRequestBuilderError {
+            throw map(error)
         }
-
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = method
-        request.timeoutInterval = 15
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let authorizationHeaderValue {
-            request.setValue(authorizationHeaderValue, forHTTPHeaderField: "Authorization")
-        }
-        return request
     }
 
     private func send(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw ShareAPIClientError.invalidResponse
+        do {
+            return try await HTTPRequestBuilder.send(request, session: session)
+        } catch let error as HTTPRequestBuilderError {
+            throw map(error)
         }
-
-        guard (200...299).contains(http.statusCode) else {
-            let message = parseErrorMessage(from: data)
-            throw ShareAPIClientError.unexpectedStatus(code: http.statusCode, message: message)
-        }
-        return data
     }
 
-    private func parseErrorMessage(from data: Data) -> String {
-        if let parsed = try? JSONDecoder().decode(ShareAPIErrorResponse.self, from: data) {
-            return parsed.error
+    private func map(_ error: HTTPRequestBuilderError) -> ShareAPIClientError {
+        switch error {
+        case .invalidURL:
+            return .invalidURL
+        case .invalidResponse:
+            return .invalidResponse
+        case .unexpectedStatus(let code, let message):
+            return .unexpectedStatus(code: code, message: message)
         }
-        if let raw = String(data: data, encoding: .utf8) {
-            return raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return ""
-    }
-
-    private func buildUploadPDFBody(
-        boundary: String,
-        title: String,
-        filename: String,
-        payload: Data
-    ) -> Data {
-        var body = Data()
-        appendMultipartField("upload_type", value: "pdf", boundary: boundary, to: &body)
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedTitle.isEmpty {
-            appendMultipartField("title", value: trimmedTitle, boundary: boundary, to: &body)
-        }
-        appendMultipartField("filename", value: filename, boundary: boundary, to: &body)
-        appendMultipartFile(
-            fieldName: "file",
-            filename: filename,
-            mimeType: "application/pdf",
-            payload: payload,
-            boundary: boundary,
-            to: &body
-        )
-        body.append("--\(boundary)--\r\n".data(using: .utf8) ?? Data())
-        return body
-    }
-
-    private func appendMultipartField(
-        _ name: String,
-        value: String,
-        boundary: String,
-        to body: inout Data
-    ) {
-        body.append("--\(boundary)\r\n".data(using: .utf8) ?? Data())
-        body.append(
-            "Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8) ?? Data()
-        )
-        body.append("\(value)\r\n".data(using: .utf8) ?? Data())
-    }
-
-    private func appendMultipartFile(
-        fieldName: String,
-        filename: String,
-        mimeType: String,
-        payload: Data,
-        boundary: String,
-        to body: inout Data
-    ) {
-        body.append("--\(boundary)\r\n".data(using: .utf8) ?? Data())
-        body.append(
-            "Content-Disposition: form-data; name=\"\(fieldName)\"; filename=\"\(filename)\"\r\n"
-                .data(using: .utf8) ?? Data()
-        )
-        body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8) ?? Data())
-        body.append(payload)
-        body.append("\r\n".data(using: .utf8) ?? Data())
     }
 }
 
@@ -168,6 +104,3 @@ private struct ShareHyperlinkInput: Encodable {
     let url: String
 }
 
-private struct ShareAPIErrorResponse: Decodable {
-    let error: String
-}

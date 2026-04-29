@@ -32,7 +32,9 @@ extension HyperlinkedAPI {
       case "Hyperlink": return HyperlinkedAPI.Objects.Hyperlink
       case "HyperlinkConnection": return HyperlinkedAPI.Objects.HyperlinkConnection
       case "HyperlinkRef": return HyperlinkedAPI.Objects.HyperlinkRef
+      case "Mutation": return HyperlinkedAPI.Objects.Mutation
       case "Query": return HyperlinkedAPI.Objects.Query
+      case "ReadabilityProgress": return HyperlinkedAPI.Objects.ReadabilityProgress
       case "UpdatedHyperlinkChange": return HyperlinkedAPI.Objects.UpdatedHyperlinkChange
       case "UpdatedHyperlinksPayload": return HyperlinkedAPI.Objects.UpdatedHyperlinksPayload
       default: return nil

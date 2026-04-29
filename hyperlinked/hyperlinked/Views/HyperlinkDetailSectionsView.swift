@@ -4,6 +4,7 @@ struct HyperlinkDetailSectionsView: View {
     let hyperlink: Hyperlink
     let colorScheme: ColorScheme
     let offlineSnapshot: HyperlinkOfflineSnapshot
+    let apiClient: APIClient?
     let onRetryOfflineSave: () -> Void
 
     private var showsPDFActions: Bool {
@@ -15,7 +16,11 @@ struct HyperlinkDetailSectionsView: View {
             NavigationLink {
                 ReadabilityReaderView(hyperlink: hyperlink)
             } label: {
-                Label("View Readability", systemImage: "doc.text")
+                ReadabilityNavigationLinkLabel(
+                    hyperlink: hyperlink,
+                    offlineSnapshot: offlineSnapshot,
+                    apiClient: apiClient
+                )
             }
 
             LabeledContent("Readability", value: offlineSnapshot.resolvedReadabilityState.label)
@@ -85,6 +90,84 @@ struct HyperlinkDetailSectionsView: View {
     }
 }
 
+private struct ReadabilityNavigationLinkLabel: View {
+    let hyperlink: Hyperlink
+    let offlineSnapshot: HyperlinkOfflineSnapshot
+    let apiClient: APIClient?
+
+    @State private var previewText: String?
+
+    private var taskID: String {
+        [
+            String(hyperlink.id),
+            apiClient?.baseURL.absoluteString ?? "no-api-client",
+            offlineSnapshot.readabilityPath ?? "",
+            offlineSnapshot.readabilitySavedAt ?? "",
+        ].joined(separator: "|")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("View Readability", systemImage: "doc.text")
+
+            if let previewText,
+               !previewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(previewText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(4)
+            }
+        }
+        .task(id: taskID) {
+            await loadPreviewText()
+        }
+    }
+
+    @MainActor
+    private func loadPreviewText() async {
+        previewText = await resolvePreviewText()
+    }
+
+    private func resolvePreviewText() async -> String? {
+        if let apiClient {
+            if let html = try? await apiClient.fetchArtifactText(
+                hyperlinkID: hyperlink.id,
+                kind: "readable_html"
+            ),
+               let preview = ReadabilityPreviewTextExtractor.previewText(fromHTML: html) {
+                return preview
+            }
+
+            if let markdown = try? await apiClient.fetchArtifactText(
+                hyperlinkID: hyperlink.id,
+                kind: "readable_text"
+            ),
+               let preview = ReadabilityPreviewTextExtractor.previewText(fromMarkdown: markdown) {
+                return preview
+            }
+        }
+
+        if let readabilityFileURL = offlineSnapshot.readabilityFileURL,
+           let content = try? String(contentsOf: readabilityFileURL, encoding: .utf8) {
+            if readabilityFileURL.pathExtension.lowercased() == "html",
+               let preview = ReadabilityPreviewTextExtractor.previewText(fromHTML: content) {
+                return preview
+            }
+
+            if let preview = ReadabilityPreviewTextExtractor.previewText(fromMarkdown: content) {
+                return preview
+            }
+        }
+
+        if let summary = hyperlink.summary,
+           let preview = ReadabilityPreviewTextExtractor.previewText(fromPlainText: summary) {
+            return preview
+        }
+
+        return nil
+    }
+}
+
 #if DEBUG
 struct HyperlinkDetailSectionsView_Previews: PreviewProvider {
     static var previews: some View {
@@ -112,6 +195,7 @@ struct HyperlinkDetailSectionsView_Previews: PreviewProvider {
                     ),
                     colorScheme: .light,
                     offlineSnapshot: .empty(hyperlinkID: 1),
+                    apiClient: nil,
                     onRetryOfflineSave: {}
                 )
             }

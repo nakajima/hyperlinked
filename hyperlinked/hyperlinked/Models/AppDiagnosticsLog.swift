@@ -48,15 +48,15 @@ struct WidgetRotationDiagnosticsSnapshot {
 actor AppDiagnosticsLog {
     static let shared = AppDiagnosticsLog()
 
-    private let appGroupID = "group.fm.folder.hyperlinked"
-    private let pendingEventsKey = "diagnostics.pending_events.v1"
-    private let ingestedEventIDsKey = "diagnostics.ingested_event_ids.v1"
-    private let lastFailureAtKey = "diagnostics.widget_rotation.last_failure_at.v1"
-    private let lastFailureDBModeKey = "diagnostics.widget_rotation.last_failure_db_mode.v1"
-    private let lastFailureSQLiteCodeKey = "diagnostics.widget_rotation.last_failure_sqlite_code.v1"
-    private let lastFailureSQLiteMessageKey = "diagnostics.widget_rotation.last_failure_sqlite_message.v1"
-    private let lastFailureStageKey = "diagnostics.widget_rotation.last_failure_stage.v1"
-    private let lastSuccessAtKey = "diagnostics.widget_rotation.last_success_at.v1"
+    private let appGroupID = AppGroupConfig.appGroupID
+    private let pendingEventsKey = AppGroupConfig.DiagnosticsKey.pendingEvents
+    private let ingestedEventIDsKey = AppGroupConfig.DiagnosticsKey.ingestedEventIDs
+    private let lastFailureAtKey = AppGroupConfig.DiagnosticsKey.lastFailureAt
+    private let lastFailureDBModeKey = AppGroupConfig.DiagnosticsKey.lastFailureDBMode
+    private let lastFailureSQLiteCodeKey = AppGroupConfig.DiagnosticsKey.lastFailureSQLiteCode
+    private let lastFailureSQLiteMessageKey = AppGroupConfig.DiagnosticsKey.lastFailureSQLiteMessage
+    private let lastFailureStageKey = AppGroupConfig.DiagnosticsKey.lastFailureStage
+    private let lastSuccessAtKey = AppGroupConfig.DiagnosticsKey.lastSuccessAt
 
     private let maxLogBytes = 2 * 1024 * 1024
     private let maxIngestedEventIDs = 500

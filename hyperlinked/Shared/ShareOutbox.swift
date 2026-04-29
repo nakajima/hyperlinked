@@ -16,7 +16,7 @@ enum ShareOutboxUploadType: String, Codable {
     case pdf
 }
 
-struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Identifiable {
+struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Identifiable, Sendable {
     static let databaseTableName = "share_outbox_items"
 
     var id: String
@@ -53,6 +53,14 @@ struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Ident
 
     typealias Columns = CodingKeys
 
+    var createdAtDate: Date {
+        Date(timeIntervalSince1970: createdAt)
+    }
+
+    var isDelivered: Bool {
+        state == ShareOutboxState.delivered.rawValue
+    }
+
     var resolvedPayloadKind: ShareOutboxPayloadKind {
         ShareOutboxPayloadKind(rawValue: payloadKind) ?? .url
     }
@@ -65,56 +73,15 @@ struct ShareOutboxItemRecord: Codable, FetchableRecord, PersistableRecord, Ident
     }
 }
 
-enum ShareOutboxStoreError: LocalizedError {
-    case appGroupContainerUnavailable
-
-    var errorDescription: String? {
-        switch self {
-        case .appGroupContainerUnavailable:
-            return "Could not access shared app group storage."
-        }
-    }
-}
-
 final class ShareOutboxStore {
-    static let appGroupID = "group.fm.folder.hyperlinked"
-    static let databaseFilename = "db.sqlite"
-
     private let dbQueue: DatabaseQueue
-    private let appGroupID: String
 
-    private init(dbQueue: DatabaseQueue, appGroupID: String) {
+    private init(dbQueue: DatabaseQueue) {
         self.dbQueue = dbQueue
-        self.appGroupID = appGroupID
     }
 
-    static func openShared(appGroupID: String = appGroupID) throws -> ShareOutboxStore {
-        guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupID
-        ) else {
-            throw ShareOutboxStoreError.appGroupContainerUnavailable
-        }
-
-        let appSupportURL = containerURL
-            .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent("Application Support", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: appSupportURL,
-            withIntermediateDirectories: true
-        )
-
-        let dbURL = appSupportURL.appendingPathComponent(databaseFilename, isDirectory: false)
-        var configuration = Configuration()
-        configuration.busyMode = .timeout(5)
-        configuration.prepareDatabase { db in
-            try db.execute(sql: "PRAGMA foreign_keys = ON")
-            try db.execute(sql: "PRAGMA journal_mode = WAL")
-        }
-
-        let queue = try DatabaseQueue(path: dbURL.path, configuration: configuration)
-        let store = ShareOutboxStore(dbQueue: queue, appGroupID: appGroupID)
-        try store.migrateIfNeeded()
-        return store
+    static func openShared() throws -> ShareOutboxStore {
+        ShareOutboxStore(dbQueue: try DB.databaseQueue())
     }
 
     func enqueue(url: String, title: String, now: Date = Date()) throws -> ShareOutboxItemRecord {
@@ -155,8 +122,7 @@ final class ShareOutboxStore {
         )
         let copiedFileURL = try Self.copyUploadFileToQueue(
             sourceFileURL: fileURL,
-            filename: sanitizedFilename,
-            appGroupID: appGroupID
+            filename: sanitizedFilename
         )
         let item = ShareOutboxItemRecord(
             id: UUID().uuidString,
@@ -178,6 +144,22 @@ final class ShareOutboxStore {
             try item.insert(db)
         }
         return item
+    }
+
+    func pendingItems(limit: Int = 200) throws -> [ShareOutboxItemRecord] {
+        try dbQueue.read { db in
+            try ShareOutboxItemRecord.fetchAll(
+                db,
+                sql: """
+                    SELECT *
+                    FROM \(ShareOutboxItemRecord.databaseTableName)
+                    WHERE state != ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                """,
+                arguments: [ShareOutboxState.delivered.rawValue, limit]
+            )
+        }
     }
 
     func dueItems(limit: Int = 20, now: Date = Date()) throws -> [ShareOutboxItemRecord] {
@@ -249,108 +231,25 @@ final class ShareOutboxStore {
         }
     }
 
+    func pendingCount() throws -> Int {
+        try dbQueue.read { db in
+            try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*)
+                    FROM \(ShareOutboxItemRecord.databaseTableName)
+                    WHERE state != ?
+                """,
+                arguments: [ShareOutboxState.delivered.rawValue]
+            ) ?? 0
+        }
+    }
+
     func removeUploadFileIfPresent(path: String?) {
         guard let path, !path.isEmpty else {
             return
         }
         try? FileManager.default.removeItem(atPath: path)
-    }
-
-    private func migrateIfNeeded() throws {
-        var migrator = DatabaseMigrator()
-        migrator.registerMigration("create_share_outbox_items") { db in
-            try db.create(table: ShareOutboxItemRecord.databaseTableName, ifNotExists: true) { t in
-                t.column(ShareOutboxItemRecord.Columns.id.rawValue, .text).primaryKey()
-                t.column(ShareOutboxItemRecord.Columns.url.rawValue, .text).notNull()
-                t.column(ShareOutboxItemRecord.Columns.title.rawValue, .text).notNull()
-                    .defaults(to: "")
-                t.column(ShareOutboxItemRecord.Columns.payloadKind.rawValue, .text)
-                    .notNull()
-                    .defaults(to: ShareOutboxPayloadKind.url.rawValue)
-                t.column(ShareOutboxItemRecord.Columns.uploadType.rawValue, .text)
-                t.column(ShareOutboxItemRecord.Columns.uploadFilePath.rawValue, .text)
-                t.column(ShareOutboxItemRecord.Columns.uploadFilename.rawValue, .text)
-                t.column(ShareOutboxItemRecord.Columns.createdAt.rawValue, .double).notNull()
-                t.column(ShareOutboxItemRecord.Columns.state.rawValue, .text).notNull()
-                t.column(ShareOutboxItemRecord.Columns.attemptCount.rawValue, .integer).notNull()
-                    .defaults(to: 0)
-                t.column(ShareOutboxItemRecord.Columns.nextAttemptAt.rawValue, .double).notNull()
-                t.column(ShareOutboxItemRecord.Columns.lastAttemptAt.rawValue, .double)
-                t.column(ShareOutboxItemRecord.Columns.lastError.rawValue, .text)
-                t.column(ShareOutboxItemRecord.Columns.deliveredAt.rawValue, .double)
-            }
-
-            try db.create(
-                index: "idx_share_outbox_pending_next_attempt",
-                on: ShareOutboxItemRecord.databaseTableName,
-                columns: [
-                    ShareOutboxItemRecord.Columns.state.rawValue,
-                    ShareOutboxItemRecord.Columns.nextAttemptAt.rawValue,
-                ],
-                ifNotExists: true
-            )
-            try db.create(
-                index: "idx_share_outbox_created_at",
-                on: ShareOutboxItemRecord.databaseTableName,
-                columns: [ShareOutboxItemRecord.Columns.createdAt.rawValue],
-                ifNotExists: true
-            )
-        }
-
-        migrator.registerMigration("add_share_outbox_upload_fields_v1") { db in
-            guard try Self.tableExists(ShareOutboxItemRecord.databaseTableName, in: db) else {
-                return
-            }
-            if try !Self.columnExists(
-                ShareOutboxItemRecord.Columns.payloadKind.rawValue,
-                in: ShareOutboxItemRecord.databaseTableName,
-                db: db
-            ) {
-                try db.execute(
-                    sql: """
-                        ALTER TABLE \(ShareOutboxItemRecord.databaseTableName)
-                        ADD COLUMN \(ShareOutboxItemRecord.Columns.payloadKind.rawValue) TEXT NOT NULL DEFAULT '\(ShareOutboxPayloadKind.url.rawValue)'
-                    """
-                )
-            }
-            if try !Self.columnExists(
-                ShareOutboxItemRecord.Columns.uploadType.rawValue,
-                in: ShareOutboxItemRecord.databaseTableName,
-                db: db
-            ) {
-                try db.execute(
-                    sql: """
-                        ALTER TABLE \(ShareOutboxItemRecord.databaseTableName)
-                        ADD COLUMN \(ShareOutboxItemRecord.Columns.uploadType.rawValue) TEXT
-                    """
-                )
-            }
-            if try !Self.columnExists(
-                ShareOutboxItemRecord.Columns.uploadFilePath.rawValue,
-                in: ShareOutboxItemRecord.databaseTableName,
-                db: db
-            ) {
-                try db.execute(
-                    sql: """
-                        ALTER TABLE \(ShareOutboxItemRecord.databaseTableName)
-                        ADD COLUMN \(ShareOutboxItemRecord.Columns.uploadFilePath.rawValue) TEXT
-                    """
-                )
-            }
-            if try !Self.columnExists(
-                ShareOutboxItemRecord.Columns.uploadFilename.rawValue,
-                in: ShareOutboxItemRecord.databaseTableName,
-                db: db
-            ) {
-                try db.execute(
-                    sql: """
-                        ALTER TABLE \(ShareOutboxItemRecord.databaseTableName)
-                        ADD COLUMN \(ShareOutboxItemRecord.Columns.uploadFilename.rawValue) TEXT
-                    """
-                )
-            }
-        }
-        try migrator.migrate(dbQueue)
     }
 
     private static func nextAttemptTimestamp(
@@ -365,10 +264,9 @@ final class ShareOutboxStore {
 
     private static func copyUploadFileToQueue(
         sourceFileURL: URL,
-        filename: String,
-        appGroupID: String
+        filename: String
     ) throws -> URL {
-        let destinationDirectory = try uploadQueueDirectoryURL(appGroupID: appGroupID)
+        let destinationDirectory = try uploadQueueDirectoryURL()
         let destination = destinationDirectory.appendingPathComponent(
             "\(UUID().uuidString)-\(filename)",
             isDirectory: false
@@ -387,21 +285,17 @@ final class ShareOutboxStore {
         return destination
     }
 
-    private static func uploadQueueDirectoryURL(appGroupID: String) throws -> URL {
+    private static func uploadQueueDirectoryURL() throws -> URL {
         guard let containerURL = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupID
+            forSecurityApplicationGroupIdentifier: DB.appGroupID
         ) else {
-            throw ShareOutboxStoreError.appGroupContainerUnavailable
+            throw DBError.appGroupContainerUnavailable(DB.appGroupID)
         }
-
         let directory = containerURL
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
             .appendingPathComponent("share_outbox_uploads", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true
-        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }
 
@@ -425,35 +319,5 @@ final class ShareOutboxStore {
             output += ".pdf"
         }
         return output
-    }
-
-    private static func tableExists(_ name: String, in db: Database) throws -> Bool {
-        let count = try Int.fetchOne(
-            db,
-            sql: """
-                SELECT COUNT(*)
-                FROM sqlite_master
-                WHERE type = 'table' AND name = ?
-            """,
-            arguments: [name]
-        ) ?? 0
-        return count > 0
-    }
-
-    private static func columnExists(
-        _ columnName: String,
-        in tableName: String,
-        db: Database
-    ) throws -> Bool {
-        let count = try Int.fetchOne(
-            db,
-            sql: """
-                SELECT COUNT(*)
-                FROM pragma_table_info('\(tableName)')
-                WHERE name = ?
-            """,
-            arguments: [columnName]
-        ) ?? 0
-        return count > 0
     }
 }

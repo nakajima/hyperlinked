@@ -212,7 +212,7 @@ struct APIClient {
             "multipart/form-data; boundary=\(boundary)",
             forHTTPHeaderField: "Content-Type"
         )
-        request.httpBody = buildUploadPDFBody(
+        request.httpBody = HTTPRequestBuilder.buildPDFUploadBody(
             boundary: boundary,
             title: title,
             filename: filename,
@@ -248,6 +248,21 @@ struct APIClient {
         logger.log("api_report_hyperlink_click_succeeded", details: ["hyperlink_id": String(hyperlinkID)])
     }
 
+    func fetchReadabilityProgress(hyperlinkID: Int) async throws -> ReadabilityProgressRecord? {
+        let data = try await executeQuery(HyperlinkedAPI.ReadabilityProgressQuery(hyperlinkId: hyperlinkID))
+        return data.readabilityProgress.map(toReadabilityProgress)
+    }
+
+    func setReadabilityProgress(hyperlinkID: Int, progress: Double) async throws -> ReadabilityProgressRecord {
+        let data = try await executeMutation(
+            HyperlinkedAPI.SetReadabilityProgressMutation(
+                hyperlinkId: hyperlinkID,
+                progress: progress
+            )
+        )
+        return toReadabilityProgress(data.setReadabilityProgress)
+    }
+
     func artifactInlineURL(hyperlinkID: Int, kind: String) -> URL {
         baseURL
             .appendingPathComponent("hyperlinks")
@@ -280,6 +295,48 @@ struct APIClient {
             _ = apollo.fetch(
                 query: query,
                 cachePolicy: .fetchIgnoringCacheCompletely,
+                queue: .global(qos: .userInitiated)
+            ) { result in
+                switch result {
+                case .success(let graphQLResult):
+                    if let errors = graphQLResult.errors, !errors.isEmpty {
+                        let message = errors
+                            .compactMap(\.message)
+                            .joined(separator: "\n")
+                        continuation.resume(
+                            throwing: APIClientError.graphqlError(
+                                message.isEmpty ? "Unknown GraphQL error" : message
+                            )
+                        )
+                        return
+                    }
+
+                    guard let data = graphQLResult.data else {
+                        continuation.resume(
+                            throwing: APIClientError.decodingFailed(
+                                "GraphQL payload is missing `data`."
+                            )
+                        )
+                        return
+                    }
+
+                    continuation.resume(returning: data)
+                case .failure(let error):
+                    continuation.resume(
+                        throwing: APIClientError.decodingFailed(error.localizedDescription)
+                    )
+                }
+            }
+        }
+    }
+
+    private func executeMutation<Mutation: GraphQLMutation>(
+        _ mutation: Mutation
+    ) async throws -> Mutation.Data {
+        try await withCheckedThrowingContinuation { continuation in
+            _ = apollo.perform(
+                mutation: mutation,
+                publishResultToStore: false,
                 queue: .global(qos: .userInitiated)
             ) { result in
                 switch result {
@@ -360,27 +417,45 @@ struct APIClient {
         )
     }
 
-    private func makeRequest(path: String, method: String) throws -> URLRequest {
-        let cleanPath = path.hasPrefix("/") ? String(path.dropFirst()) : path
-        let endpoint = baseURL.appendingPathComponent(cleanPath)
-        guard let scheme = endpoint.scheme, (scheme == "http" || scheme == "https") else {
-            throw APIClientError.invalidURL
-        }
+    private func toReadabilityProgress(
+        _ model: HyperlinkedAPI.ReadabilityProgressQuery.Data.ReadabilityProgress
+    ) -> ReadabilityProgressRecord {
+        ReadabilityProgressRecord(
+            hyperlinkID: model.hyperlinkId,
+            progress: model.progress,
+            updatedAt: model.updatedAt
+        )
+    }
 
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = method
-        request.timeoutInterval = 15
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let authorizationHeaderValue {
-            request.setValue(authorizationHeaderValue, forHTTPHeaderField: "Authorization")
+    private func toReadabilityProgress(
+        _ model: HyperlinkedAPI.SetReadabilityProgressMutation.Data.SetReadabilityProgress
+    ) -> ReadabilityProgressRecord {
+        ReadabilityProgressRecord(
+            hyperlinkID: model.hyperlinkId,
+            progress: model.progress,
+            updatedAt: model.updatedAt
+        )
+    }
+
+    private func makeRequest(path: String, method: String) throws -> URLRequest {
+        do {
+            return try HTTPRequestBuilder.makeRequest(
+                baseURL: baseURL,
+                path: path,
+                method: method,
+                authorizationHeaderValue: authorizationHeaderValue
+            )
+        } catch let error as HTTPRequestBuilderError {
+            throw map(error)
         }
-        return request
     }
 
     private func send(_ request: URLRequest) async throws -> Data {
         do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
+            return try await HTTPRequestBuilder.send(request, session: session)
+        } catch let error as HTTPRequestBuilderError {
+            switch error {
+            case .invalidResponse:
                 logger.log(
                     "api_request_failed",
                     details: [
@@ -388,23 +463,28 @@ struct APIClient {
                         "reason": "invalid_response",
                     ]
                 )
-                throw APIClientError.invalidResponse
-            }
-
-            guard (200...299).contains(http.statusCode) else {
-                let message = parseErrorMessage(data: data)
+            case .unexpectedStatus(let code, let message):
                 logger.log(
                     "api_request_failed",
                     details: [
                         "path": request.url?.path ?? "unknown",
-                        "status_code": String(http.statusCode),
+                        "status_code": String(code),
                         "message": message,
                     ]
                 )
-                throw APIClientError.unexpectedStatus(code: http.statusCode, message: message)
+            case .invalidURL:
+                break
             }
-
-            return data
+            let mapped = map(error)
+            logger.logError(
+                "api_request_threw",
+                error: mapped,
+                details: [
+                    "path": request.url?.path ?? "unknown",
+                    "method": request.httpMethod ?? "unknown",
+                ]
+            )
+            throw mapped
         } catch {
             logger.logError(
                 "api_request_threw",
@@ -418,73 +498,15 @@ struct APIClient {
         }
     }
 
-    private func parseErrorMessage(data: Data) -> String {
-        if let parsed = try? JSONDecoder().decode(APIErrorResponse.self, from: data) {
-            return parsed.error
+    private func map(_ error: HTTPRequestBuilderError) -> APIClientError {
+        switch error {
+        case .invalidURL:
+            return .invalidURL
+        case .invalidResponse:
+            return .invalidResponse
+        case .unexpectedStatus(let code, let message):
+            return .unexpectedStatus(code: code, message: message)
         }
-
-        if let raw = String(data: data, encoding: .utf8) {
-            return raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return ""
-    }
-
-    private func buildUploadPDFBody(
-        boundary: String,
-        title: String,
-        filename: String,
-        payload: Data
-    ) -> Data {
-        var body = Data()
-
-        appendMultipartField("upload_type", value: "pdf", boundary: boundary, to: &body)
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedTitle.isEmpty {
-            appendMultipartField("title", value: trimmedTitle, boundary: boundary, to: &body)
-        }
-        appendMultipartField("filename", value: filename, boundary: boundary, to: &body)
-        appendMultipartFile(
-            fieldName: "file",
-            filename: filename,
-            mimeType: "application/pdf",
-            payload: payload,
-            boundary: boundary,
-            to: &body
-        )
-        body.append("--\(boundary)--\r\n".data(using: .utf8) ?? Data())
-        return body
-    }
-
-    private func appendMultipartField(
-        _ name: String,
-        value: String,
-        boundary: String,
-        to body: inout Data
-    ) {
-        body.append("--\(boundary)\r\n".data(using: .utf8) ?? Data())
-        body.append(
-            "Content-Disposition: form-data; name=\"\(name)\"\r\n\r\n".data(using: .utf8) ?? Data()
-        )
-        body.append("\(value)\r\n".data(using: .utf8) ?? Data())
-    }
-
-    private func appendMultipartFile(
-        fieldName: String,
-        filename: String,
-        mimeType: String,
-        payload: Data,
-        boundary: String,
-        to body: inout Data
-    ) {
-        body.append("--\(boundary)\r\n".data(using: .utf8) ?? Data())
-        body.append(
-            "Content-Disposition: form-data; name=\"\(fieldName)\"; filename=\"\(filename)\"\r\n"
-                .data(using: .utf8) ?? Data()
-        )
-        body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8) ?? Data())
-        body.append(payload)
-        body.append("\r\n".data(using: .utf8) ?? Data())
     }
 }
 

@@ -239,17 +239,15 @@ extension Hyperlink: FetchableRecord, PersistableRecord, TableRecord {
     }
 }
 
-struct HyperlinksIndexResponse: Decodable {
-    let items: [Hyperlink]
+struct ReadabilityProgressRecord: Equatable {
+    let hyperlinkID: Int
+    let progress: Double
+    let updatedAt: String
 }
 
 struct HyperlinkInput: Encodable {
     let title: String
     let url: String
-}
-
-struct APIErrorResponse: Decodable {
-    let error: String
 }
 
 struct DiscoveredServer: Hashable, Identifiable {

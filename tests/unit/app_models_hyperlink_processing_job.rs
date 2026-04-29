@@ -1,4 +1,5 @@
 use super::*;
+use crate::entity::hyperlink_processing_job;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, ConnectionTrait, QueryFilter};
 
 async fn new_connection() -> DatabaseConnection {

@@ -27,6 +27,7 @@ struct HyperlinkDetailView: View {
                     hyperlink: hyperlink ?? fallback,
                     colorScheme: colorScheme,
                     offlineSnapshot: offlineSnapshot,
+                    apiClient: appModel.apiClient,
                     onRetryOfflineSave: { retryOfflineSave() }
                 )
             }

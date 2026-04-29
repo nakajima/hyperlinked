@@ -15,13 +15,13 @@ struct hyperlinkedTests {
 
     @Test
     func normalizesManualServerURL() {
-        let normalized = AppModel.normalizedServerURL(from: "192.168.1.5:8765/hyperlinks?q=test")
+        let normalized = ServerConnectionSettings.normalizedServerURL(from: "192.168.1.5:8765/hyperlinks?q=test")
         #expect(normalized?.absoluteString == "http://192.168.1.5:8765")
     }
 
     @Test
     func rejectsInvalidServerURL() {
-        let normalized = AppModel.normalizedServerURL(from: "not a url")
+        let normalized = ServerConnectionSettings.normalizedServerURL(from: "not a url")
         #expect(normalized == nil)
     }
 
@@ -70,50 +70,6 @@ struct hyperlinkedTests {
     }
 
     @Test
-    func listQueryDefaultsToRootScope() {
-        let query = HyperlinksListQueryBuilder.build(
-            queryText: "",
-            showDiscoveredLinks: false,
-            orderOverrideRawValue: nil
-        )
-        #expect(query == "scope:root")
-    }
-
-    @Test
-    func listQueryUsesAllScopeWhenShowingDiscovered() {
-        let query = HyperlinksListQueryBuilder.build(
-            queryText: "",
-            showDiscoveredLinks: true,
-            orderOverrideRawValue: nil
-        )
-        #expect(query == "scope:all")
-    }
-
-    @Test
-    func listQueryIncludesTrimmedFreeTextAndOrderOverride() {
-        let query = HyperlinksListQueryBuilder.build(
-            queryText: "  rust links ",
-            showDiscoveredLinks: false,
-            orderOverrideRawValue: "most-clicked"
-        )
-        #expect(query == "scope:root rust links order:most-clicked")
-    }
-
-    @Test
-    func listQueryEmitsSingleScopeToken() {
-        let query = HyperlinksListQueryBuilder.build(
-            queryText: "swift",
-            showDiscoveredLinks: true,
-            orderOverrideRawValue: "oldest"
-        )
-        let scopeTokens = query
-            .split(separator: " ")
-            .map(String.init)
-            .filter { $0.hasPrefix("scope:") }
-        #expect(scopeTokens == ["scope:all"])
-    }
-
-    @Test
     func basicAuthCredentialsBuildAuthorizationHeader() {
         let credentials = BasicAuthCredentials(
             username: " alice ",
@@ -150,7 +106,7 @@ struct hyperlinkedTests {
     @Test
     func serverCredentialKeyUsesNormalizedServerURL() {
         let url = URL(string: "HTTP://Example.com:8765/hyperlinks?q=1#frag")!
-        #expect(AppModel.serverCredentialKey(for: url) == "http://example.com:8765")
+        #expect(ServerConnectionSettings.serverCredentialKey(for: url) == "http://example.com:8765")
     }
 
     @Test
@@ -373,6 +329,39 @@ struct hyperlinkedTests {
         #expect(styled.contains("filter: brightness(0.58) contrast(0.92) saturate(0.88);"))
         #expect(styled.contains("mjx-container *"))
         #expect(styled.contains("<img src='figure.png'>"))
+    }
+
+    @Test
+    func readabilityHTMLDocumentStylerForcesSystemFont() {
+        let styled = ReadabilityHTMLDocumentStyler.styledHTML(
+            from: "<html><body><article><p>Hello</p></article></body></html>"
+        )
+
+        #expect(styled.contains("font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif !important;"))
+        #expect(styled.contains("font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace !important;"))
+        #expect(styled.contains("@media (min-width: 768px)"))
+        #expect(styled.contains("max-width: 920px;"))
+        #expect(styled.contains("padding-left: 28px !important;"))
+    }
+
+    @Test
+    func readabilityPreviewTextExtractorUsesVisibleHTMLText() {
+        let preview = ReadabilityPreviewTextExtractor.previewText(
+            fromHTML: "<html><body><h1>Associated Types with Class</h1><p>Haskell's type classes allow ad-hoc overloading.</p></body></html>"
+        )
+
+        #expect(preview == "Associated Types with Class Haskell's type classes allow ad-hoc overloading.")
+    }
+
+    @Test
+    func readabilityPreviewTextExtractorTruncatesLongPlainText() {
+        let preview = ReadabilityPreviewTextExtractor.previewText(
+            fromPlainText: String(repeating: "preview ", count: 80)
+        )
+
+        #expect(preview != nil)
+        #expect(preview?.hasSuffix("…") == true)
+        #expect((preview?.count ?? 0) <= 281)
     }
 
     @Test

@@ -2,9 +2,7 @@ use sea_orm::DatabaseConnection;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-use crate::app::models::{
-    hyperlink_processing_job::ProcessingQueueSender, rss_feed as rss_feed_model,
-};
+use crate::{app::models::hyperlink_processing_job::ProcessingQueueSender, entity::rss_feed};
 
 const DEFAULT_POLL_CHECK_INTERVAL_SECS: u64 = 60;
 
@@ -32,7 +30,7 @@ async fn poll_due_feeds(
     connection: &DatabaseConnection,
     processing_queue: Option<&ProcessingQueueSender>,
 ) {
-    let due_feeds = match rss_feed_model::list_due_for_poll(connection).await {
+    let due_feeds = match rss_feed::list_due_for_poll(connection).await {
         Ok(feeds) => feeds,
         Err(err) => {
             tracing::warn!(error = %err, "failed to list feeds due for poll");
@@ -47,7 +45,7 @@ async fn poll_due_feeds(
     tracing::info!(count = due_feeds.len(), "polling due RSS feeds");
 
     for feed in &due_feeds {
-        match rss_feed_model::sync_by_id(connection, feed.id, processing_queue).await {
+        match rss_feed::sync_by_id(connection, feed.id, processing_queue).await {
             Ok(Some(report)) => {
                 tracing::info!(
                     feed_id = feed.id,

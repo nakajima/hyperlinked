@@ -14,7 +14,6 @@ pub(crate) enum AdminTab {
     Artifacts,
     LlmInteractions,
     Queue,
-    Feeds,
     ImportExport,
     Storage,
 }
@@ -26,7 +25,6 @@ impl AdminTab {
             Self::Artifacts => ADMIN_TAB_ARTIFACTS_PATH,
             Self::LlmInteractions => ADMIN_TAB_LLM_INTERACTIONS_PATH,
             Self::Queue => ADMIN_TAB_QUEUE_PATH,
-            Self::Feeds => ADMIN_TAB_FEEDS_PATH,
             Self::ImportExport => ADMIN_TAB_IMPORT_EXPORT_PATH,
             Self::Storage => ADMIN_TAB_STORAGE_PATH,
         }
@@ -38,7 +36,6 @@ impl AdminTab {
             Self::Artifacts => "Artifacts",
             Self::LlmInteractions => "LLM",
             Self::Queue => "Queue",
-            Self::Feeds => "Feeds",
             Self::ImportExport => "Import / Export",
             Self::Storage => "Storage",
         }
@@ -52,7 +49,6 @@ impl AdminTab {
                 "Configure LLM connectivity and inspect raw request and response payloads."
             }
             Self::Queue => "Queue lifecycle controls for worker processing.",
-            Self::Feeds => "Subscribe to RSS and Atom feeds to automatically import new links.",
             Self::ImportExport => "Create backup archives and restore from ZIP exports.",
             Self::Storage => "Disk and artifact storage utilization by dataset and kind.",
         }

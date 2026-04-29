@@ -4,6 +4,7 @@ use crate::test_support;
 #[tokio::test]
 async fn set_get_delete_round_trips_values() {
     let connection = test_support::new_memory_connection().await;
+    test_support::initialize_hyperlinks_schema(&connection).await;
 
     set(&connection, "settings.example", "true")
         .await
@@ -25,6 +26,7 @@ async fn set_get_delete_round_trips_values() {
 #[tokio::test]
 async fn get_many_returns_existing_entries() {
     let connection = test_support::new_memory_connection().await;
+    test_support::initialize_hyperlinks_schema(&connection).await;
 
     set(&connection, "settings.one", "1")
         .await

@@ -1,6 +1,6 @@
-use crate::app::models::{
-    admin_jobs::{QueueRowContext, QueueStatusFilter},
-    hyperlink_processing_job as hyperlink_processing_job_model,
+use crate::{
+    app::models::admin_jobs::{QueueRowContext, QueueStatusFilter},
+    entity::hyperlink_processing_job::{HyperlinkProcessingJobKind, HyperlinkProcessingJobState},
 };
 
 #[derive(Clone, Debug)]
@@ -44,10 +44,10 @@ pub(crate) fn build_admin_job_row_views(rows: Vec<QueueRowContext>) -> Vec<Admin
                 processing_job_id: row.processing_job_id,
                 processing_state: row
                     .processing_state
-                    .map(|state| hyperlink_processing_job_model::state_name(state).to_string()),
+                    .map(|state: HyperlinkProcessingJobState| state.as_str().to_string()),
                 processing_kind: row
                     .processing_kind
-                    .map(|kind| hyperlink_processing_job_model::kind_name(kind).to_string()),
+                    .map(|kind: HyperlinkProcessingJobKind| kind.as_str().to_string()),
                 hyperlink_id: row.hyperlink_id,
                 hyperlink_title: row.hyperlink_title,
                 hyperlink_url: row.hyperlink_url,

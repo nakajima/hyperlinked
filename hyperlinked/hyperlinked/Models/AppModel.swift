@@ -3,9 +3,6 @@ import Combine
 
 @MainActor
 final class AppModel: ObservableObject {
-    static let appGroupID = "group.fm.folder.hyperlinked"
-    static let selectedServerURLKey = "selected_server_base_url"
-    static let selectedServerAuthModeKey = "selected_server_auth_mode"
 
     private let logger = AppEventLogger(component: "AppModel")
 
@@ -25,16 +22,16 @@ final class AppModel: ObservableObject {
         credentialsStore: ServerCredentialsStore? = nil
     ) {
         self.defaults = defaults
-        self.sharedDefaults = UserDefaults(suiteName: Self.appGroupID)
+        self.sharedDefaults = UserDefaults(suiteName: AppGroupConfig.appGroupID)
         self.credentialsStore = credentialsStore ?? ServerCredentialsStore()
 
         let resolvedDefaults = sharedDefaults ?? defaults
         let savedMode = ServerAuthMode(
-            rawValue: resolvedDefaults.string(forKey: Self.selectedServerAuthModeKey) ?? ""
+            rawValue: resolvedDefaults.string(forKey: AppGroupConfig.DefaultsKey.selectedServerAuthMode) ?? ""
         ) ?? .none
 
-        if let raw = resolvedDefaults.string(forKey: Self.selectedServerURLKey),
-           let parsed = AppModel.normalizedServerURL(from: raw) {
+        if let raw = resolvedDefaults.string(forKey: AppGroupConfig.DefaultsKey.selectedServerURL),
+           let parsed = ServerConnectionSettings.normalizedServerURL(from: raw) {
             selectedServerURL = parsed
             selectedServerAuthMode = savedMode
             shouldShowServerSetup = false
@@ -70,7 +67,7 @@ final class AppModel: ObservableObject {
               let selectedServerURL else {
             return nil
         }
-        return credentialsStore.loadCredentials(for: Self.serverCredentialKey(for: selectedServerURL))
+        return credentialsStore.loadCredentials(for: ServerConnectionSettings.serverCredentialKey(for: selectedServerURL))
     }
 
     func saveServerURL(_ url: URL) {
@@ -83,7 +80,7 @@ final class AppModel: ObservableObject {
         authMode: ServerAuthMode,
         basicCredentials: BasicAuthCredentials?
     ) -> Bool {
-        guard let normalizedURL = Self.normalizedServerURL(from: url.absoluteString) else {
+        guard let normalizedURL = ServerConnectionSettings.normalizedServerURL(from: url.absoluteString) else {
             logger.log(
                 "save_server_connection_rejected",
                 details: [
@@ -96,8 +93,8 @@ final class AppModel: ObservableObject {
         }
         let normalized = normalizedURL.absoluteString
         let previous = selectedServerURL?.absoluteString
-        let previousKey = selectedServerURL.map { Self.serverCredentialKey(for: $0) }
-        let nextKey = Self.serverCredentialKey(for: normalizedURL)
+        let previousKey = selectedServerURL.map { ServerConnectionSettings.serverCredentialKey(for: $0) }
+        let nextKey = ServerConnectionSettings.serverCredentialKey(for: normalizedURL)
 
         if previous != normalized {
             logger.log(
@@ -134,10 +131,10 @@ final class AppModel: ObservableObject {
 
         selectedServerURL = normalizedURL
         selectedServerAuthMode = authMode
-        sharedDefaults?.set(normalizedURL.absoluteString, forKey: Self.selectedServerURLKey)
-        defaults.set(normalizedURL.absoluteString, forKey: Self.selectedServerURLKey)
-        sharedDefaults?.set(authMode.rawValue, forKey: Self.selectedServerAuthModeKey)
-        defaults.set(authMode.rawValue, forKey: Self.selectedServerAuthModeKey)
+        sharedDefaults?.set(normalizedURL.absoluteString, forKey: AppGroupConfig.DefaultsKey.selectedServerURL)
+        defaults.set(normalizedURL.absoluteString, forKey: AppGroupConfig.DefaultsKey.selectedServerURL)
+        sharedDefaults?.set(authMode.rawValue, forKey: AppGroupConfig.DefaultsKey.selectedServerAuthMode)
+        defaults.set(authMode.rawValue, forKey: AppGroupConfig.DefaultsKey.selectedServerAuthMode)
         shouldShowServerSetup = false
         logger.log(
             "server_connection_saved",
@@ -162,7 +159,7 @@ final class AppModel: ObservableObject {
             )
             return false
         }
-        let serverKey = Self.serverCredentialKey(for: selectedServerURL)
+        let serverKey = ServerConnectionSettings.serverCredentialKey(for: selectedServerURL)
         guard persistAuthSettings(
             mode: mode,
             basicCredentials: basicCredentials,
@@ -179,8 +176,8 @@ final class AppModel: ObservableObject {
         }
 
         selectedServerAuthMode = mode
-        sharedDefaults?.set(mode.rawValue, forKey: Self.selectedServerAuthModeKey)
-        defaults.set(mode.rawValue, forKey: Self.selectedServerAuthModeKey)
+        sharedDefaults?.set(mode.rawValue, forKey: AppGroupConfig.DefaultsKey.selectedServerAuthMode)
+        defaults.set(mode.rawValue, forKey: AppGroupConfig.DefaultsKey.selectedServerAuthMode)
         logger.log(
             "server_auth_updated",
             details: [
@@ -297,12 +294,12 @@ final class AppModel: ObservableObject {
         try? HyperlinkStore.openShared().clearAll()
         try? HyperlinkOfflineStore.openShared().clearAll()
         if let selectedServerURL {
-            _ = credentialsStore.deleteCredentials(for: Self.serverCredentialKey(for: selectedServerURL))
+            _ = credentialsStore.deleteCredentials(for: ServerConnectionSettings.serverCredentialKey(for: selectedServerURL))
         }
-        sharedDefaults?.removeObject(forKey: Self.selectedServerURLKey)
-        sharedDefaults?.removeObject(forKey: Self.selectedServerAuthModeKey)
-        defaults.removeObject(forKey: Self.selectedServerURLKey)
-        defaults.removeObject(forKey: Self.selectedServerAuthModeKey)
+        sharedDefaults?.removeObject(forKey: AppGroupConfig.DefaultsKey.selectedServerURL)
+        sharedDefaults?.removeObject(forKey: AppGroupConfig.DefaultsKey.selectedServerAuthMode)
+        defaults.removeObject(forKey: AppGroupConfig.DefaultsKey.selectedServerURL)
+        defaults.removeObject(forKey: AppGroupConfig.DefaultsKey.selectedServerAuthMode)
         selectedServerURL = nil
         selectedServerAuthMode = .none
         shouldShowServerSetup = true
@@ -337,42 +334,4 @@ final class AppModel: ObservableObject {
         }
     }
 
-    static func serverCredentialKey(for url: URL) -> String {
-        guard let normalized = normalizedServerURL(from: url.absoluteString) else {
-            return url.absoluteString.lowercased()
-        }
-        return normalized.absoluteString.lowercased()
-    }
-
-    static func normalizedServerURL(from rawValue: String) -> URL? {
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return nil
-        }
-
-        let candidate = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
-        guard var components = URLComponents(string: candidate),
-              let scheme = components.scheme?.lowercased(),
-              (scheme == "http" || scheme == "https"),
-              let host = components.host,
-              !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-
-        components.user = nil
-        components.password = nil
-        components.path = ""
-        components.query = nil
-        components.fragment = nil
-
-        guard let url = components.url else {
-            return nil
-        }
-
-        let absolute = url.absoluteString
-        if absolute.hasSuffix("/") {
-            return URL(string: String(absolute.dropLast()))
-        }
-        return url
-    }
 }

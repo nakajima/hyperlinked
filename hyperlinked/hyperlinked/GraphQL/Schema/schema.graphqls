@@ -418,6 +418,7 @@ scalar Json
 
 type Mutation {
 	_ping: String
+	setReadabilityProgress(hyperlinkId: Int!, progress: Float!): ReadabilityProgress!
 }
 
 input OffsetInput {
@@ -458,6 +459,7 @@ input PaginationInput @oneOf {
 type Query {
 	hyperlinks(filters: HyperlinkFilterInput, orderBy: HyperlinkOrderInput, pagination: PaginationInput, q: String): HyperlinkConnection!
 	updatedHyperlinks(updatedAt: String!): UpdatedHyperlinksPayload!
+	readabilityProgress(hyperlinkId: Int!): ReadabilityProgress
 	hyperlinkProcessingJob(filters: HyperlinkProcessingJobFilterInput, having: HyperlinkProcessingJobHavingInput, orderBy: HyperlinkProcessingJobOrderInput, pagination: PaginationInput): HyperlinkProcessingJobConnection!
 	hyperlinkArtifact(filters: HyperlinkArtifactFilterInput, having: HyperlinkArtifactHavingInput, orderBy: HyperlinkArtifactOrderInput, pagination: PaginationInput): HyperlinkArtifactConnection!
 	_sea_orm_entity_metadata(table_name: String!): Table!
@@ -513,6 +515,12 @@ input TextFilterInput {
 	is_null: Boolean
 	between: [String!]
 	not_between: [String!]
+}
+
+type ReadabilityProgress {
+	hyperlinkId: Int!
+	progress: Float!
+	updatedAt: String!
 }
 
 type UpdatedHyperlinkChange {
